@@ -35,7 +35,7 @@ const DEFAULT_MAIN_CONFIG: AppConfig = {
     providers: './providers.toml',
     pricing: './pricing.toml',
     system_prompt: './system-prompt.toml',
-    db: './data.db',
+    sessions: './sessions',
   },
   defaults: {
     provider: 'deepseek',
@@ -268,8 +268,8 @@ export class ConfigManager {
     return this.configDir;
   }
 
-  /** 获取数据库文件完整路径 */
-  getDbPath(): string {
-    return this.resolvePath(this.resolved?.paths.db ?? 'data.db');
+  /** 获取会话存储目录完整路径 */
+  getSessionsDir(): string {
+    return this.resolvePath(this.resolved?.paths.sessions ?? 'sessions');
   }
 }

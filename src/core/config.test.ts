@@ -140,13 +140,13 @@ describe('ConfigManager', () => {
     });
   });
 
-  describe('getDbPath()', () => {
-    it('返回数据库文件完整路径', async () => {
+  describe('getSessionsDir()', () => {
+    it('返回会话目录完整路径', async () => {
       const mgr = ConfigManager.getInstance(testDir);
       await mgr.load();
-      const dbPath = mgr.getDbPath();
-      expect(dbPath).toContain('data.db');
-      expect(dbPath).toContain(testDir);
+      const dir = mgr.getSessionsDir();
+      expect(dir).toContain('sessions');
+      expect(dir).toContain(testDir);
     });
   });
 });

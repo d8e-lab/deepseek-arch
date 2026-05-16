@@ -1,21 +1,19 @@
 /**
- * Storage — SQLite 持久层（Repository 模式）
+ * Storage — 文件系统持久层（Repository 模式）
  *
- * 职责：
- *   1. 管理 SQLite 数据库连接（WAL 模式、外键约束）
- *   2. sessions 表 CRUD
- *   3. messages 表 CRUD（含 reasoning_content）
- *   4. token_usage 表 CRUD
+ * 目录结构：
+ *   <sessionsDir>/
+ *   └── <session-id>/
+ *       ├── meta.json        # 会话元数据
+ *       ├── turn-001.json    # 第 1 轮对话
+ *       ├── turn-002.json    # 第 2 轮对话
+ *       └── ...
  *
- * 用法：
- *   const store = new Storage(dbPath);
- *   store.initialize();
- *   const session = store.createSession('我的对话');
- *   store.close();
+ * 每轮对话一个 JSON 文件，独立管理，避免长上下文下数据库膨胀。
  */
 
-import Database from 'better-sqlite3';
-import type { Statement } from 'better-sqlite3';
+import { readFile, writeFile, mkdir, readdir, rm, access } from 'node:fs/promises';
+import { join } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 
 import type {
@@ -23,283 +21,262 @@ import type {
   Session,
   SessionListItem,
   Message,
-  MessageRecord,
+  TurnRecord,
   TokenUsage,
-  TokenUsageRecord,
 } from './types.js';
 
-// ─── Schema ──────────────────────────────────────────
+// ─── 文件模板 ────────────────────────────────────────
 
-const SCHEMA = `
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
+/** turn 文件填充位数 */
+const TURN_PAD = 3;
 
-CREATE TABLE IF NOT EXISTS sessions (
-  id          TEXT PRIMARY KEY,
-  title       TEXT NOT NULL DEFAULT '',
-  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
+function turnFileName(turn: number): string {
+  return `turn-${String(turn).padStart(TURN_PAD, '0')}.json`;
+}
 
-CREATE TABLE IF NOT EXISTS messages (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  role              TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant')),
-  content           TEXT NOT NULL,
-  reasoning_content TEXT,
-  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS token_usage (
-  id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-  message_id              INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-  prompt_tokens           INTEGER NOT NULL DEFAULT 0,
-  completion_tokens       INTEGER NOT NULL DEFAULT 0,
-  total_tokens            INTEGER NOT NULL DEFAULT 0,
-  prompt_cache_hit_tokens INTEGER DEFAULT 0,
-  prompt_cache_miss_tokens INTEGER DEFAULT 0,
-  cost_rmb                REAL NOT NULL DEFAULT 0,
-  created_at              TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-CREATE INDEX IF NOT EXISTS idx_token_usage_message ON token_usage(message_id);
-`;
+function metaFileName(): string {
+  return 'meta.json';
+}
 
 // ─── Storage 类 ──────────────────────────────────────
 
 export class Storage {
-  private db: Database.Database;
-  private initialized = false;
+  private sessionsDir: string;
 
-  // Prepared statements — sessions
-  private stmtInsertSession!: Statement<[string, string]>;
-  private stmtGetSessionMeta!: Statement<[string]>;
-  private stmtListSessions!: Statement;
-  private stmtUpdateSessionTitle!: Statement<[string, string]>;
-  private stmtDeleteSession!: Statement<[string]>;
-
-  // Prepared statements — messages
-  private stmtInsertMessage!: Statement<[string, string, string, string | null]>;
-  private stmtGetMessages!: Statement<[string]>;
-  private stmtGetLastMessageId!: Statement<[string]>;
-
-  // Prepared statements — token_usage
-  private stmtInsertTokenUsage!: Statement<[number, number, number, number, number, number, number]>;
-  private stmtGetTokenUsagesBySession!: Statement<[string]>;
-  private stmtGetTotalCost!: Statement<[string]>;
-
-  constructor(dbPath: string) {
-    this.db = new Database(dbPath);
+  constructor(sessionsDir: string) {
+    this.sessionsDir = sessionsDir;
   }
 
-  /** 初始化数据库：建表 + 准备语句 */
-  initialize(): void {
-    if (this.initialized) return;
-
-    this.db.exec(SCHEMA);
-    this.prepareStatements();
-    this.initialized = true;
+  /** 确保会话根目录存在 */
+  private async ensureSessionsDir(): Promise<void> {
+    try {
+      await access(this.sessionsDir);
+    } catch {
+      await mkdir(this.sessionsDir, { recursive: true, mode: 0o700 });
+    }
   }
 
-  /** 编译 prepared statements */
-  private prepareStatements(): void {
-    // sessions
-    this.stmtInsertSession = this.db.prepare(`
-      INSERT INTO sessions (id, title) VALUES (?, ?)
-    `);
-    this.stmtGetSessionMeta = this.db.prepare(`
-      SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?
-    `);
-    this.stmtListSessions = this.db.prepare(`
-      SELECT s.id, s.title, s.updated_at,
-             (SELECT COUNT(*) FROM messages WHERE session_id = s.id) AS message_count
-      FROM sessions s
-      ORDER BY s.updated_at DESC
-    `);
-    this.stmtUpdateSessionTitle = this.db.prepare(`
-      UPDATE sessions SET title = ?, updated_at = datetime('now') WHERE id = ?
-    `);
-    this.stmtDeleteSession = this.db.prepare(`
-      DELETE FROM sessions WHERE id = ?
-    `);
-
-    // messages
-    this.stmtInsertMessage = this.db.prepare(`
-      INSERT INTO messages (session_id, role, content, reasoning_content)
-      VALUES (?, ?, ?, ?)
-    `);
-    this.stmtGetMessages = this.db.prepare(`
-      SELECT id, session_id, role, content, reasoning_content, created_at
-      FROM messages
-      WHERE session_id = ?
-      ORDER BY id ASC
-    `);
-    this.stmtGetLastMessageId = this.db.prepare(`
-      SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1
-    `);
-
-    // token_usage
-    this.stmtInsertTokenUsage = this.db.prepare(`
-      INSERT INTO token_usage
-        (message_id, prompt_tokens, completion_tokens, total_tokens,
-         prompt_cache_hit_tokens, prompt_cache_miss_tokens, cost_rmb)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    this.stmtGetTokenUsagesBySession = this.db.prepare(`
-      SELECT tu.* FROM token_usage tu
-      JOIN messages m ON tu.message_id = m.id
-      WHERE m.session_id = ?
-      ORDER BY tu.id ASC
-    `);
-    this.stmtGetTotalCost = this.db.prepare(`
-      SELECT COALESCE(SUM(tu.cost_rmb), 0) AS total
-      FROM token_usage tu
-      JOIN messages m ON tu.message_id = m.id
-      WHERE m.session_id = ?
-    `);
+  /** 获取会话目录路径 */
+  private sessionDir(id: string): string {
+    return join(this.sessionsDir, id);
   }
 
-  /** 关闭数据库连接 */
-  close(): void {
-    this.db.close();
+  /** 获取 meta 文件路径 */
+  private metaPath(id: string): string {
+    return join(this.sessionDir(id), metaFileName());
+  }
+
+  /** 获取 turn 文件路径 */
+  private turnPath(id: string, turn: number): string {
+    return join(this.sessionDir(id), turnFileName(turn));
+  }
+
+  /** 读取 JSON 文件 */
+  private async readJSON<T>(path: string): Promise<T | null> {
+    try {
+      const raw = await readFile(path, 'utf-8');
+      return JSON.parse(raw) as T;
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  /** 写入 JSON 文件 */
+  private async writeJSON(path: string, data: unknown): Promise<void> {
+    const content = JSON.stringify(data, null, 2) + '\n';
+    await writeFile(path, content, { mode: 0o600 });
   }
 
   // ─── Sessions ───────────────────────────────────
 
-  /** 创建新会话，返回元数据 */
-  createSession(title = ''): SessionMeta {
-    const id = uuidv4();
-    this.stmtInsertSession.run(id, title);
+  /** 创建新会话 */
+  async createSession(title = ''): Promise<SessionMeta> {
+    await this.ensureSessionsDir();
 
-    return this.stmtGetSessionMeta.get(id) as SessionMeta;
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const meta: SessionMeta = {
+      id,
+      title,
+      created_at: now,
+      updated_at: now,
+      turnCount: 0,
+      totalCost: 0,
+    };
+
+    const dir = this.sessionDir(id);
+    await mkdir(dir, { mode: 0o700 });
+    await this.writeJSON(this.metaPath(id), meta);
+
+    return meta;
   }
 
-  /** 按 ID 获取完整会话（含消息 + token 记录） */
-  getSession(id: string): Session | null {
-    const meta = this.stmtGetSessionMeta.get(id) as SessionMeta | undefined;
+  /** 按 ID 获取完整会话 */
+  async getSession(id: string): Promise<Session | null> {
+    const meta = await this.readJSON<SessionMeta>(this.metaPath(id));
     if (!meta) return null;
 
-    const messages = this.stmtGetMessages.all(id) as MessageRecord[];
-    const tokenUsages = this.stmtGetTokenUsagesBySession.all(id) as TokenUsageRecord[];
+    const turns = await this.loadTurns(id);
 
-    return { meta, messages, tokenUsages };
+    // 同步元数据中的计数字段
+    if (meta.turnCount !== turns.length) {
+      meta.turnCount = turns.length;
+      meta.totalCost = turns.reduce((sum, t) => sum + t.cost_rmb, 0);
+    }
+
+    return { meta, turns };
   }
 
   /** 按标题精确匹配会话 */
-  getSessionByName(name: string): Session | null {
-    const row = this.db
-      .prepare('SELECT id FROM sessions WHERE title = ?')
-      .get(name) as { id: string } | undefined;
-    if (!row) return null;
-    return this.getSession(row.id);
+  async getSessionByName(name: string): Promise<Session | null> {
+    await this.ensureSessionsDir();
+    const entries = await readdir(this.sessionsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const meta = await this.readJSON<SessionMeta>(this.metaPath(entry.name));
+      if (meta?.title === name) {
+        return this.getSession(entry.name);
+      }
+    }
+    return null;
   }
 
-  /** 列出所有会话（用于 resume 列表） */
-  listSessions(): SessionListItem[] {
-    const rows = this.stmtListSessions.all() as Array<{
-      id: string;
-      title: string;
-      updated_at: string;
-      message_count: number;
-    }>;
-    return rows.map((row, i) => ({
-      index: i + 1,
-      id: row.id,
-      title: row.title,
-      updated_at: row.updated_at,
-      messageCount: row.message_count,
-    }));
+  /** 列出所有会话 */
+  async listSessions(): Promise<SessionListItem[]> {
+    await this.ensureSessionsDir();
+    const entries = await readdir(this.sessionsDir, { withFileTypes: true });
+
+    const items: SessionListItem[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const meta = await this.readJSON<SessionMeta>(this.metaPath(entry.name));
+      if (!meta) continue;
+      items.push({
+        index: 0, // 后面赋值
+        id: meta.id,
+        title: meta.title,
+        updated_at: meta.updated_at,
+        turnCount: meta.turnCount,
+      });
+    }
+
+    // 按更新时间降序
+    items.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    items.forEach((item, i) => (item.index = i + 1));
+
+    return items;
   }
 
   /** 更新会话标题 */
-  updateSessionTitle(id: string, title: string): boolean {
-    const result = this.stmtUpdateSessionTitle.run(title, id);
-    return result.changes > 0;
+  async updateSessionTitle(id: string, title: string): Promise<boolean> {
+    const meta = await this.readJSON<SessionMeta>(this.metaPath(id));
+    if (!meta) return false;
+
+    meta.title = title;
+    meta.updated_at = new Date().toISOString();
+    await this.writeJSON(this.metaPath(id), meta);
+    return true;
   }
 
-  /** 删除会话（级联删除 messages + token_usage） */
-  deleteSession(id: string): boolean {
-    const result = this.stmtDeleteSession.run(id);
-    return result.changes > 0;
+  /** 更新会话元数据（内部用） */
+  private async updateMeta(id: string, patch: Partial<SessionMeta>): Promise<void> {
+    const meta = await this.readJSON<SessionMeta>(this.metaPath(id));
+    if (!meta) throw new Error(`会话不存在: ${id}`);
+    Object.assign(meta, patch);
+    meta.updated_at = new Date().toISOString();
+    await this.writeJSON(this.metaPath(id), meta);
   }
 
-  // ─── Messages ───────────────────────────────────
-
-  /** 保存一条消息，返回含数据库元数据的记录 */
-  saveMessage(sessionId: string, message: Message): MessageRecord {
-    // 更新会话的 updated_at
-    this.db
-      .prepare(`UPDATE sessions SET updated_at = datetime('now') WHERE id = ?`)
-      .run(sessionId);
-
-    const result = this.stmtInsertMessage.run(
-      sessionId,
-      message.role,
-      message.content,
-      message.reasoning_content ?? null,
-    );
-
-    return {
-      id: Number(result.lastInsertRowid),
-      session_id: sessionId,
-      role: message.role,
-      content: message.content,
-      reasoning_content: message.reasoning_content,
-      created_at: new Date().toISOString(),
-    };
+  /** 删除会话目录 */
+  async deleteSession(id: string): Promise<boolean> {
+    const dir = this.sessionDir(id);
+    try {
+      await access(dir);
+    } catch {
+      return false;
+    }
+    await rm(dir, { recursive: true, force: true });
+    return true;
   }
 
-  /** 获取会话的所有消息（按时间排序） */
-  getMessages(sessionId: string): MessageRecord[] {
-    return this.stmtGetMessages.all(sessionId) as MessageRecord[];
-  }
+  // ─── Turns ───────────────────────────────────────
 
-  /** 获取会话最后一条 assistant 消息的 ID（用于关联 token_usage） */
-  getLastAssistantMessageId(sessionId: string): number | null {
-    const row = this.db
-      .prepare(
-        `SELECT id FROM messages WHERE session_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1`,
-      )
-      .get(sessionId) as { id: number } | undefined;
-    return row?.id ?? null;
-  }
+  /** 保存一轮对话 */
+  async saveTurn(
+    sessionId: string,
+    userMessage: Message,
+    assistantMessage: Message & { id: string },
+    usage: TokenUsage,
+    costRmb: number,
+  ): Promise<TurnRecord> {
+    // 确保会话目录存在
+    try {
+      await access(this.sessionDir(sessionId));
+    } catch {
+      throw new Error(`会话不存在: ${sessionId}`);
+    }
 
-  // ─── Token Usage ────────────────────────────────
+    // 读取现有轮次确定序号
+    const existingTurns = await this.loadTurns(sessionId);
+    const turnNumber = existingTurns.length + 1;
 
-  /** 记录 token 用量 */
-  saveTokenUsage(messageId: number, usage: TokenUsage, costRmb: number): TokenUsageRecord {
-    const result = this.stmtInsertTokenUsage.run(
-      messageId,
-      usage.prompt_tokens,
-      usage.completion_tokens,
-      usage.total_tokens,
-      usage.prompt_cache_hit_tokens ?? 0,
-      usage.prompt_cache_miss_tokens ?? 0,
-      costRmb,
-    );
-
-    return {
-      id: Number(result.lastInsertRowid),
-      message_id: messageId,
-      prompt_tokens: usage.prompt_tokens,
-      completion_tokens: usage.completion_tokens,
-      total_tokens: usage.total_tokens,
-      prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens ?? 0,
-      prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens ?? 0,
+    const turn: TurnRecord = {
+      turn: turnNumber,
+      user: userMessage,
+      assistant: {
+        id: assistantMessage.id,
+        role: 'assistant',
+        content: assistantMessage.content,
+        reasoning_content: assistantMessage.reasoning_content,
+      },
+      usage,
       cost_rmb: costRmb,
       created_at: new Date().toISOString(),
     };
+
+    await this.writeJSON(this.turnPath(sessionId, turnNumber), turn);
+
+    // 更新元数据
+    const totalCost = existingTurns.reduce((sum, t) => sum + t.cost_rmb, 0) + costRmb;
+    await this.updateMeta(sessionId, {
+      turnCount: turnNumber,
+      totalCost,
+    });
+
+    return turn;
   }
 
-  /** 获取会话的所有 token 记录 */
-  getTokenUsagesBySession(sessionId: string): TokenUsageRecord[] {
-    return this.stmtGetTokenUsagesBySession.all(sessionId) as TokenUsageRecord[];
+  /** 加载会话的所有轮次 */
+  async getTurns(sessionId: string): Promise<TurnRecord[]> {
+    return this.loadTurns(sessionId);
+  }
+
+  /** 内部：从文件加载轮次 */
+  private async loadTurns(sessionId: string): Promise<TurnRecord[]> {
+    try {
+      const entries = await readdir(this.sessionDir(sessionId));
+      const turnFiles = entries
+        .filter((f) => f.startsWith('turn-') && f.endsWith('.json'))
+        .sort(); // 文件名字母序即轮次顺序
+
+      const turns: TurnRecord[] = [];
+      for (const file of turnFiles) {
+        const turn = await this.readJSON<TurnRecord>(
+          join(this.sessionDir(sessionId), file),
+        );
+        if (turn) turns.push(turn);
+      }
+      return turns;
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') return [];
+      throw err;
+    }
   }
 
   /** 获取会话累计费用 */
-  getTotalCost(sessionId: string): number {
-    const row = this.stmtGetTotalCost.get(sessionId) as { total: number };
-    return row.total;
+  async getTotalCost(sessionId: string): Promise<number> {
+    const meta = await this.readJSON<SessionMeta>(this.metaPath(sessionId));
+    return meta?.totalCost ?? 0;
   }
 }

@@ -25,15 +25,12 @@
   "author": "helcksun",
   "license": "MIT",
   "dependencies": {
-    "better-sqlite3": "^12.10.0",
     "chalk": "^5.6.2",
     "commander": "^14.0.3",
     "smol-toml": "^1.6.1",
-    "toml": "^4.1.1",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.8.0",
     "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^4.1.6",

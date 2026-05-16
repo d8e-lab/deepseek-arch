@@ -23,13 +23,6 @@ export interface Message {
   reasoning_content?: string;
 }
 
-/** 持久化消息（含数据库元数据） */
-export interface MessageRecord extends Message {
-  id: number;
-  session_id: string;
-  created_at: string; // ISO 8601
-}
-
 // ─── Token 用量与费用 ────────────────────────────────
 
 /** DeepSeek API 返回的 usage 段 */
@@ -41,14 +34,6 @@ export interface TokenUsage {
   prompt_cache_hit_tokens?: number;
   /** 缓存未命中 token 数 */
   prompt_cache_miss_tokens?: number;
-}
-
-/** 持久化 token 用量记录 */
-export interface TokenUsageRecord extends TokenUsage {
-  id: number;
-  message_id: number;
-  cost_rmb: number;
-  created_at: string;
 }
 
 /** 费用计算结果 */
@@ -69,19 +54,38 @@ export interface CostBreakdown {
 
 // ─── 会话 ────────────────────────────────────────────
 
+/** 一轮对话（user + assistant + usage + cost） */
+export interface TurnRecord {
+  /** 轮次序号（从 1 开始） */
+  turn: number;
+  /** 用户消息 */
+  user: Message;
+  /** 助手回复 */
+  assistant: {
+    /** API 返回的 response id */
+    id: string;
+    role: 'assistant';
+    content: string;
+    reasoning_content?: string;
+  };
+  /** Token 用量 */
+  usage: TokenUsage;
+  /** 本轮费用 (CNY) */
+  cost_rmb: number;
+  /** 创建时间 */
+  created_at: string;
+}
+
 /** 会话元数据（不含消息体） */
 export interface SessionMeta {
   id: string;
   title: string;
   created_at: string;
   updated_at: string;
-}
-
-/** 完整会话（含消息记录 + token 记录） */
-export interface Session {
-  meta: SessionMeta;
-  messages: MessageRecord[];
-  tokenUsages: TokenUsageRecord[];
+  /** 轮次数 */
+  turnCount: number;
+  /** 累计费用 (CNY) */
+  totalCost: number;
 }
 
 /** 会话列表项（用于 resume 列表展示） */
@@ -90,8 +94,18 @@ export interface SessionListItem {
   id: string;
   title: string;
   updated_at: string;
-  messageCount: number;
+  turnCount: number;
 }
+
+/** 完整会话（含所有轮次） */
+export interface Session {
+  meta: SessionMeta;
+  turns: TurnRecord[];
+  systemPrompt?: string;
+}
+
+/** 加载会话时使用的会话数据 */
+export type SessionData = Session;
 
 // ─── 配置 ────────────────────────────────────────────
 
@@ -127,7 +141,8 @@ export interface ConfigPaths {
   providers: string;
   pricing: string;
   system_prompt: string;
-  db: string;
+  /** 会话存储目录（相对于配置目录） */
+  sessions: string;
 }
 
 /** 默认配置 */

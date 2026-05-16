@@ -1,363 +1,272 @@
 /**
- * Storage 单元测试
+ * Storage 单元测试（文件系统）
  *
- * 使用内存数据库 (:memory:) 隔离测试，不依赖文件系统。
+ * 使用临时目录隔离测试，无外部依赖。
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Storage } from './storage.js';
 import type { Message, TokenUsage } from './types.js';
 
-/** 辅助：创建已初始化的 Storage（内存数据库） */
-function createStore(): Storage {
-  const store = new Storage(':memory:');
-  store.initialize();
-  return store;
+/** 创建已初始化的 Storage（临时目录） */
+async function createStore(): Promise<Storage> {
+  const dir = await mkdtemp(join(tmpdir(), 'deepseek-storage-test-'));
+  return new Storage(dir);
 }
 
-/** 辅助：创建一条 session + 一条 user 消息，返回 { store, sessionId } */
-function setupSession(store: Storage, title = '测试会话') {
-  const session = store.createSession(title);
-  return { sessionId: session.id, session };
+/** 创建一条 session */
+async function setupSession(store: Storage, title = '测试会话') {
+  const meta = await store.createSession(title);
+  return { sessionId: meta.id, meta };
 }
 
-describe('Storage', () => {
+/** 保存一轮对话的快捷方法 */
+async function saveTurn(
+  store: Storage,
+  sessionId: string,
+  userContent: string,
+  assistantContent: string,
+  reasoning?: string,
+  usageOverrides?: Partial<TokenUsage>,
+) {
+  const userMsg: Message = { role: 'user', content: userContent };
+  const assistantMsg: Message & { id: string } = {
+    id: `chatcmpl-${Math.random().toString(36).slice(2, 10)}`,
+    role: 'assistant',
+    content: assistantContent,
+    reasoning_content: reasoning,
+  };
+  const usage: TokenUsage = {
+    prompt_tokens: 100,
+    completion_tokens: 50,
+    total_tokens: 150,
+    prompt_cache_hit_tokens: 80,
+    prompt_cache_miss_tokens: 20,
+    ...usageOverrides,
+  };
+  return store.saveTurn(sessionId, userMsg, assistantMsg, usage, 0.0015);
+}
+
+describe('Storage (文件系统)', () => {
   let store: Storage;
+  let testDir: string;
 
-  afterEach(() => {
-    store?.close();
+  beforeEach(async () => {
+    testDir = await mkdtemp(join(tmpdir(), 'deepseek-storage-test-'));
+    store = new Storage(testDir);
   });
 
-  describe('初始化', () => {
-    it('initialize() 幂等，多次调用不报错', () => {
-      store = new Storage(':memory:');
-      store.initialize();
-      store.initialize(); // 第二次调用不应抛异常
-      // 能正常操作即验证成功
-      const s = store.createSession('test');
-      expect(s.id).toBeTruthy();
-    });
-
-    it('WAL 模式在文件数据库中启用', async () => {
-      // :memory: 数据库不支持 WAL，改用临时文件验证
-      const { mkdtemp, rm } = await import('node:fs/promises');
-      const { join } = await import('node:path');
-      const { tmpdir } = await import('node:os');
-      const tmpDir = await mkdtemp(join(tmpdir(), 'deepseek-test-wal-'));
-      try {
-        const fileStore = new Storage(join(tmpDir, 'test.db'));
-        fileStore.initialize();
-        const row = (fileStore as any).db.pragma('journal_mode');
-        expect(row[0].journal_mode).toBe('wal');
-        fileStore.close();
-      } finally {
-        await rm(tmpDir, { recursive: true, force: true });
-      }
-    });
-
-    it('外键约束已启用', () => {
-      store = createStore();
-      const row = (store as any).db.pragma('foreign_keys');
-      expect(row[0].foreign_keys).toBe(1);
-    });
+  afterEach(async () => {
+    await rm(testDir, { recursive: true, force: true });
   });
 
   describe('Sessions CRUD', () => {
-    beforeEach(() => {
-      store = createStore();
-    });
-
-    it('createSession() 创建会话并返回元数据', () => {
-      const meta = store.createSession('我的对话');
-      expect(meta.id).toMatch(/^[a-f0-9-]{36}$/); // UUID v4
+    it('createSession() 创建会话目录和 meta.json', async () => {
+      const meta = await store.createSession('我的对话');
+      expect(meta.id).toMatch(/^[a-f0-9-]{36}$/);
       expect(meta.title).toBe('我的对话');
+      expect(meta.turnCount).toBe(0);
+      expect(meta.totalCost).toBe(0);
       expect(meta.created_at).toBeTruthy();
-      expect(meta.updated_at).toBeTruthy();
     });
 
-    it('createSession() 默认标题为空字符串', () => {
-      const meta = store.createSession();
+    it('createSession() 默认标题为空', async () => {
+      const meta = await store.createSession();
       expect(meta.title).toBe('');
     });
 
-    it('getSession() 返回完整会话', () => {
-      const { sessionId } = setupSession(store, '完整会话');
+    it('getSession() 返回完整会话', async () => {
+      const { sessionId } = await setupSession(store, '完整会话');
+      await saveTurn(store, sessionId, '你好', '你好！');
 
-      const msg: Message = { role: 'user', content: '你好' };
-      store.saveMessage(sessionId, msg);
-
-      const session = store.getSession(sessionId);
+      const session = await store.getSession(sessionId);
       expect(session).not.toBeNull();
       expect(session!.meta.title).toBe('完整会话');
-      expect(session!.messages).toHaveLength(1);
-      expect(session!.messages[0].content).toBe('你好');
+      expect(session!.turns).toHaveLength(1);
+      expect(session!.turns[0].user.content).toBe('你好');
+      expect(session!.turns[0].assistant.content).toBe('你好！');
+      expect(session!.meta.turnCount).toBe(1);
     });
 
-    it('getSession() 不存在的 ID 返回 null', () => {
-      const session = store.getSession('non-existent-id');
-      expect(session).toBeNull();
+    it('getSession() 不存在的 ID 返回 null', async () => {
+      expect(await store.getSession('nonexistent')).toBeNull();
     });
 
-    it('getSessionByName() 精确匹配标题', () => {
-      setupSession(store, 'Python 性能优化');
-      setupSession(store, 'Rust 内存模型');
+    it('getSessionByName() 精确匹配标题', async () => {
+      await setupSession(store, 'Python 优化');
+      await setupSession(store, 'Rust 内存');
 
-      const session = store.getSessionByName('Rust 内存模型');
+      const session = await store.getSessionByName('Rust 内存');
       expect(session).not.toBeNull();
-      expect(session!.meta.title).toBe('Rust 内存模型');
+      expect(session!.meta.title).toBe('Rust 内存');
     });
 
-    it('getSessionByName() 无匹配返回 null', () => {
-      expect(store.getSessionByName('不存在的标题')).toBeNull();
+    it('getSessionByName() 无匹配返回 null', async () => {
+      expect(await store.getSessionByName('不存在')).toBeNull();
     });
 
-    it('listSessions() 按更新时间降序排列', () => {
-      const s1 = setupSession(store, '会话 A');
-      const s2 = setupSession(store, '会话 B');
+    it('listSessions() 按更新时间降序', async () => {
+      const s1 = await setupSession(store, '会话 A');
+      const s2 = await setupSession(store, '会话 B');
 
-      // 在会话 A 中插入消息以更新其 updated_at
-      store.saveMessage(s1.sessionId, { role: 'user', content: 'test' });
+      // 在 A 中保存一轮以更新 updated_at
+      await saveTurn(store, s1.sessionId, 'hi', 'hello');
 
-      const list = store.listSessions();
+      const list = await store.listSessions();
       expect(list).toHaveLength(2);
-      // 会话 A 最近更新，应排第一
       expect(list[0].title).toBe('会话 A');
-      expect(list[0].messageCount).toBe(1);
-      expect(list[1].title).toBe('会话 B');
+      expect(list[0].turnCount).toBe(1);
       expect(list[0].index).toBe(1);
+      expect(list[1].title).toBe('会话 B');
       expect(list[1].index).toBe(2);
     });
 
-    it('updateSessionTitle() 更新标题并返回 true', () => {
-      const { sessionId } = setupSession(store, '旧标题');
-      const result = store.updateSessionTitle(sessionId, '新标题');
-      expect(result).toBe(true);
+    it('updateSessionTitle() 更新标题', async () => {
+      const { sessionId } = await setupSession(store, '旧标题');
+      const ok = await store.updateSessionTitle(sessionId, '新标题');
+      expect(ok).toBe(true);
 
-      const session = store.getSession(sessionId);
+      const session = await store.getSession(sessionId);
       expect(session!.meta.title).toBe('新标题');
     });
 
-    it('updateSessionTitle() 对不存在的 ID 返回 false', () => {
-      expect(store.updateSessionTitle('bad-id', 'x')).toBe(false);
+    it('updateSessionTitle() 不存在返回 false', async () => {
+      expect(await store.updateSessionTitle('bad-id', 'x')).toBe(false);
     });
 
-    it('deleteSession() 删除并级联删除消息', () => {
-      const { sessionId } = setupSession(store, '待删除');
-      store.saveMessage(sessionId, { role: 'user', content: 'test' });
-
-      const result = store.deleteSession(sessionId);
-      expect(result).toBe(true);
-      expect(store.getSession(sessionId)).toBeNull();
-      expect(store.listSessions()).toHaveLength(0);
+    it('deleteSession() 删除目录', async () => {
+      const { sessionId } = await setupSession(store, '待删除');
+      const ok = await store.deleteSession(sessionId);
+      expect(ok).toBe(true);
+      expect(await store.getSession(sessionId)).toBeNull();
     });
 
-    it('deleteSession() 不存在的 ID 返回 false', () => {
-      expect(store.deleteSession('bad-id')).toBe(false);
+    it('deleteSession() 不存在返回 false', async () => {
+      expect(await store.deleteSession('bad-id')).toBe(false);
     });
   });
 
-  describe('Messages CRUD', () => {
-    beforeEach(() => {
-      store = createStore();
+  describe('Turns CRUD', () => {
+    it('saveTurn() 保存轮次并返回记录', async () => {
+      const { sessionId } = await setupSession(store);
+      const turn = await saveTurn(store, sessionId, '你好', '你好！', '思考中...');
+
+      expect(turn.turn).toBe(1);
+      expect(turn.user.content).toBe('你好');
+      expect(turn.assistant.content).toBe('你好！');
+      expect(turn.assistant.reasoning_content).toBe('思考中...');
+      expect(turn.usage.prompt_cache_hit_tokens).toBe(80);
+      expect(turn.cost_rmb).toBe(0.0015);
+      expect(turn.assistant.id).toMatch(/^chatcmpl-/);
     });
 
-    it('saveMessage() 保存并返回数据库记录', () => {
-      const { sessionId } = setupSession(store);
-      const msg: Message = {
-        role: 'assistant',
-        content: '你好！有什么可以帮助你的？',
-        reasoning_content: '用户发来了问候，我应该友好地回应。',
-      };
+    it('saveTurn() 多轮序号递增', async () => {
+      const { sessionId } = await setupSession(store);
 
-      const record = store.saveMessage(sessionId, msg);
-      expect(record.id).toBeGreaterThan(0);
-      expect(record.session_id).toBe(sessionId);
-      expect(record.role).toBe('assistant');
-      expect(record.content).toBe('你好！有什么可以帮助你的？');
-      expect(record.reasoning_content).toBe('用户发来了问候，我应该友好地回应。');
-      expect(record.created_at).toBeTruthy();
+      const t1 = await saveTurn(store, sessionId, 'Q1', 'A1');
+      expect(t1.turn).toBe(1);
+
+      const t2 = await saveTurn(store, sessionId, 'Q2', 'A2');
+      expect(t2.turn).toBe(2);
+
+      const t3 = await saveTurn(store, sessionId, 'Q3', 'A3');
+      expect(t3.turn).toBe(3);
     });
 
-    it('saveMessage() 自动更新会话 updated_at', () => {
-      const { sessionId } = setupSession(store);
-      const before = store.getSession(sessionId)!.meta.updated_at;
+    it('saveTurn() 更新 meta 的 turnCount 和 totalCost', async () => {
+      const { sessionId } = await setupSession(store);
 
-      // 短暂等待确保时间戳变化
-      store.saveMessage(sessionId, { role: 'user', content: 'hello' });
+      await saveTurn(store, sessionId, 'Q1', 'A1');
+      await saveTurn(store, sessionId, 'Q2', 'A2');
 
-      const after = store.getSession(sessionId)!.meta.updated_at;
-      // SQLite 的 datetime('now') 精确到秒，可能相同；只验证不为空
-      expect(after).toBeTruthy();
+      const session = await store.getSession(sessionId);
+      expect(session!.meta.turnCount).toBe(2);
+      expect(session!.meta.totalCost).toBeCloseTo(0.003, 4);
     });
 
-    it('saveMessage() reasoning_content 可为 undefined', () => {
-      const { sessionId } = setupSession(store);
-      const msg: Message = { role: 'user', content: '无思考内容' };
+    it('getTurns() 返回所有轮次', async () => {
+      const { sessionId } = await setupSession(store);
 
-      const record = store.saveMessage(sessionId, msg);
-      expect(record.reasoning_content).toBeUndefined();
+      await saveTurn(store, sessionId, 'Q1', 'A1');
+      await saveTurn(store, sessionId, 'Q2', 'A2');
+
+      const turns = await store.getTurns(sessionId);
+      expect(turns).toHaveLength(2);
+      expect(turns[0].user.content).toBe('Q1');
+      expect(turns[1].user.content).toBe('Q2');
     });
 
-    it('getMessages() 按时间升序返回', () => {
-      const { sessionId } = setupSession(store);
-
-      store.saveMessage(sessionId, { role: 'system', content: 'system prompt' });
-      store.saveMessage(sessionId, { role: 'user', content: '第一条用户消息' });
-      store.saveMessage(sessionId, { role: 'assistant', content: '第一条回复' });
-
-      const messages = store.getMessages(sessionId);
-      expect(messages).toHaveLength(3);
-      expect(messages[0].role).toBe('system');
-      expect(messages[1].role).toBe('user');
-      expect(messages[2].role).toBe('assistant');
+    it('getTurns() 空会话返回空数组', async () => {
+      const { sessionId } = await setupSession(store);
+      expect(await store.getTurns(sessionId)).toHaveLength(0);
     });
 
-    it('getMessages() 空会话返回空数组', () => {
-      const { sessionId } = setupSession(store);
-      expect(store.getMessages(sessionId)).toHaveLength(0);
-    });
-
-    it('getLastAssistantMessageId() 返回最后一条 assistant 消息 ID', () => {
-      const { sessionId } = setupSession(store);
-
-      store.saveMessage(sessionId, { role: 'user', content: 'hi' });
-      store.saveMessage(sessionId, { role: 'assistant', content: 'hello' });
-
-      const id = store.getLastAssistantMessageId(sessionId);
-      expect(id).toBeGreaterThan(0);
-    });
-
-    it('getLastAssistantMessageId() 无 assistant 消息时返回 null', () => {
-      const { sessionId } = setupSession(store);
-      store.saveMessage(sessionId, { role: 'user', content: '只有用户消息' });
-      expect(store.getLastAssistantMessageId(sessionId)).toBeNull();
+    it('saveTurn() 保存 reasoning_content 为空时正常', async () => {
+      const { sessionId } = await setupSession(store);
+      const turn = await saveTurn(store, sessionId, 'hi', 'hello', undefined);
+      expect(turn.assistant.reasoning_content).toBeUndefined();
     });
   });
 
-  describe('Token Usage CRUD', () => {
-    beforeEach(() => {
-      store = createStore();
+  describe('费用统计', () => {
+    it('getTotalCost() 返回累计费用', async () => {
+      const { sessionId } = await setupSession(store);
+
+      await saveTurn(store, sessionId, 'Q1', 'A1');
+      await saveTurn(store, sessionId, 'Q2', 'A2');
+
+      const cost = await store.getTotalCost(sessionId);
+      expect(cost).toBeCloseTo(0.003, 4);
     });
 
-    it('saveTokenUsage() 记录用量并返回记录', () => {
-      const { sessionId } = setupSession(store);
-
-      // 先保存一条 assistant 消息
-      store.saveMessage(sessionId, { role: 'user', content: 'test' });
-      const msg = store.saveMessage(sessionId, { role: 'assistant', content: 'reply' });
-
-      const usage: TokenUsage = {
-        prompt_tokens: 100,
-        completion_tokens: 50,
-        total_tokens: 150,
-        prompt_cache_hit_tokens: 80,
-        prompt_cache_miss_tokens: 20,
-      };
-
-      const record = store.saveTokenUsage(msg.id, usage, 0.0015);
-      expect(record.id).toBeGreaterThan(0);
-      expect(record.message_id).toBe(msg.id);
-      expect(record.prompt_cache_hit_tokens).toBe(80);
-      expect(record.prompt_cache_miss_tokens).toBe(20);
-      expect(record.cost_rmb).toBe(0.0015);
-    });
-
-    it('saveTokenUsage() 缓存字段默认为 0', () => {
-      const { sessionId } = setupSession(store);
-      store.saveMessage(sessionId, { role: 'user', content: 'x' });
-      const msg = store.saveMessage(sessionId, { role: 'assistant', content: 'y' });
-
-      const usage: TokenUsage = {
-        prompt_tokens: 10,
-        completion_tokens: 5,
-        total_tokens: 15,
-      };
-
-      const record = store.saveTokenUsage(msg.id, usage, 0);
-      expect(record.prompt_cache_hit_tokens).toBe(0);
-      expect(record.prompt_cache_miss_tokens).toBe(0);
-    });
-
-    it('getTokenUsagesBySession() 返回会话所有 token 记录', () => {
-      const { sessionId } = setupSession(store);
-
-      // 第一轮
-      store.saveMessage(sessionId, { role: 'user', content: 'Q1' });
-      const a1 = store.saveMessage(sessionId, { role: 'assistant', content: 'A1' });
-      store.saveTokenUsage(a1.id, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }, 0.001);
-
-      // 第二轮
-      store.saveMessage(sessionId, { role: 'user', content: 'Q2' });
-      const a2 = store.saveMessage(sessionId, { role: 'assistant', content: 'A2' });
-      store.saveTokenUsage(a2.id, { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 }, 0.002);
-
-      const records = store.getTokenUsagesBySession(sessionId);
-      expect(records).toHaveLength(2);
-      expect(records[0].message_id).toBe(a1.id);
-      expect(records[1].message_id).toBe(a2.id);
-    });
-
-    it('getTotalCost() 返回累计费用', () => {
-      const { sessionId } = setupSession(store);
-
-      store.saveMessage(sessionId, { role: 'user', content: 'Q' });
-      const msg = store.saveMessage(sessionId, { role: 'assistant', content: 'A' });
-      store.saveTokenUsage(msg.id, { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 }, 0.0123);
-
-      const total = store.getTotalCost(sessionId);
-      expect(total).toBeCloseTo(0.0123, 4);
-    });
-
-    it('getTotalCost() 空会话返回 0', () => {
-      const { sessionId } = setupSession(store);
-      expect(store.getTotalCost(sessionId)).toBe(0);
+    it('getTotalCost() 空会话返回 0', async () => {
+      const { sessionId } = await setupSession(store);
+      expect(await store.getTotalCost(sessionId)).toBe(0);
     });
   });
 
   describe('边界情况', () => {
-    beforeEach(() => {
-      store = createStore();
-    });
+    it('大量轮次读写正常', async () => {
+      const { sessionId } = await setupSession(store, '大量轮次');
 
-    it('大量消息读写正常', () => {
-      const { sessionId } = setupSession(store, '大量消息');
-
-      for (let i = 0; i < 100; i++) {
-        store.saveMessage(sessionId, { role: 'user', content: `消息 ${i}` });
+      for (let i = 0; i < 50; i++) {
+        await saveTurn(store, sessionId, `消息 ${i}`, `回复 ${i}`);
       }
 
-      const messages = store.getMessages(sessionId);
-      expect(messages).toHaveLength(100);
+      const turns = await store.getTurns(sessionId);
+      expect(turns).toHaveLength(50);
+      expect(turns[49].turn).toBe(50);
     });
 
-    it('超长 content 正常存储', () => {
-      const { sessionId } = setupSession(store);
-      const longContent = 'A'.repeat(10000);
+    it('超长 content 正常存储', async () => {
+      const { sessionId } = await setupSession(store);
+      const longContent = 'A'.repeat(50000);
 
-      const record = store.saveMessage(sessionId, { role: 'user', content: longContent });
-      expect(record.content).toBe(longContent);
+      const turn = await saveTurn(store, sessionId, longContent, longContent);
+      expect(turn.user.content).toBe(longContent);
+      expect(turn.assistant.content).toBe(longContent);
     });
 
-    it('特殊字符（emoji、换行、引号）正常存储', () => {
-      const { sessionId } = setupSession(store);
-      const special = '你好\n世界 🚀\nIt\'s "great"!\n换行测试';
+    it('特殊字符正常存储', async () => {
+      const { sessionId } = await setupSession(store);
+      const special = '你好\n世界 🚀\n换行 "引号" \'单引号\' \\反斜杠';
 
-      const record = store.saveMessage(sessionId, { role: 'user', content: special });
-      const retrieved = store.getMessages(sessionId)[0];
-      expect(retrieved.content).toBe(special);
+      const turn = await saveTurn(store, sessionId, special, special);
+      expect(turn.user.content).toBe(special);
     });
 
-    it('会话隔离：不同会话的消息互不干扰', () => {
-      const s1 = setupSession(store, '会话1');
-      const s2 = setupSession(store, '会话2');
+    it('会话隔离', async () => {
+      const s1 = await setupSession(store, '会话1');
+      const s2 = await setupSession(store, '会话2');
 
-      store.saveMessage(s1.sessionId, { role: 'user', content: 'S1 消息' });
-      store.saveMessage(s2.sessionId, { role: 'user', content: 'S2 消息' });
+      await saveTurn(store, s1.sessionId, 'S1-Q', 'S1-A');
+      await saveTurn(store, s2.sessionId, 'S2-Q', 'S2-A');
 
-      expect(store.getMessages(s1.sessionId)).toHaveLength(1);
-      expect(store.getMessages(s2.sessionId)).toHaveLength(1);
-      expect(store.getMessages(s1.sessionId)[0].content).toBe('S1 消息');
-      expect(store.getMessages(s2.sessionId)[0].content).toBe('S2 消息');
+      expect(await store.getTurns(s1.sessionId)).toHaveLength(1);
+      expect(await store.getTurns(s2.sessionId)).toHaveLength(1);
     });
   });
 });
