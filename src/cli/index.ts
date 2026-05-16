@@ -9,9 +9,9 @@
 
 import { Command } from 'commander';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.1';
 const AUTHOR = 'helcksun';
-const RELEASE_DATE = '2026-05-16';
+const RELEASE_DATE = '2026-05-17';
 
 export function createProgram(): Command {
   const program = new Command();

@@ -49,29 +49,155 @@ Commands:
 
 ```
 ~/.deepseek-arch/
-├── config.toml           # 主配置
+├── config.toml           # 主配置（含 [paths] 文件跳转）
 ├── providers.toml        # API 密钥与地址
-├── pricing.toml          # 模型价格
+├── pricing.toml          # 模型价格（¥/1M tokens）
 ├── system-prompt.toml    # System Prompt 模板
-└── data.db               # SQLite 对话数据
+└── sessions/             # 对话数据（文件系统存储）
+    └── <uuid>/
+        ├── meta.json
+        └── turn-NNN.json
 ```
 
 配置 `~/.deepseek-arch/providers.toml` 中的 `api_key` 后即可使用。
+
+---
 
 ## 开发
 
 > 开发前请先阅读 [agent.md](./agent.md) 了解行为约定。
 
+### 环境要求
+
+| 组件 | 最低版本 |
+|------|---------|
+| Node.js | ≥ 18（推荐 v24） |
+| npm | ≥ 9 |
+
+### 从源码构建
+
 ```bash
-# 运行测试
+git clone <repo-url>
+cd deepseek-arch
+npm install
+npm run build          # TypeScript → dist/
+```
+
+### 运行
+
+```bash
+# 开发模式（直接运行编译结果）
+npm run build && node dist/index.js --help
+
+# 持续编译（修改后自动重新编译）
+npm run dev
+
+# 在另一个终端运行
+node dist/index.js chat
+```
+
+### 调试
+
+```bash
+# Node.js 内置调试器 + Chrome DevTools
+node --inspect-brk dist/index.js chat
+
+# 调试测试文件
+npx vitest --inspect-brk src/core/config.test.ts
+```
+
+然后在 Chrome 打开 `chrome://inspect` 连接调试器。
+
+### 测试
+
+```bash
+# 单次运行全部测试
 npm test
 
-# 持续测试
+# 持续监听模式（文件变更自动重跑）
 npm run test:watch
 
-# 覆盖率
+# 覆盖率报告
 npm run test:coverage
 ```
+
+覆盖率报告输出到 `coverage/` 目录，用浏览器打开 `coverage/index.html` 查看。
+
+### 项目结构
+
+```
+src/
+├── index.ts                # 入口
+├── cli/
+│   ├── index.ts            # Commander CLI 主程序
+│   ├── index.test.ts       # CLI e2e 测试
+│   └── commands/           # 子命令实现（待完成）
+├── core/
+│   ├── types.ts            # 领域类型定义
+│   ├── config.ts           # ConfigManager（TOML 单例）
+│   ├── config.test.ts      # ConfigManager 测试
+│   ├── storage.ts          # Storage（文件系统 Repository）
+│   ├── storage.test.ts     # Storage 测试
+│   ├── api.ts              # ApiClient（Phase 3）
+│   ├── session.ts          # SessionManager（Phase 5）
+│   └── token-counter.ts    # TokenCalculator（Phase 7）
+├── utils/                  # 工具函数
+docs/                       # 模块设计文档
+data/                       # 运行时数据（git-ignored）
+```
+
+---
+
+## 发行（打包分发）
+
+### 方式一：npm link（开发/本地使用）
+
+```bash
+npm run build
+npm link                  # 注册全局命令 deepseek-arch
+deepseek-arch --version   # 任意目录可用
+npm unlink -g             # 卸载
+```
+
+### 方式二：npm pack（生成 .tgz）
+
+```bash
+npm run build
+npm pack                  # 生成 deepseek-arch-0.2.1.tgz
+npm install -g ./deepseek-arch-0.2.1.tgz   # 安装
+```
+
+### 方式三：单文件可执行（实验性）
+
+使用 [Bun](https://bun.sh) 或 [pkg](https://github.com/vercel/pkg) 打包为独立可执行文件：
+
+```bash
+# Bun（推荐，跨平台）
+bun build src/index.ts --compile --outfile deepseek-arch
+
+# 或使用 esbuild 打包
+npx esbuild src/index.ts --bundle --platform=node --outfile=dist/bundle.js
+node dist/bundle.js --version
+```
+
+### 方式四：发布到 npm
+
+```bash
+npm run build
+npm publish --access public
+```
+
+用户安装：`npm install -g deepseek-arch`
+
+### 发布前检查清单
+
+- [ ] 更新 `package.json` 版本号
+- [ ] 更新 `src/cli/index.ts` 中的 `VERSION` / `RELEASE_DATE` 常量
+- [ ] 全量测试通过：`npm test`
+- [ ] 覆盖率达标：`npm run test:coverage`
+- [ ] `git tag vX.Y.Z` 并推送
+
+---
 
 ## 技术栈
 
@@ -79,12 +205,27 @@ npm run test:coverage
 |------|------|
 | 运行时 | Node.js + TypeScript (ESM) |
 | CLI | Commander.js |
-| 数据库 | better-sqlite3 |
+| 存储 | node:fs/promises（文件系统 JSON） |
 | 配置 | TOML（smol-toml） |
 | 测试 | vitest + @vitest/coverage-v8 |
+| UUID | uuid |
+
+---
+
+## 文档
+
+| 文件 | 内容 |
+|------|------|
+| [agent.md](./agent.md) | 模型行为约定（开发守则、安全约束） |
+| [TODO.md](./TODO.md) | 任务清单 + 版本历史 |
+| [docs/architecture.md](./docs/architecture.md) | 整体架构设计 |
+| [docs/config.md](./docs/config.md) | ConfigManager 设计 |
+| [docs/storage.md](./docs/storage.md) | Storage 文件系统设计 |
+| [docs/cli.md](./docs/cli.md) | CLI 设计 |
+| [docs/types.md](./docs/types.md) | 类型体系设计 |
 
 ## 版本
 
 - 作者：helcksun
-- 当前版本：v0.1.0
+- 当前版本：v0.2.1
 - 许可证：MIT
