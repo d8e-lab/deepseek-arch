@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Coverage
+coverage/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (don't commit runtime data, only keep .gitkeep)
+data/*.db
+data/*.sqlite
+
+# Environment
+.env
+.env.local

@@ -1,0 +1,43 @@
+{
+  "name": "deepseek-arch",
+  "version": "0.1.0",
+  "description": "DeepSeek Terminal Agent — Linux 终端 AI 助手，支持多轮对话、会话持久化、Token 统计",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "deepseek-arch": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [
+    "deepseek",
+    "ai",
+    "terminal",
+    "agent",
+    "cli"
+  ],
+  "author": "helcksun",
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.3",
+    "smol-toml": "^1.6.1",
+    "toml": "^4.1.1",
+    "uuid": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.8.0",
+    "@types/uuid": "^10.0.0",
+    "@vitest/coverage-v8": "^4.1.6",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}
