@@ -211,6 +211,36 @@ describe('Storage (文件系统)', () => {
     });
   });
 
+  describe('单文件存储（turns.json）', () => {
+    it('多轮对话只保留最后一轮的 usage', async () => {
+      const { sessionId } = await setupSession(store);
+
+      await saveTurn(store, sessionId, 'Q1', 'A1');
+      await saveTurn(store, sessionId, 'Q2', 'A2');
+      await saveTurn(store, sessionId, 'Q3', 'A3');
+
+      const turns = await store.getTurns(sessionId);
+      expect(turns).toHaveLength(3);
+      // 前两轮的 usage 应被清空
+      expect(turns[0].usage).toBeUndefined();
+      expect(turns[1].usage).toBeUndefined();
+      // 最后一轮保留 usage
+      expect(turns[2].usage).toBeDefined();
+      expect(turns[2].usage!.total_tokens).toBe(150);
+    });
+
+    it('meta.lastUsage 记录最后一轮的 token 用量', async () => {
+      const { sessionId } = await setupSession(store);
+
+      await saveTurn(store, sessionId, 'Q1', 'A1', undefined, { total_tokens: 100 });
+      await saveTurn(store, sessionId, 'Q2', 'A2', undefined, { total_tokens: 200 });
+
+      const session = await store.getSession(sessionId);
+      expect(session!.meta.lastUsage).toBeDefined();
+      expect(session!.meta.lastUsage!.total_tokens).toBe(200);
+    });
+  });
+
   describe('费用统计', () => {
     it('getTotalCost() 返回累计费用', async () => {
       const { sessionId } = await setupSession(store);

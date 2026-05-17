@@ -27,16 +27,10 @@ import type {
 
 // ─── 文件模板 ────────────────────────────────────────
 
-/** turn 文件填充位数 */
-const TURN_PAD = 3;
+/** turns 文件名 */
+const TURNS_FILE = 'turns.json';
 
-function turnFileName(turn: number): string {
-  return `turn-${String(turn).padStart(TURN_PAD, '0')}.json`;
-}
-
-function metaFileName(): string {
-  return 'meta.json';
-}
+const META_FILE = 'meta.json';
 
 // ─── Storage 类 ──────────────────────────────────────
 
@@ -63,12 +57,12 @@ export class Storage {
 
   /** 获取 meta 文件路径 */
   private metaPath(id: string): string {
-    return join(this.sessionDir(id), metaFileName());
+    return join(this.sessionDir(id), META_FILE);
   }
 
-  /** 获取 turn 文件路径 */
-  private turnPath(id: string, turn: number): string {
-    return join(this.sessionDir(id), turnFileName(turn));
+  /** 获取 turns 文件路径 */
+  private turnsPath(id: string): string {
+    return join(this.sessionDir(id), TURNS_FILE);
   }
 
   /** 读取 JSON 文件 */
@@ -217,9 +211,14 @@ export class Storage {
       throw new Error(`会话不存在: ${sessionId}`);
     }
 
-    // 读取现有轮次确定序号
+    // 读取现有轮次（单文件 turns.json）
     const existingTurns = await this.loadTurns(sessionId);
     const turnNumber = existingTurns.length + 1;
+
+    // 只保留最后一轮的 usage，历史轮的 usage 清空
+    for (const t of existingTurns) {
+      delete t.usage;
+    }
 
     const turn: TurnRecord = {
       turn: turnNumber,
@@ -235,13 +234,16 @@ export class Storage {
       created_at: new Date().toISOString(),
     };
 
-    await this.writeJSON(this.turnPath(sessionId, turnNumber), turn);
+    // 将所有轮次写入单个 turns.json
+    const allTurns = [...existingTurns, turn];
+    await this.writeJSON(this.turnsPath(sessionId), allTurns);
 
     // 更新元数据
     const totalCost = existingTurns.reduce((sum, t) => sum + t.cost_rmb, 0) + costRmb;
     await this.updateMeta(sessionId, {
       turnCount: turnNumber,
       totalCost,
+      lastUsage: usage,
     });
 
     return turn;
@@ -252,22 +254,27 @@ export class Storage {
     return this.loadTurns(sessionId);
   }
 
-  /** 内部：从文件加载轮次 */
+  /** 内部：从 turns.json 加载轮次（兼容旧的 turn-NNN.json 格式） */
   private async loadTurns(sessionId: string): Promise<TurnRecord[]> {
+    // 优先读取 turns.json（新格式）
+    const turns = await this.readJSON<TurnRecord[]>(this.turnsPath(sessionId));
+    if (turns) return turns;
+
+    // 兼容旧格式：扫描 turn-NNN.json 文件
     try {
       const entries = await readdir(this.sessionDir(sessionId));
       const turnFiles = entries
         .filter((f) => f.startsWith('turn-') && f.endsWith('.json'))
-        .sort(); // 文件名字母序即轮次顺序
+        .sort();
 
-      const turns: TurnRecord[] = [];
+      const legacyTurns: TurnRecord[] = [];
       for (const file of turnFiles) {
         const turn = await this.readJSON<TurnRecord>(
           join(this.sessionDir(sessionId), file),
         );
-        if (turn) turns.push(turn);
+        if (turn) legacyTurns.push(turn);
       }
-      return turns;
+      return legacyTurns;
     } catch (err: any) {
       if (err?.code === 'ENOENT') return [];
       throw err;

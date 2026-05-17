@@ -8,7 +8,7 @@
 // ─── 消息与对话 ─────────────────────────────────────
 
 /** 消息角色 */
-export type MessageRole = 'system' | 'user' | 'assistant';
+export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
 /** 单条对话消息 */
 export interface Message {
@@ -21,6 +21,12 @@ export interface Message {
    * 持久化以命中供应商的 prompt kv-cache
    */
   reasoning_content?: string;
+  /**
+   * 工具调用 ID（为 agent tool call 预留）
+   */
+  tool_call_id?: string;
+  /** 工具名称（为 agent tool call 预留） */
+  name?: string;
 }
 
 // ─── Token 用量与费用 ────────────────────────────────
@@ -69,7 +75,7 @@ export interface TurnRecord {
     reasoning_content?: string;
   };
   /** Token 用量 */
-  usage: TokenUsage;
+  usage?: TokenUsage;
   /** 本轮费用 (CNY) */
   cost_rmb: number;
   /** 创建时间 */
@@ -86,6 +92,8 @@ export interface SessionMeta {
   turnCount: number;
   /** 累计费用 (CNY) */
   totalCost: number;
+  /** 最后一轮对话的 token 用量（用于退出汇总，无需加载全量 turns） */
+  lastUsage?: TokenUsage;
 }
 
 /** 会话列表项（用于 resume 列表展示） */
