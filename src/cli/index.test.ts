@@ -82,9 +82,25 @@ describe('CLI (e2e)', () => {
       expect(stdout).toContain('--name');
     });
 
-    it('resume 无参数时运行 action', () => {
-      const { stdout } = run(['resume']);
-      expect(stdout).toContain('待实现');
+    it('resume 无参数时显示会话列表或空提示', () => {
+      const { stdout, status } = run(['resume']);
+      // 可能已有历史会话（显示表格），也可能为空（显示空提示）
+      const hasContent =
+        stdout.includes('没有历史会话') ||
+        stdout.includes('输入序号恢复会话');
+      expect(hasContent).toBe(true);
+    });
+
+    it('resume --id 不存在的会话时报错退出', () => {
+      const { stderr, status } = run(['resume', '--id', 'nonexistent-id']);
+      expect(stderr).toContain('未找到会话');
+      expect(status).toBe(1);
+    });
+
+    it('resume --name 不存在的会话时报错退出', () => {
+      const { stderr, status } = run(['resume', '--name', '不存在的标题']);
+      expect(stderr).toContain("未找到标题为");
+      expect(status).toBe(1);
     });
   });
 });

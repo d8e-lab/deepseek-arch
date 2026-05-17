@@ -40,6 +40,15 @@
 - [x] 5.4 system prompt 从配置加载 — SessionManager.setSystemPrompt()
 - [x] 5.5 SessionManager 单元测试（15 tests）
 
+### Phase 6 — 对话恢复 ✅ (2026-05-18)
+
+- [x] 6.1 resume 子命令实现
+- [x] 6.2 无参数：展示会话列表（序号、标题、轮次、更新时间）+ 用户输入序号选择
+- [x] 6.3 --id 精确匹配 + 未找到时报错退出（exit 1）
+- [x] 6.4 --name 精确匹配 + 未找到时报错退出（exit 1）
+- [x] 6.5 退出时显示恢复命令（ChatUI.printExitSummary 已实现）
+- [x] 6.6 resume 单元测试（10 tests, 含 --id/--name 错误处理 + 无参数列表/空列表）
+
 ---
 
 ## 待完成
@@ -50,15 +59,6 @@
 - [ ] 4.2 reasoning_content 流式接收与终端展示
 - [ ] 4.3 usage 信息从最后一个 chunk 提取
 - [ ] 4.4 流式输出单元测试
-
-### Phase 6 — 对话恢复
-
-- [ ] 6.1 resume 子命令实现
-- [ ] 6.2 无参数：展示会话列表（序号、标题、轮次、更新时间）+ 用户输入序号选择
-- [ ] 6.3 --id 精确匹配 + 未找到时报错退出（exit 1）
-- [ ] 6.4 --name 精确匹配 + 未找到时报错退出（exit 1）
-- [ ] 6.5 退出时显示恢复命令
-- [ ] 6.6 resume 单元测试
 
 ### Phase 7 — Token 统计 + 费用计算
 

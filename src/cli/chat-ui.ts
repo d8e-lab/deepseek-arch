@@ -94,8 +94,9 @@ export class ChatUI {
   // 待退出时恢复的 stdin 设置
   private stdinIsTTY = false;
 
-  constructor(config: ConfigManager) {
+  constructor(config: ConfigManager, sessionManager?: SessionManager) {
     this.config = config;
+    if (sessionManager) this.sessionManager = sessionManager;
   }
 
   // ─── 生命周期 ──────────────────────────────────
@@ -110,8 +111,13 @@ export class ChatUI {
     // 读取终端尺寸
     this.updateTermSize();
 
-    // 初始化 SessionManager（创建 ApiClient + Storage + 新会话）
-    await this.initSession();
+    if (this.sessionManager) {
+      // 恢复会话：SessionManager 已由调用方初始化（含 Storage + ApiClient + 历史回合）
+      // 仅需补齐 system prompt
+    } else {
+      // 初始化 SessionManager（创建 ApiClient + Storage + 新会话）
+      await this.initSession();
+    }
 
     // 加载 system prompt 到 SessionManager
     this.loadSystemPrompt();
