@@ -1,6 +1,6 @@
 # TODO — 持久化任务清单
 
-> 最后更新：2026-05-17
+> 最后更新：2026-05-18
 
 ## 已完成
 
@@ -83,3 +83,5 @@
 | v0.1.0 | 项目骨架：CLI + ConfigManager + 类型定义 + 文档 |
 | v0.2.0 | SQLite 存储层：sessions/messages/token_usage 三表 CRUD |
 | v0.2.1 | **重构**：文件系统存储（sessions 目录 + turn JSON），移除 better-sqlite3 |
+| v0.2.2 | Phase 6: resume 功能（--id/--name/无参数列表选择），Storage 单文件 turns.json，tool role 预留 |
+| v0.3.0 | 修复 resume 显示 bug（历史回合渲染），Storage 仅保留最后一轮 usage |

@@ -112,8 +112,17 @@ export class ChatUI {
     this.updateTermSize();
 
     if (this.sessionManager) {
-      // 恢复会话：SessionManager 已由调用方初始化（含 Storage + ApiClient + 历史回合）
-      // 仅需补齐 system prompt
+      // 恢复会话：加载历史回合到显示缓冲区
+      const session = this.sessionManager.getSession();
+      if (session) {
+        for (const turn of session.turns) {
+          this.appendLine(turn.user.content, 'green');
+          if (turn.assistant.reasoning_content) {
+            this.appendLine(turn.assistant.reasoning_content, 'gray');
+          }
+          this.appendLine(turn.assistant.content, 'white');
+        }
+      }
     } else {
       // 初始化 SessionManager（创建 ApiClient + Storage + 新会话）
       await this.initSession();
