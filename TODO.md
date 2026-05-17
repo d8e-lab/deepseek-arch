@@ -16,23 +16,33 @@
 - [x] 1.10 默认配置文件模板（~/.deepseek-arch/*.toml）
 - [x] 1.11 Git init + v0.1.0 tag
 
-### Phase 2 — SQLite 存储层 → 文件系统存储层 (v0.2.0 → v0.2.1)
+### Phase 2 — 文件系统存储层 (v0.2.0 → v0.2.1)
 
-- [x] 2.1 实现 Storage 类（Repository 模式，better-sqlite3）/ 30 tests / v0.2.0
-- [x] 2r 重构为文件系统存储：sessions/<id>/meta.json + turn-NNN.json / 23 tests
-- [x] 移除 better-sqlite3、toml 依赖 / 纯 node:fs/promises
-- [x] 类型重构：TurnRecord 替代 MessageRecord/TokenUsageRecord
-- [x] ConfigManager: paths.db → paths.sessions
+- [x] 2.1 实现 Storage 类（Repository 模式）/ 23 tests
+- [x] 2.2 文件系统存储：sessions/<id>/meta.json + turn-NNN.json
+- [x] 2.3 移除 better-sqlite3、toml 依赖 / 纯 node:fs/promises
+- [x] 2.4 类型重构：TurnRecord 替代 MessageRecord/TokenUsageRecord
+- [x] 2.5 ConfigManager: paths.db → paths.sessions
 - [x] 全量 43 tests passed / v0.2.1
 
+### Phase 3 — API 客户端 ✅ (2026-05-17)
+
+- [x] 3.1 实现 ApiClient 类（fetch + 非流式 Chat Completion）
+- [x] 3.2 从 ConfigManager 读取 provider/base_url/api_key/model
+- [x] 3.3 单轮对话功能（发送消息、接收回复）
+- [x] 3.4 ApiClient 单元测试（14 tests）
+
+### Phase 5 — 多轮对话 + 持久化 ✅ (2026-05-17)
+
+- [x] 5.1 SessionManager（Facade 模式，协调 ApiClient + Storage）— 15 tests
+- [x] 5.2 对话循环（全屏 TUI + 原始模式输入，/exit /clear /title 命令）— ChatUI
+- [x] 5.3 每轮对话自动保存为 turn JSON（含 reasoning_content）
+- [x] 5.4 system prompt 从配置加载 — SessionManager.setSystemPrompt()
+- [x] 5.5 SessionManager 单元测试（15 tests）
+
+---
+
 ## 待完成
-
-### Phase 3 — API 客户端
-
-- [ ] 3.1 实现 ApiClient 类（fetch + 非流式 Chat Completion）
-- [ ] 3.2 从 ConfigManager 读取 provider/base_url/api_key/model
-- [ ] 3.3 单轮对话功能（发送消息、接收回复）
-- [ ] 3.4 ApiClient 单元测试
 
 ### Phase 4 — 流式输出
 
@@ -40,14 +50,6 @@
 - [ ] 4.2 reasoning_content 流式接收与终端展示
 - [ ] 4.3 usage 信息从最后一个 chunk 提取
 - [ ] 4.4 流式输出单元测试
-
-### Phase 5 — 多轮对话 + 持久化
-
-- [ ] 5.1 SessionManager（Facade 模式，协调 ApiClient + Storage）
-- [ ] 5.2 对话循环（readline 交互，/exit /title /clear 命令）
-- [ ] 5.3 每轮对话自动保存为 turn JSON（含 reasoning_content）
-- [ ] 5.4 system prompt 从配置加载
-- [ ] 5.5 SessionManager 单元测试
 
 ### Phase 6 — 对话恢复
 

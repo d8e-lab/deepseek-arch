@@ -204,3 +204,27 @@ export interface ChatCompletionResponse {
   choices: ChatChoice[];
   usage?: TokenUsage;
 }
+
+// ─── 错误 ─────────────────────────────────────────────
+
+/** API 错误响应（JSON body） */
+export interface ApiErrorBody {
+  message?: string;
+  type?: string;
+  code?: string;
+}
+
+/** API 调用错误 */
+export class ApiError extends Error {
+  /** HTTP 状态码 */
+  status: number;
+  /** API 错误码（如 "invalid_api_key"） */
+  code?: string;
+
+  constructor(status: number, message: string, code?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+  }
+}

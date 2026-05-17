@@ -44,7 +44,7 @@ describe('CLI (e2e)', () => {
 
     it('-V 等价于 --version', () => {
       const { stdout } = run(['-V']);
-      expect(stdout).toContain('deepseek-arch v0.1.0');
+      expect(stdout).toContain('deepseek-arch v0.2.1');
     });
   });
 
@@ -63,8 +63,10 @@ describe('CLI (e2e)', () => {
 
   describe('chat 子命令', () => {
     it('chat 无参数时运行 action', () => {
-      const { stdout } = run(['chat']);
-      expect(stdout).toContain('待实现');
+      const { stderr, status } = run(['chat']);
+      // 非 TTY 环境应报错退出
+      expect(stderr).toContain('错误: 需要交互式终端');
+      expect(status).toBe(1);
     });
 
     it('chat --help 显示子命令帮助', () => {

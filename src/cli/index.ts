@@ -8,6 +8,7 @@
  */
 
 import { Command } from 'commander';
+import { ConfigManager } from '../core/config.js';
 
 const VERSION = '0.2.1';
 const AUTHOR = 'helcksun';
@@ -33,9 +34,10 @@ export function createProgram(): Command {
     .option('--title <name>', '设置对话标题')
     .helpOption('-h, --help', '显示 chat 命令帮助')
     .action(async (options) => {
-      // Phase 3-5 实现：启动对话循环
-      console.log('chat 子命令 — 待实现');
-      console.log('选项:', options);
+      const { ChatUI } = await import('./chat-ui.js');
+      const config = await ConfigManager.getInstance().load();
+      const ui = new ChatUI(config);
+      await ui.start();
     });
 
   // ---- resume 子命令 ----

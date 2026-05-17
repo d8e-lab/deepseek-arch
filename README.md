@@ -23,11 +23,13 @@ node dist/index.js --help
 
 ## 功能概览
 
-- **多轮对话**：持久化保存完整对话历史（含 `reasoning_content`），命中供应商 prompt kv-cache
+- **全屏 TUI**：独立终端界面，灰底多行输入面板（Ctrl+Enter 换行），三色渲染（用户绿/think灰/回复白），中文原生支持
+- **多轮对话**：自动持久化 turn JSON（含 `reasoning_content` 命中 kv-cache）
+- **会话管理**：/title 命名、/clear 清屏、退出显示恢复命令
 - **对话恢复**：按 ID 或标题恢复历史会话（`resume` 子命令）
-- **Token 统计**：实时记录 token 消耗、缓存命中/未命中、命中率、费用（¥）
-- **配置外置**：TOML 文件管理，支持文件间跳转引用，避免硬编码
-- **安全隔离**：仅操作 home 目录和项目工作目录
+- **Token 统计**：实时记录 token 消耗、缓存命中/未命中、命中率
+- **配置外置**：TOML 文件管理，支持文件间跳转引用
+- **安全隔离**：操作范围限于 home 目录和项目工作目录
 
 ## 命令行
 
@@ -39,8 +41,17 @@ Options:
   -h, --help        帮助信息
 
 Commands:
-  chat [options]    开始新对话
+  chat [options]    开始新对话（全屏 TUI）
   resume [options]  恢复历史对话
+
+chat 命令可用快捷键：
+  Enter           发送消息
+  Ctrl+Enter/J    换行
+  Ctrl+C          退出
+  Ctrl+L          清屏
+  /exit           退出
+  /clear          清屏
+  /title <name>   命名会话
 ```
 
 ## 配置
@@ -131,6 +142,7 @@ src/
 ├── cli/
 │   ├── index.ts            # Commander CLI 主程序
 │   ├── index.test.ts       # CLI e2e 测试
+│   ├── chat-ui.ts          # 全屏 TUI 对话界面
 │   └── commands/           # 子命令实现（待完成）
 ├── core/
 │   ├── types.ts            # 领域类型定义
@@ -138,8 +150,10 @@ src/
 │   ├── config.test.ts      # ConfigManager 测试
 │   ├── storage.ts          # Storage（文件系统 Repository）
 │   ├── storage.test.ts     # Storage 测试
-│   ├── api.ts              # ApiClient（Phase 3）
-│   ├── session.ts          # SessionManager（Phase 5）
+│   ├── api.ts              # ApiClient（DeepSeek API 适配器）
+│   ├── api.test.ts         # ApiClient 测试
+│   ├── session.ts          # SessionManager（Facade）
+│   ├── session.test.ts     # SessionManager 测试
 │   └── token-counter.ts    # TokenCalculator（Phase 7）
 ├── utils/                  # 工具函数
 docs/                       # 模块设计文档
