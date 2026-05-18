@@ -1,6 +1,6 @@
 # ConfigManager 设计
 
-> 最后更新：2026-05-17 · 实现文件：`src/core/config.ts`
+> 最后更新：2026-05-18 · 实现文件：`src/core/config.ts`
 
 ## 职责
 
@@ -61,7 +61,7 @@ api_key = "sk-xxx"
 
 ```toml
 [deepseek."deepseek-v4-pro"]
-input_cache_hit = 0.10
+input_cache_hit = 0.10    # ¥/1M tokens
 input_cache_miss = 1.00
 output = 2.00
 currency = "CNY"

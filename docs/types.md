@@ -1,6 +1,6 @@
 # 类型体系设计
 
-> 最后更新：2026-05-17 · 实现文件：`src/core/types.ts`
+> 最后更新：2026-05-18 · 实现文件：`src/core/types.ts`
 
 ## 设计原则
 
@@ -13,12 +13,14 @@
 ### 消息与对话
 
 ```typescript
-type MessageRole = 'system' | 'user' | 'assistant';
+type MessageRole = 'system' | 'user' | 'assistant' | 'tool';  // tool 为 agent 预留
 
 interface Message {
   role: MessageRole;
   content: string;
   reasoning_content?: string;  // 模型思维链，持久化命中 kv-cache
+  tool_call_id?: string;       // 工具调用 ID（为 agent tool call 预留）
+  name?: string;               // 工具名称（为 agent tool call 预留）
 }
 ```
 
@@ -56,9 +58,10 @@ interface TurnRecord {
     content: string;
     reasoning_content?: string;
   };
-  usage: TokenUsage;
+  usage?: TokenUsage;     // 仅最后一轮携带用法统计
   cost_rmb: number;
   created_at: string;
+  interrupted?: boolean;  // true = 中断的不完整轮次，不发送给 API
 }
 
 // 会话元数据
@@ -69,6 +72,7 @@ interface SessionMeta {
   updated_at: string;
   turnCount: number;
   totalCost: number;
+  lastUsage?: TokenUsage; // 最后一轮用量，退出时展示无需加载全量 turns
 }
 
 // 完整会话
@@ -170,9 +174,60 @@ interface ChatCompletionResponse {
 }
 ```
 
+### 流式 API
+
+```typescript
+/** SSE 流式块（DeepSeek API text/event-stream 单条 data） */
+interface StreamChunk {
+  id: string;
+  object: string;
+  created: number;
+  model: string;
+  choices: ChatChoice[];
+  usage?: TokenUsage;
+}
+
+/** 流式调用选项 */
+interface StreamOptions {
+  timeoutMs?: number;      // 默认 120_000
+  maxRetries?: number;     // 默认 2（指数退避，4xx 不重试）
+  signal?: AbortSignal;    // 外部 AbortController（用户中断）
+}
+```
+
+### 流式事件（SessionManager → ChatUI）
+
+```typescript
+/** 流式事件回调 */
+interface StreamEvent {
+  type: 'reasoning_delta' | 'content_delta' | 'done' | 'error';
+  text?: string;           // 增量文本（reasoning_delta / content_delta）
+  usage?: TokenUsage;      // token 用量（done 事件）
+  error?: string;          // 错误信息（error 事件）
+}
+```
+
+### 错误
+
+```typescript
+/** API 错误响应（JSON body） */
+interface ApiErrorBody {
+  message?: string;
+  type?: string;
+  code?: string;
+}
+
+/** API 调用错误 */
+class ApiError extends Error {
+  status: number;          // HTTP 状态码
+  code?: string;           // API 错误码（如 "invalid_api_key"）
+}
+```
+
 ## 类型演进历史
 
 | 版本 | 变更 |
 |------|------|
 | v0.1.0 | 初始定义：Message, MessageRecord, TokenUsage, TokenUsageRecord, Session, SessionMeta, 配置接口, API 接口 |
 | v0.2.1 | 移除 MessageRecord/TokenUsageRecord（SQLite 专用），新增 TurnRecord；Session 改用 turns[]；SessionMeta 新增 turnCount/totalCost；ConfigPaths.db → sessions |
+| v0.4.0 | 新增 StreamChunk, StreamOptions, StreamEvent 流式类型；TurnRecord.interrupted？中断支持；SessionMeta.lastUsage？延迟加载优化；Message.role 新增 'tool' 预留；Message.tool_call_id/name 预留字段；新增 ApiError/ApiErrorBody 错误类型；TurnRecord.usage 变更为可选（仅末轮保留） |
