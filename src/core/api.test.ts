@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ApiClient, ApiError } from './api.js';
-import type { Message, ChatCompletionResponse } from './types.js';
+import type { Message, ChatCompletionResponse } from '../types/index.js';
 
 /** 构建标准成功响应 */
 function successResponse(

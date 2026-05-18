@@ -24,7 +24,7 @@ import type {
 	ProvidersConfig,
 	PricingConfig,
 	SystemPromptConfig,
-} from './types.js';
+} from '../types/index.js';
 
 /** 配置目录（默认 ~/.deepseek-arch） */
 export const DEFAULT_CONFIG_DIR = resolve(homedir(), '.deepseek-arch');

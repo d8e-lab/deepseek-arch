@@ -12,8 +12,8 @@
  *   const resp = await client.chat([{ role: "user", content: "你好" }]);
  */
 
-import type { Message, ChatCompletionRequest, ChatCompletionResponse, StreamChunk, StreamOptions } from './types.js';
-import { ApiError } from './types.js';
+import type { Message, ChatCompletionRequest, ChatCompletionResponse, StreamChunk, StreamOptions } from '../types/index.js';
+import { ApiError } from '../types/index.js';
 
 export { ApiError };
 

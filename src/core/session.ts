@@ -10,6 +10,7 @@
 
 import { Storage } from './storage.js';
 import { ApiClient } from './api.js';
+import { yieldEventLoop } from '../utils/event-loop.js';
 import type {
 	Message,
 	Session,
@@ -18,7 +19,7 @@ import type {
 	TokenUsage,
 	ChatCompletionResponse,
 	StreamChunk,
-} from './types.js';
+} from '../types/index.js';
 
 /** 流式事件（SessionManager → ChatUI 回调） */
 export interface StreamEvent {
@@ -190,6 +191,9 @@ export class SessionManager {
 				if (chunk.usage) {
 					usage = chunk.usage;
 				}
+
+				// 让出事件循环，给 timers (spinner) 和 I/O (终端渲染) 执行机会
+				await yieldEventLoop();
 			}
 
 			// 流式完成

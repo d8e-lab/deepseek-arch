@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { Storage } from './storage.js';
 import { ApiClient } from './api.js';
 import { SessionManager, type StreamEvent } from './session.js';
-import type { Message, ChatCompletionResponse, StreamChunk, TokenUsage } from './types.js';
+import type { Message, ChatCompletionResponse, StreamChunk, TokenUsage } from '../types/index.js';
 
 /** 构建标准成功响应 */
 function makeResponse(

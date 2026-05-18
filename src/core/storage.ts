@@ -23,7 +23,7 @@ import type {
 	Message,
 	TurnRecord,
 	TokenUsage,
-} from './types.js';
+} from '../types/index.js';
 
 // ─── 文件模板 ────────────────────────────────────────
 
