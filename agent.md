@@ -47,4 +47,5 @@
 
 - 作者：helcksun
 - 包名：deepseek-arch
+- 当前版本：v0.4.0
 - 默认模型：deepseek-v4-pro

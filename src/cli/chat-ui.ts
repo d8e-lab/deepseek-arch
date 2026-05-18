@@ -22,7 +22,7 @@ import chalk from 'chalk';
 import { ConfigManager } from '../core/config.js';
 import { ApiClient } from '../core/api.js';
 import { Storage } from '../core/storage.js';
-import { SessionManager } from '../core/session.js';
+import { SessionManager, type StreamEvent } from '../core/session.js';
 import type { Message, ChatCompletionResponse } from '../core/types.js';
 
 // 扩展 readline 的类型定义
@@ -36,8 +36,23 @@ interface KeyPress {
 
 // ─── 常量 ────────────────────────────────────────────
 
-const VERSION = '0.2.1';
+const VERSION = '0.4.0';
 const MAX_INPUT_HEIGHT = 10; // 输入面板最大行数
+
+// Spinner 动画帧
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER_INTERVAL_MS = 80;
+
+// ChatUI 状态
+type UIState = 'idle' | 'sending' | 'streaming';
+
+// 流式累积内容
+interface LiveStreamState {
+  reasoning: string;
+  content: string;
+  /** 当前输出阶段 */
+  phase: 'sending' | 'reasoning' | 'content';
+}
 
 // ANSI 转义序列
 const CSI = '\x1b[';
@@ -93,6 +108,26 @@ export class ChatUI {
 
   // 待退出时恢复的 stdin 设置
   private stdinIsTTY = false;
+
+  // ─── 流式输出状态 ────────────────────────────
+
+  /** UI 状态机 */
+  private uiState: UIState = 'idle';
+
+  /** 流式累积内容（非 null 表示正在流式输出） */
+  private liveStream: LiveStreamState | null = null;
+
+  /** 输入队列（流式期间暂存） */
+  private inputQueue: string[] = [];
+
+  /** 流式中断控制器 */
+  private streamAbort: AbortController | null = null;
+
+  /** Spinner 定时器 */
+  private spinnerTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** Spinner 当前帧索引 */
+  private spinnerFrameIdx = 0;
 
   constructor(config: ConfigManager, sessionManager?: SessionManager) {
     this.config = config;
@@ -213,6 +248,7 @@ export class ChatUI {
   }
 
   private cleanup(): void {
+    this.stopSpinner();
     this.exitRawMode();
     // 清除颜色属性
     process.stdout.write(`${CSI}0m`);
@@ -270,14 +306,29 @@ export class ChatUI {
     process.stdin.on('keypress', (str: string, key: KeyPress) => {
       if (!this.running) return;
 
-      // Ctrl+C
+      // Ctrl+C — 流式期间中断输出，否则退出
       if (key.ctrl && key.name === 'c') {
+        if (this.uiState !== 'idle') {
+          this.interruptStream();
+          return;
+        }
         this.running = false;
+        return;
+      }
+
+      // ESC — 流式期间中断输出（备选方案）
+      if (key.name === 'escape') {
+        if (this.uiState !== 'idle') {
+          this.interruptStream();
+          return;
+        }
+        // 空闲时忽略 ESC
         return;
       }
 
       // Ctrl+D (空行退出)
       if (key.ctrl && key.name === 'd' && this.inputText.length === 0) {
+        if (this.uiState !== 'idle') return; // 流式期间忽略
         this.running = false;
         return;
       }
@@ -287,6 +338,9 @@ export class ChatUI {
         if (key.ctrl) {
           // Ctrl+Enter: 插入换行符
           this.insertNewline();
+        } else if (this.uiState !== 'idle') {
+          // 流式期间：加入输入队列
+          this.enqueueInput();
         } else {
           this.handleEnter();
         }
@@ -444,32 +498,84 @@ export class ChatUI {
     // 显示用户消息
     this.appendLine(text, 'green');
 
-    // 显示加载指示
-    const loadingLine: RenderedLine = { text: '⏳ Thinking...', color: 'gray' };
-    this.displayLines.push(loadingLine);
+    // 进入发送状态，启动 spinner
+    this.uiState = 'sending';
+    this.liveStream = { reasoning: '', content: '', phase: 'sending' };
+    this.startSpinner();
     this.fullDraw();
 
+    // 创建 AbortController
+    this.streamAbort = new AbortController();
+
     try {
-      const { response } = await this.sessionManager!.sendMessage(text);
+      await this.sessionManager!.sendMessageStream(
+        text,
+        (event) => this.handleStreamEvent(event),
+        this.streamAbort.signal,
+      );
+    } catch (err: any) {
+      // 非 AbortError 的意外错误
+      if (err.name !== 'AbortError') {
+        this.appendLine(`[错误] ${err?.message ?? String(err)}`, 'gray');
+      }
+    }
 
-      // 移除加载指示
-      this.displayLines.pop();
+    // 清理流式状态
+    this.stopSpinner();
+    this.streamAbort = null;
 
-      const choice = response.choices[0];
-      const assistantMsg = choice?.message;
-      if (!assistantMsg) {
-        this.appendLine('[错误] 模型返回空响应', 'gray');
-      } else {
-        // 显示 reasoning_content（灰色）
-        if (assistantMsg.reasoning_content) {
-          this.appendLine(assistantMsg.reasoning_content, 'gray');
+    // 检查输入队列
+    if (this.inputQueue.length > 0) {
+      this.processQueue();
+    } else {
+      this.uiState = 'idle';
+      this.liveStream = null;
+    }
+
+    this.fullDraw();
+  }
+
+  /** 流式事件回调 */
+  private handleStreamEvent(event: StreamEvent): void {
+    switch (event.type) {
+      case 'reasoning_delta':
+        if (this.liveStream) {
+          this.liveStream.reasoning += event.text ?? '';
+          this.liveStream.phase = 'reasoning';
         }
-        // 显示回复（白色）
-        this.appendLine(assistantMsg.content, 'white');
+        this.drawStreamUpdate();
+        break;
 
-        // 可选：显示 token 摘要
-        if (response.usage) {
-          const u = response.usage;
+      case 'content_delta':
+        if (this.liveStream) {
+          this.liveStream.content += event.text ?? '';
+          this.liveStream.phase = 'content';
+          // 首次收到 content 时切换状态
+          if (this.uiState === 'sending') {
+            this.uiState = 'streaming';
+            this.stopSpinner();
+          }
+        }
+        this.drawStreamUpdate();
+        break;
+
+      case 'done': {
+        // 流式完成：将累积内容写入 displayLines
+        const stream = this.liveStream;
+        this.liveStream = null;
+
+        if (stream?.reasoning) {
+          this.appendLine(stream.reasoning, 'gray');
+        }
+        if (stream?.content) {
+          this.appendLine(stream.content, 'white');
+        } else if (!stream?.reasoning) {
+          this.appendLine('[空响应]', 'gray');
+        }
+
+        // Token 摘要
+        if (event.usage) {
+          const u = event.usage;
           const hitRate =
             u.prompt_cache_hit_tokens !== undefined && u.prompt_cache_miss_tokens !== undefined
               ? (
@@ -484,15 +590,188 @@ export class ChatUI {
           }
           this.appendLine(summary, 'gray');
         }
+        break;
       }
-    } catch (err: any) {
-      // 移除加载指示
-      this.displayLines.pop();
-      const msg = err?.message ?? String(err);
-      this.appendLine(`[错误] ${msg}`, 'gray');
+
+      case 'error': {
+        const stream = this.liveStream;
+        // 已中断且有部分内容：标记中断
+        if (event.error === '已中断' && (stream?.reasoning || stream?.content)) {
+          this.appendLine('[已中断]', 'gray');
+        } else if (!stream?.reasoning && !stream?.content) {
+          // 无内容即失败
+          this.appendLine(`[错误] ${event.error}`, 'gray');
+        }
+        break;
+      }
+    }
+  }
+
+  /** 流式增量绘制（仅更新底部区域，不重绘历史） */
+  private drawStreamUpdate(): void {
+    if (!this.liveStream) return;
+
+    process.stdout.write(HIDE_CURSOR);
+
+    const inputHeight = this.calcInputHeight();
+    const separatorRow = this.termHeight - inputHeight - 1;
+
+    // 清除分隔线到输入区之间的区域
+    for (let row = separatorRow; row < this.termHeight; row++) {
+      process.stdout.write(cursorTo(row, 0) + ERASE_LINE);
     }
 
+    // 绘制流式内容
+    let currentRow = separatorRow;
+
+    // Spinner / 状态指示
+    if (this.uiState === 'sending') {
+      const frame = SPINNER_FRAMES[this.spinnerFrameIdx % SPINNER_FRAMES.length];
+      const indicator = `${frame} 等待模型响应...`;
+      if (currentRow < this.termHeight) {
+        process.stdout.write(cursorTo(currentRow, 0) + chalk.gray(indicator));
+        currentRow++;
+      }
+    } else if (this.liveStream.phase === 'reasoning') {
+      const indicator = '💭 思考中...';
+      if (currentRow < this.termHeight) {
+        process.stdout.write(cursorTo(currentRow, 0) + chalk.gray(indicator));
+        currentRow++;
+      }
+    }
+
+    // 流式 reasoning
+    if (this.liveStream.reasoning) {
+      const reasoningLines = this.wrapText(this.liveStream.reasoning, this.termWidth);
+      for (const line of reasoningLines) {
+        if (currentRow >= this.termHeight) break;
+        process.stdout.write(cursorTo(currentRow, 0) + chalk.gray(line));
+        currentRow++;
+      }
+    }
+
+    // 流式 content
+    if (this.liveStream.content) {
+      const contentLines = this.wrapText(this.liveStream.content, this.termWidth);
+      for (const line of contentLines) {
+        if (currentRow >= this.termHeight) break;
+        process.stdout.write(cursorTo(currentRow, 0) + chalk.white(line));
+        currentRow++;
+      }
+    }
+
+    // 输入队列指示
+    if (this.inputQueue.length > 0) {
+      if (currentRow < this.termHeight) {
+        process.stdout.write(cursorTo(currentRow, 0) + chalk.dim(`⏳ 等待中 (${this.inputQueue.length} 条)...`));
+        currentRow++;
+      }
+    }
+
+    // 重绘分隔线和输入面板
+    if (currentRow <= separatorRow) currentRow = separatorRow;
+    process.stdout.write(cursorTo(separatorRow, 0) + chalk.dim('─'.repeat(this.termWidth)));
+
+    const inputLines = this.renderInputLines(inputHeight);
+    for (let i = 0; i < inputHeight; i++) {
+      const row = separatorRow + 1 + i;
+      if (row >= this.termHeight) break;
+      process.stdout.write(cursorTo(row, 0));
+      if (i < inputLines.length) {
+        process.stdout.write(inputLines[i]);
+      }
+    }
+
+    // 光标定位
+    const { cursorRow, cursorCol } = this.calcCursorInInput(inputHeight);
+    process.stdout.write(cursorTo(separatorRow + 1 + cursorRow, cursorCol));
+    process.stdout.write(SHOW_CURSOR);
+  }
+
+  /** 将当前输入加入队列 */
+  private enqueueInput(): void {
+    const text = this.inputText.trim();
+    if (text.length === 0) return;
+
+    this.inputHistory.push(text);
+    this.historyIndex = -1;
+    this.inputQueue.push(text);
+
+    this.inputText = '';
+    this.cursorPos = 0;
+    this.syncInputHeight();
+    this.drawStreamUpdate();
+  }
+
+  /** 中断当前流式输出 */
+  private interruptStream(): void {
+    if (this.streamAbort) {
+      this.streamAbort.abort();
+    }
+  }
+
+  /** 处理输入队列中的下一条 */
+  private processQueue(): void {
+    const text = this.inputQueue.shift();
+    if (!text) {
+      this.uiState = 'idle';
+      this.liveStream = null;
+      return;
+    }
+
+    // 显示用户消息
+    this.appendLine(text, 'green');
+
+    // 递归处理
+    this.uiState = 'sending';
+    this.liveStream = { reasoning: '', content: '', phase: 'sending' };
+    this.startSpinner();
     this.fullDraw();
+
+    this.streamAbort = new AbortController();
+
+    this.sessionManager!.sendMessageStream(
+      text,
+      (event) => this.handleStreamEvent(event),
+      this.streamAbort.signal,
+    )
+      .catch((err) => {
+        if (err.name !== 'AbortError') {
+          this.appendLine(`[错误] ${err?.message ?? String(err)}`, 'gray');
+        }
+      })
+      .finally(() => {
+        this.stopSpinner();
+        this.streamAbort = null;
+
+        if (this.inputQueue.length > 0) {
+          this.processQueue();
+        } else {
+          this.uiState = 'idle';
+          this.liveStream = null;
+          this.fullDraw();
+        }
+      });
+  }
+
+  /** 启动 spinner 动画 */
+  private startSpinner(): void {
+    if (this.spinnerTimer) return;
+    this.spinnerFrameIdx = 0;
+    this.spinnerTimer = setInterval(() => {
+      this.spinnerFrameIdx++;
+      if (this.uiState === 'sending') {
+        this.drawStreamUpdate();
+      }
+    }, SPINNER_INTERVAL_MS);
+  }
+
+  /** 停止 spinner 动画 */
+  private stopSpinner(): void {
+    if (this.spinnerTimer) {
+      clearInterval(this.spinnerTimer);
+      this.spinnerTimer = null;
+    }
   }
 
   private async handleCommand(cmd: string): Promise<void> {
@@ -670,14 +949,29 @@ export class ChatUI {
     // 对话区
     const inputHeight = this.calcInputHeight();
     const headerLines = screen.length;
-    const contentArea = this.termHeight - headerLines - inputHeight - 1; // -1 for separator above input
+    let contentArea = this.termHeight - headerLines - inputHeight - 1; // -1 for separator above input
 
-    const visibleLines = this.getVisibleContentLines(contentArea);
+    // 计算流式内容行数
+    const liveLines = this.liveStream ? this.buildLiveContentLines() : [];
+    const liveLineCount = liveLines.length;
+    const historyArea = Math.max(0, contentArea - liveLineCount);
+
+    const visibleLines = this.getVisibleContentLines(historyArea);
     for (const line of visibleLines) {
       screen.push(line);
     }
 
-    // 填充空白到分隔线位置
+    // 填充空白到历史区底部
+    while (screen.length < headerLines + historyArea) {
+      screen.push('');
+    }
+
+    // 流式内容（带颜色）
+    for (const ll of liveLines) {
+      screen.push(this.colorize(ll.text, ll.color));
+    }
+
+    // 填充剩余空白到分隔线位置
     while (screen.length < headerLines + contentArea) {
       screen.push('');
     }
@@ -696,6 +990,45 @@ export class ChatUI {
     }
 
     return screen;
+  }
+
+  /** 构建流式内容渲染行 */
+  private buildLiveContentLines(): RenderedLine[] {
+    const lines: RenderedLine[] = [];
+
+    // Sending 状态的 spinner
+    if (this.uiState === 'sending') {
+      const frame = SPINNER_FRAMES[this.spinnerFrameIdx % SPINNER_FRAMES.length];
+      lines.push({ text: `${frame} 等待模型响应...`, color: 'gray' });
+    }
+
+    // Reasoning 指示
+    if (this.liveStream && this.liveStream.phase === 'reasoning' && this.uiState !== 'sending') {
+      lines.push({ text: '💭 思考中...', color: 'gray' });
+    }
+
+    // 流式 reasoning
+    if (this.liveStream?.reasoning) {
+      const wrapped = this.wrapText(this.liveStream.reasoning, this.termWidth);
+      for (const line of wrapped) {
+        lines.push({ text: line, color: 'gray' });
+      }
+    }
+
+    // 流式 content
+    if (this.liveStream?.content) {
+      const wrapped = this.wrapText(this.liveStream.content, this.termWidth);
+      for (const line of wrapped) {
+        lines.push({ text: line, color: 'white' });
+      }
+    }
+
+    // 输入队列指示
+    if (this.inputQueue.length > 0) {
+      lines.push({ text: `⏳ 等待中 (${this.inputQueue.length} 条)...`, color: 'gray' });
+    }
+
+    return lines;
   }
 
   /** 获取可见的对话内容行（带颜色） */

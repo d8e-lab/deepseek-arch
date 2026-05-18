@@ -80,6 +80,8 @@ export interface TurnRecord {
   cost_rmb: number;
   /** 创建时间 */
   created_at: string;
+  /** 是否为中断的不完整轮次（不会被发送回 API 作为上下文） */
+  interrupted?: boolean;
 }
 
 /** 会话元数据（不含消息体） */
@@ -211,6 +213,28 @@ export interface ChatCompletionResponse {
   model: string;
   choices: ChatChoice[];
   usage?: TokenUsage;
+}
+
+// ─── 流式 API ─────────────────────────────────────────
+
+/** SSE 流式块（DeepSeek API text/event-stream 单条 data） */
+export interface StreamChunk {
+  id: string;
+  object: string;
+  created: number;
+  model: string;
+  choices: ChatChoice[];
+  usage?: TokenUsage;
+}
+
+/** 流式调用选项 */
+export interface StreamOptions {
+  /** 请求超时（毫秒），默认 120_000 */
+  timeoutMs?: number;
+  /** 最大重试次数，默认 2 */
+  maxRetries?: number;
+  /** 外部 AbortController（用于用户中断），调用方可在外部 abort() */
+  signal?: AbortSignal;
 }
 
 // ─── 错误 ─────────────────────────────────────────────

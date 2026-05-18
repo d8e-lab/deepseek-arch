@@ -332,4 +332,318 @@ describe('ApiClient', () => {
       });
     });
   });
+
+  // ─── 流式 (chatStream) ─────────────────────────
+
+  describe('chatStream()', () => {
+    /** 创建模拟的 ReadableStream，逐行发送 SSE 数据 */
+    function mockSSEStream(chunks: string[], delayMs = 0): ReadableStream<Uint8Array> {
+      let index = 0;
+      return new ReadableStream({
+        async pull(controller) {
+          if (index >= chunks.length) {
+            controller.close();
+            return;
+          }
+          if (delayMs > 0) {
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+          controller.enqueue(new TextEncoder().encode(chunks[index]));
+          index++;
+        },
+      });
+    }
+
+    /** 构建 SSE 格式的 chunk 行（含换行） */
+    function sseChunk(data: object): string {
+      return `data: ${JSON.stringify(data)}\n\n`;
+    }
+
+    function sseDone(): string {
+      return 'data: [DONE]\n\n';
+    }
+
+    function createClient(
+      baseUrl = 'https://api.deepseek.com',
+      apiKey = 'sk-test-key',
+      model = 'deepseek-v4-pro',
+    ): ApiClient {
+      return new ApiClient(baseUrl, apiKey, model);
+    }
+
+    it('正确解析多 chunk 流式响应', async () => {
+      const chunks: string[] = [
+        sseChunk({
+          id: 'chatcmpl-001',
+          object: 'chat.completion.chunk',
+          created: 1234567890,
+          model: 'deepseek-v4-pro',
+          choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+        }),
+        sseChunk({
+          id: 'chatcmpl-001',
+          object: 'chat.completion.chunk',
+          created: 1234567890,
+          model: 'deepseek-v4-pro',
+          choices: [{ index: 0, delta: { content: '你好' }, finish_reason: null }],
+        }),
+        sseChunk({
+          id: 'chatcmpl-001',
+          object: 'chat.completion.chunk',
+          created: 1234567890,
+          model: 'deepseek-v4-pro',
+          choices: [{ index: 0, delta: { content: '！' }, finish_reason: null }],
+        }),
+        sseChunk({
+          id: 'chatcmpl-001',
+          object: 'chat.completion.chunk',
+          created: 1234567890,
+          model: 'deepseek-v4-pro',
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+        }),
+        sseDone(),
+      ];
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        body: mockSSEStream(chunks),
+      });
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      const results: any[] = [];
+      for await (const chunk of client.chatStream([{ role: 'user', content: 'hi' }])) {
+        results.push(chunk);
+      }
+
+      expect(results).toHaveLength(4);
+      expect(results[0].choices[0].delta?.content).toBe('');
+      expect(results[1].choices[0].delta?.content).toBe('你好');
+      expect(results[2].choices[0].delta?.content).toBe('！');
+      expect(results[3].usage?.total_tokens).toBe(14);
+
+      // 验证请求体
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.stream).toBe(true);
+    });
+
+    it('正确解析 reasoning_content', async () => {
+      const chunks: string[] = [
+        sseChunk({
+          id: 'chatcmpl-001',
+          object: 'chat.completion.chunk',
+          created: 1234567890,
+          model: 'deepseek-v4-pro',
+          choices: [{ index: 0, delta: { reasoning_content: '思考中...' }, finish_reason: null }],
+        }),
+        sseChunk({
+          id: 'chatcmpl-001',
+          object: 'chat.completion.chunk',
+          created: 1234567890,
+          model: 'deepseek-v4-pro',
+          choices: [{ index: 0, delta: { content: '回复' }, finish_reason: null }],
+        }),
+        sseDone(),
+      ];
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        body: mockSSEStream(chunks),
+      });
+
+      const client = createClient();
+      const results: any[] = [];
+      for await (const chunk of client.chatStream([{ role: 'user', content: 'test' }])) {
+        results.push(chunk);
+      }
+
+      expect(results).toHaveLength(2);
+      expect(results[0].choices[0].delta?.reasoning_content).toBe('思考中...');
+      expect(results[1].choices[0].delta?.content).toBe('回复');
+    });
+
+    it('[DONE] 信号正常结束', async () => {
+      const chunks: string[] = [
+        sseChunk({
+          id: 'chatcmpl-001',
+          object: 'chat.completion.chunk',
+          created: 1234567890,
+          model: 'deepseek-v4-pro',
+          choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
+        }),
+        sseDone(),
+      ];
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        body: mockSSEStream(chunks),
+      });
+
+      const client = createClient();
+      let count = 0;
+      for await (const _chunk of client.chatStream([{ role: 'user', content: 'test' }])) {
+        count++;
+      }
+      expect(count).toBe(1);
+    });
+
+    it('4xx 错误不重试，直接抛出 ApiError', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ error: { message: 'Invalid key', code: 'invalid_api_key' } }),
+      });
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      await expect(async () => {
+        for await (const _ of client.chatStream([{ role: 'user', content: 'test' }], { maxRetries: 1 })) {
+          // 不应到达
+        }
+      }).rejects.toThrow('Invalid key');
+    });
+
+    it('5xx 错误触发重试', async () => {
+      const chunks: string[] = [
+        sseChunk({
+          id: 'chatcmpl-001',
+          object: 'chat.completion.chunk',
+          created: 1234567890,
+          model: 'deepseek-v4-pro',
+          choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
+        }),
+        sseDone(),
+      ];
+
+      // 第一次 500，第二次成功
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 500 })
+        .mockResolvedValueOnce({ ok: true, body: mockSSEStream(chunks) });
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      let count = 0;
+      for await (const _ of client.chatStream([{ role: 'user', content: 'test' }], { maxRetries: 1 })) {
+        count++;
+      }
+      expect(count).toBe(1);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('重试耗尽后抛出错误', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 503 });
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      await expect(async () => {
+        for await (const _ of client.chatStream([{ role: 'user', content: 'test' }], { maxRetries: 0 })) {
+          // 不应到达
+        }
+      }).rejects.toThrow('HTTP 503');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('超时后抛出错误', async () => {
+      // 模拟永不 resolve 的 fetch（触发超时）
+      const mockFetch = vi.fn().mockImplementation(
+        (_url: string, init: { signal: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+          }),
+      );
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      await expect(async () => {
+        for await (const _ of client.chatStream(
+          [{ role: 'user', content: 'test' }],
+          { timeoutMs: 50, maxRetries: 0 },
+        )) {
+          // 不应到达
+        }
+      }).rejects.toThrow('请求超时');
+    });
+
+    it('外部 AbortSignal 可中断流式', async () => {
+      const controller = new AbortController();
+
+      // 先 abort，然后启动流式
+      controller.abort();
+
+      const stream = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          ctrl.enqueue(new TextEncoder().encode(sseChunk({
+            id: 'chatcmpl-001',
+            object: 'chat.completion.chunk',
+            created: 1234567890,
+            model: 'deepseek-v4-pro',
+            choices: [{ index: 0, delta: { content: 'part1' }, finish_reason: null }],
+          })));
+          ctrl.close();
+        },
+      });
+
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, body: stream });
+
+      const client = createClient();
+      await expect(async () => {
+        for await (const _ of client.chatStream(
+          [{ role: 'user', content: 'test' }],
+          { signal: controller.signal, maxRetries: 0 },
+        )) {
+          // 不应到达（abort 已触发）
+        }
+      }).rejects.toThrow();
+    });
+
+    it('自定义 model 和参数传递', async () => {
+      const chunks: string[] = [
+        sseChunk({
+          id: 'chatcmpl-001',
+          object: 'chat.completion.chunk',
+          created: 1234567890,
+          model: 'custom-model',
+          choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
+        }),
+        sseDone(),
+      ];
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        body: mockSSEStream(chunks),
+      });
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      for await (const _ of client.chatStream([{ role: 'user', content: 'test' }], {
+        model: 'custom-model',
+        temperature: 0.5,
+        max_tokens: 100,
+      })) {
+        // consume
+      }
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.model).toBe('custom-model');
+      expect(body.temperature).toBe(0.5);
+      expect(body.max_tokens).toBe(100);
+    });
+
+    it('空响应体抛出错误', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        body: null,
+      });
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      await expect(async () => {
+        for await (const _ of client.chatStream([{ role: 'user', content: 'test' }], { maxRetries: 0 })) {
+          // 不应到达
+        }
+      }).rejects.toThrow('响应体为空');
+    });
+  });
 });

@@ -10,9 +10,9 @@
 import { Command } from 'commander';
 import { ConfigManager } from '../core/config.js';
 
-const VERSION = '0.2.1';
+const VERSION = '0.4.0';
 const AUTHOR = 'helcksun';
-const RELEASE_DATE = '2026-05-17';
+const RELEASE_DATE = '2026-05-18';
 
 /** 按显示宽度截断标题（CJK 字符粗略按 2 列计） */
 function truncateTitle(title: string, maxWidth: number): string {

@@ -10,8 +10,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Storage } from './storage.js';
 import { ApiClient } from './api.js';
-import { SessionManager } from './session.js';
-import type { Message, ChatCompletionResponse } from './types.js';
+import { SessionManager, type StreamEvent } from './session.js';
+import type { Message, ChatCompletionResponse, StreamChunk, TokenUsage } from './types.js';
 
 /** 构建标准成功响应 */
 function makeResponse(
@@ -219,6 +219,213 @@ describe('SessionManager', () => {
       const mockChat = (client as any).chat as ReturnType<typeof vi.fn>;
       const messages: Message[] = mockChat.mock.calls[0][0];
       expect(messages[0].role).not.toBe('system');
+    });
+  });
+
+  // ─── 流式 (sendMessageStream) ─────────────────
+
+  describe('sendMessageStream()', () => {
+    /** 创建带 chatStream mock 的 ApiClient */
+    function mockStreamClient(chunks: StreamChunk[]): ApiClient {
+      async function* chatStream(
+        _messages: Message[],
+        _options?: any,
+      ): AsyncGenerator<StreamChunk> {
+        for (const chunk of chunks) {
+          yield chunk;
+        }
+      }
+      return { chatStream } as unknown as ApiClient;
+    }
+
+    function chunk(
+      overrides: Partial<StreamChunk> = {},
+    ): StreamChunk {
+      return {
+        id: 'chatcmpl-stream-001',
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: 'deepseek-v4-pro',
+        choices: [{ index: 0, delta: {}, finish_reason: null }],
+        ...overrides,
+      };
+    }
+
+    function usageChunk(usage: TokenUsage): StreamChunk {
+      return chunk({
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage,
+      });
+    }
+
+    it('流式接收 reasoning_content 和 content', async () => {
+      const streamClient = mockStreamClient([
+        chunk({
+          choices: [{ index: 0, delta: { reasoning_content: '我在思考' }, finish_reason: null }],
+        }),
+        chunk({
+          choices: [{ index: 0, delta: { content: '你好' }, finish_reason: null }],
+        }),
+        chunk({
+          choices: [{ index: 0, delta: { content: '世界' }, finish_reason: null }],
+        }),
+        usageChunk({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
+      ]);
+
+      const mgr = new SessionManager(storage, streamClient);
+      await mgr.startNewSession('流式测试');
+
+      const events: StreamEvent[] = [];
+      const result = await mgr.sendMessageStream('Q', (e) => events.push(e));
+
+      expect(result).not.toBeNull();
+      expect(result!.assistant.content).toBe('你好世界');
+      expect(result!.assistant.reasoning_content).toBe('我在思考');
+
+      // 验证事件序列
+      expect(events).toEqual([
+        { type: 'reasoning_delta', text: '我在思考' },
+        { type: 'content_delta', text: '你好' },
+        { type: 'content_delta', text: '世界' },
+        {
+          type: 'done',
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        },
+      ]);
+    });
+
+    it('流式完成后持久化 turn', async () => {
+      const streamClient = mockStreamClient([
+        chunk({
+          choices: [{ index: 0, delta: { content: '回复' }, finish_reason: null }],
+        }),
+        usageChunk({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 }),
+      ]);
+
+      const mgr = new SessionManager(storage, streamClient);
+      await mgr.startNewSession('持久化');
+      const id = mgr.getSessionId()!;
+
+      await mgr.sendMessageStream('Q', () => {});
+
+      const session = await storage.getSession(id);
+      expect(session!.turns).toHaveLength(1);
+      expect(session!.turns[0].user.content).toBe('Q');
+      expect(session!.turns[0].assistant.content).toBe('回复');
+      expect(session!.meta.turnCount).toBe(1);
+    });
+
+    it('中断后保存 interrupted 轮次', async () => {
+      const controller = new AbortController();
+
+      async function* abortedStream(
+        _messages: Message[],
+        options?: any,
+      ): AsyncGenerator<StreamChunk> {
+        yield chunk({
+          choices: [{ index: 0, delta: { content: '部分' }, finish_reason: null }],
+        });
+        // 模拟真实 chatStream：检查 signal 后抛出 AbortError
+        if (options?.signal?.aborted) {
+          const err = new Error('aborted');
+          err.name = 'AbortError';
+          throw err;
+        }
+        // 如果 signal 未 abort，主动 abort 然后等待传播
+        controller.abort();
+        // 等待 signal 事件传播到内部 controller
+        await new Promise((r) => setTimeout(r, 30));
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+
+      const streamClient = { chatStream: abortedStream } as unknown as ApiClient;
+
+      const mgr = new SessionManager(storage, streamClient);
+      await mgr.startNewSession('中断测试');
+
+      const events: StreamEvent[] = [];
+      const result = await mgr.sendMessageStream('Q', (e) => events.push(e), controller.signal);
+
+      expect(result).not.toBeNull();
+      expect(result!.interrupted).toBe(true);
+      expect(result!.assistant.content).toBe('部分');
+
+      // 验证 error 事件
+      const errorEvent = events.find((e) => e.type === 'error');
+      expect(errorEvent).toBeDefined();
+      expect(errorEvent!.error).toBe('已中断');
+    });
+
+    it('中断轮次不向 API 发送', async () => {
+      // 第一轮正常完成
+      const client1 = mockStreamClient([
+        chunk({
+          choices: [{ index: 0, delta: { content: 'A1' }, finish_reason: null }],
+        }),
+        usageChunk({ prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 }),
+      ]);
+
+      const mgr = new SessionManager(storage, client1);
+      await mgr.startNewSession('上下文测试');
+      await mgr.sendMessageStream('Q1', () => {});
+
+      // 第二轮中断
+      const controller = new AbortController();
+      async function* abortedStream2(
+        _messages: Message[],
+        options?: any,
+      ): AsyncGenerator<StreamChunk> {
+        yield chunk({
+          choices: [{ index: 0, delta: { content: '部分回复' }, finish_reason: null }],
+        });
+        if (options?.signal?.aborted) {
+          const err = new Error('aborted');
+          err.name = 'AbortError';
+          throw err;
+        }
+        controller.abort();
+        await new Promise((r) => setTimeout(r, 30));
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+      const client2 = { chatStream: abortedStream2 } as unknown as ApiClient;
+      const mgr2 = new SessionManager(storage, client2);
+      await mgr2.resumeSession(mgr.getSessionId()!);
+      await mgr2.sendMessageStream('Q2', () => {}, controller.signal);
+
+      // 第三轮：验证 Q2 的中断轮次不会被发送给 API
+      let capturedMessages: Message[] = [];
+      async function* captureStream(
+        messages: Message[],
+        _options?: any,
+      ): AsyncGenerator<StreamChunk> {
+        capturedMessages = messages;
+        yield chunk({
+          choices: [{ index: 0, delta: { content: 'A3' }, finish_reason: null }],
+        });
+        yield usageChunk({ prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 });
+      }
+      const client3 = { chatStream: captureStream } as unknown as ApiClient;
+      const mgr3 = new SessionManager(storage, client3);
+      await mgr3.resumeSession(mgr.getSessionId()!);
+      await mgr3.sendMessageStream('Q3', () => {});
+
+      // 应该只有 system + Q1/A1 + Q3，没有 Q2/部分回复（A3 是第三轮的回复，不在请求消息中）
+      const userMsgs = capturedMessages.filter((m) => m.role === 'user');
+      const assistantMsgs = capturedMessages.filter((m) => m.role === 'assistant');
+      expect(userMsgs.map((m) => m.content)).toEqual(['Q1', 'Q3']);
+      expect(assistantMsgs.map((m) => m.content)).toEqual(['A1']);
+    });
+
+    it('未创建会话时抛出错误', async () => {
+      const streamClient = mockStreamClient([]);
+
+      // 需要给 chatStream 添加一个空的 setSystemPrompt，但不用
+      const mgr = new SessionManager(storage, streamClient as any);
+      await expect(mgr.sendMessageStream('test', () => {})).rejects.toThrow('未创建会话');
     });
   });
 });

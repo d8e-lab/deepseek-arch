@@ -40,6 +40,14 @@
 - [x] 5.4 system prompt 从配置加载 — SessionManager.setSystemPrompt()
 - [x] 5.5 SessionManager 单元测试（15 tests）
 
+### Phase 4 — 流式输出 ✅ (2026-05-18)
+
+- [x] 4.1 SSE 流式解析（text/event-stream）— ApiClient.chatStream() + 超时 + 重试
+- [x] 4.2 reasoning_content 流式接收与终端增量展示 — ChatUI 状态机 + spinner
+- [x] 4.3 usage 信息从最后一个 chunk 提取
+- [x] 4.4 流式期间异步交互 — ESC/Ctrl+C 中断 + 输入队列 + 等待标识
+- [x] 4.5 流式输出单元测试 — ApiClient (10 tests) + SessionManager (5 tests)
+
 ### Phase 6 — 对话恢复 ✅ (2026-05-18)
 
 - [x] 6.1 resume 子命令实现
@@ -52,13 +60,6 @@
 ---
 
 ## 待完成
-
-### Phase 4 — 流式输出
-
-- [ ] 4.1 SSE 流式解析（text/event-stream）
-- [ ] 4.2 reasoning_content 流式接收与终端展示
-- [ ] 4.3 usage 信息从最后一个 chunk 提取
-- [ ] 4.4 流式输出单元测试
 
 ### Phase 7 — Token 统计 + 费用计算
 
@@ -85,3 +86,4 @@
 | v0.2.1 | **重构**：文件系统存储（sessions 目录 + turn JSON），移除 better-sqlite3 |
 | v0.2.2 | Phase 6: resume 功能（--id/--name/无参数列表选择），Storage 单文件 turns.json，tool role 预留 |
 | v0.3.0 | 修复 resume 显示 bug（历史回合渲染），Storage 仅保留最后一轮 usage |
+| v0.4.0 | Phase 4: 流式输出 (SSE) — 增量渲染、spinner、ESC中断、输入队列、超时重试 |

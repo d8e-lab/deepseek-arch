@@ -37,14 +37,14 @@ describe('CLI (e2e)', () => {
   describe('--version', () => {
     it('输出包含版本号、作者、发布日期', () => {
       const { stdout, status } = run(['--version']);
-      expect(stdout).toContain('deepseek-arch v0.2.1');
+      expect(stdout).toContain('deepseek-arch v0.4.0');
       expect(stdout).toContain('作者: helcksun');
-      expect(stdout).toContain('发布日期: 2026-05-17');
+      expect(stdout).toContain('发布日期: 2026-05-18');
     });
 
     it('-V 等价于 --version', () => {
       const { stdout } = run(['-V']);
-      expect(stdout).toContain('deepseek-arch v0.2.1');
+      expect(stdout).toContain('deepseek-arch v0.4.0');
     });
   });
 

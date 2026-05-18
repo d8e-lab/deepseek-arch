@@ -17,7 +17,19 @@ import type {
   TurnRecord,
   TokenUsage,
   ChatCompletionResponse,
+  StreamChunk,
 } from './types.js';
+
+/** 流式事件（SessionManager → ChatUI 回调） */
+export interface StreamEvent {
+  type: 'reasoning_delta' | 'content_delta' | 'done' | 'error';
+  /** 增量文本（reasoning_delta / content_delta） */
+  text?: string;
+  /** token 用量（done 事件） */
+  usage?: TokenUsage;
+  /** 错误信息（error 事件） */
+  error?: string;
+}
 
 export class SessionManager {
   private storage: Storage;
@@ -133,7 +145,125 @@ export class SessionManager {
     return { turn, response };
   }
 
-  /** 构建请求消息队列（含 reasoning_content 以命中 kv-cache） */
+  /**
+   * 流式发送用户消息
+   *
+   * 通过 onEvent 回调推送增量内容，支持外部 AbortSignal 中断。
+   * 流式完成后自动持久化 turn；中断时保存不完整轮次（interrupted=true）。
+   *
+   * @returns 完整的 TurnRecord（正常完成），或 null（中断/错误）
+   */
+  async sendMessageStream(
+    userContent: string,
+    onEvent: (event: StreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<TurnRecord | null> {
+    if (!this.session) {
+      throw new Error('未创建会话——请先调用 startNewSession() 或 resumeSession()');
+    }
+
+    const messages = this.buildMessages(userContent);
+
+    let responseId = '';
+    let modelName = '';
+    let fullReasoning = '';
+    let fullContent = '';
+    let usage: TokenUsage | undefined;
+
+    try {
+      for await (const chunk of this.client.chatStream(messages, { signal })) {
+        // 记录元信息（首个 chunk）
+        if (!responseId) responseId = chunk.id;
+        if (!modelName) modelName = chunk.model;
+
+        const delta = chunk.choices[0]?.delta;
+        if (delta?.reasoning_content) {
+          fullReasoning += delta.reasoning_content;
+          onEvent({ type: 'reasoning_delta', text: delta.reasoning_content });
+        }
+        if (delta?.content) {
+          fullContent += delta.content;
+          onEvent({ type: 'content_delta', text: delta.content });
+        }
+
+        // 最后一个 chunk 携带 usage
+        if (chunk.usage) {
+          usage = chunk.usage;
+        }
+      }
+
+      // 流式完成
+      const finalUsage = usage ?? {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+      };
+
+      onEvent({ type: 'done', usage: finalUsage });
+
+      const costRmb = 0; // Phase 7
+
+      const turn = await this.storage.saveTurn(
+        this.session.meta.id,
+        { role: 'user', content: userContent },
+        {
+          id: responseId || '',
+          role: 'assistant',
+          content: fullContent,
+          reasoning_content: fullReasoning || undefined,
+        },
+        finalUsage,
+        costRmb,
+      );
+
+      this.session.turns.push(turn);
+      this.session.meta.turnCount = this.session.turns.length;
+      this.session.meta.updated_at = turn.created_at;
+
+      return turn;
+    } catch (err: any) {
+      const isAbort = err instanceof Error && err.name === 'AbortError';
+      const msg = err?.message ?? String(err);
+
+      if (isAbort && (fullReasoning || fullContent)) {
+        // 中断：保存不完整轮次
+        const partialUsage = usage ?? {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+        };
+
+        try {
+          const turn = await this.storage.saveTurn(
+            this.session.meta.id,
+            { role: 'user', content: userContent },
+            {
+              id: responseId || '',
+              role: 'assistant',
+              content: fullContent || '[已中断]',
+              reasoning_content: fullReasoning || undefined,
+            },
+            partialUsage,
+            0,
+            true, // interrupted
+          );
+          this.session.turns.push(turn);
+          this.session.meta.turnCount = this.session.turns.length;
+          this.session.meta.updated_at = turn.created_at;
+
+          onEvent({ type: 'error', error: '已中断' });
+          return turn;
+        } catch {
+          // 持久化失败，不阻塞
+        }
+      }
+
+      onEvent({ type: 'error', error: msg });
+      return null;
+    }
+  }
+
+  /** 构建请求消息队列（含 reasoning_content 以命中 kv-cache，跳过 interrupted 轮次） */
   private buildMessages(currentContent: string): Message[] {
     const messages: Message[] = [];
 
@@ -142,8 +272,9 @@ export class SessionManager {
       messages.push(this.systemPrompt);
     }
 
-    // 2. 历史轮次
+    // 2. 历史轮次（跳过中断的不完整轮次）
     for (const turn of this.session!.turns) {
+      if (turn.interrupted) continue;
       messages.push(turn.user);
       messages.push({
         role: 'assistant',

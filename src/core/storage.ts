@@ -203,6 +203,7 @@ export class Storage {
     assistantMessage: Message & { id: string },
     usage: TokenUsage,
     costRmb: number,
+    interrupted = false,
   ): Promise<TurnRecord> {
     // 确保会话目录存在
     try {
@@ -232,6 +233,7 @@ export class Storage {
       usage,
       cost_rmb: costRmb,
       created_at: new Date().toISOString(),
+      ...(interrupted ? { interrupted: true } : {}),
     };
 
     // 将所有轮次写入单个 turns.json
