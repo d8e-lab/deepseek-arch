@@ -6,6 +6,6 @@
 import { run } from './cli/index.js';
 
 run().catch((err) => {
-  console.error('致命错误:', err.message);
-  process.exit(1);
+	console.error('致命错误:', err.message);
+	process.exit(1);
 });
