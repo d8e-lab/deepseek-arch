@@ -15,14 +15,15 @@
   11  src/index.ts               — 入口
   25  src/utils/event-loop.ts    — yieldEventLoop()
   38  src/utils/throttle.ts      — Throttle
- 649  src/core/api.test.ts       — 测试
- 431  src/core/session.test.ts   — 测试
- 302  src/core/storage.test.ts   — 测试
- 152  src/core/config.test.ts    — 测试
- 106  src/cli/index.test.ts      — 测试
- 115  src/utils/throttle.test.ts — 测试
+ 525  tests/core/api.test.ts     — 测试
+ 369  tests/core/session.test.ts — 测试
+ 302  tests/core/storage.test.ts — 测试
+ 152  tests/core/config.test.ts  — 测试
+ 233  tests/core/mock-provider.test.ts — 测试 (新增)
+ 106  tests/cli/index.test.ts    — 测试
+ 115  tests/utils/throttle.test.ts — 测试
 ----
-4588  total (16 文件)
+4803  total (18 文件)
 ```
 
 ## 核心问题
@@ -88,12 +89,11 @@ SessionManager 已从纯协调层膨胀：
 
 ## 测试布局补充
 
-当前仓库仍采用 `src/**/*.test.ts` 的同目录测试布局。若后续要分离测试和开发代码，建议先迁移测试文件，再继续做核心模块拆分：
+测试文件已迁移到独立的 `tests/` 目录，按 `src/` 的结构镜像。`vitest.config.ts` 的 `include` 已指向 `tests/`，`tsconfig.json` 保持只编译 `src/`。
 
-1. 新建 `tests/` 目录并按 `src/` 的结构镜像
-2. 调整 `vitest.config.ts` 的 `include`
-3. 保持 `tsconfig.json` 只编译 `src/`
-4. 再拆 `chat-ui.ts`、`session.ts` 等大文件
+在迁移中同时修复了两个预存 bug（SSE 注释行未换行导致解析失败、mock 测试中 SessionManager 重建后未调用 `startNewSession`），以及新增了 `mock-provider.test.ts`（26 条测试）。
+
+当前测试统计：**7 文件，117 条测试用例**。下一步可继续拆分 `chat-ui.ts`、`session.ts` 等大文件。
 
 ## 建议的目录结构
 
@@ -438,13 +438,13 @@ export class ChatUI {
 
 **新增测试文件**：
 ```
-src/cli/components/input-panel.test.ts
-src/cli/components/spinner.test.ts
-src/cli/components/display-lines.test.ts
-src/cli/state/chat-state.test.ts
-src/cli/handlers/input-handler.test.ts
-src/cli/handlers/stream-handler.test.ts
-src/core/stream-sender.test.ts
+tests/cli/components/input-panel.test.ts
+tests/cli/components/spinner.test.ts
+tests/cli/components/display-lines.test.ts
+tests/cli/state/chat-state.test.ts
+tests/cli/handlers/input-handler.test.ts
+tests/cli/handlers/stream-handler.test.ts
+tests/core/stream-sender.test.ts
 ```
 
 ## 影响评估

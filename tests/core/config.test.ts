@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ConfigManager, DEFAULT_CONFIG_DIR } from './config.js';
+import { ConfigManager, DEFAULT_CONFIG_DIR } from '../../src/core/config.js';
 
 describe('ConfigManager', () => {
   let testDir: string;

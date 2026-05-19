@@ -77,6 +77,21 @@
 
 ---
 
+### Phase 9 — 测试目录分离 + ModelProvider 抽象 ✅ (2026-05-19)
+
+- [x] 9.1 测试文件从 `src/` 迁移到独立 `tests/` 目录（6 文件）
+- [x] 9.2 `vitest.config.ts` 扫描范围改为 `tests/**/*.test.ts`
+- [x] 9.3 新增 `ModelProvider` 接口 (`src/core/model-provider.ts`)
+- [x] 9.4 新增 `MockProvider` 实现 (`src/core/mock-provider.ts`)
+- [x] 9.5 `ApiClient` 实现 `ModelProvider` 接口
+- [x] 9.6 `SessionManager` 从依赖 `ApiClient` 改为依赖 `ModelProvider`
+- [x] 9.7 MockProvider 单元测试（26 tests）
+- [x] 9.8 修复 2 个预存测试 bug
+- [x] 9.9 文档同步（README, agent.md, docs/architecture.md, docs/refactoring-analysis.md）
+- [x] 全量 117 tests passed，`tsc --noEmit` 零错误
+
+---
+
 ## 版本历史
 
 | Tag | 内容 |

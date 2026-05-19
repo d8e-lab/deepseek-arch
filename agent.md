@@ -7,8 +7,8 @@
 1. **设计先行**：编码前完成设计工作，遵循面向对象设计模式。
 2. **代码质量**：注意封装与耦合，保持模块职责单一。每个模块须配备对应的单元测试，核心模块覆盖率 ≥ 80%。
 3. **Git 规范**：积极提交，commit message 说明变更内容；大功能更新打 version tag（语义化版本 vMAJOR.MINOR.PATCH）。
-4. **Wiki 维护**：及时更新 `docs/` 下的项目文档，方便其他开发者上手。
-5. **TODO 同步**：任务拆解完成后更新 `TODO.md`，保持与当前进度一致。
+4. **Wiki 维护**：每次更新及时维护 `docs/` 下的项目文档，方便其他开发者上手。
+5. **TODO与readme 同步**：任务拆解完成后更新 `TODO.md`和`README.md`，保持与当前进度一致。
 6. **配置外置**：避免硬编码，所有可配置项放入 `~/.deepseek-arch/` 下的 TOML 文件。
 7. **安全约束**：
    - 禁止修改 `/mnt` 和根目录 `/`
@@ -29,10 +29,11 @@
 
 ## 测试约定
 
-- 当前仓库仍采用源文件同目录测试，命名为 `<module>.test.ts`
-- 如果后续迁移到独立 `tests/` 目录，需要同步更新 `vitest.config.ts`、`tsconfig.json` 和 README
+- 测试文件统一放在独立的 `tests/` 目录下，镜像 `src/` 的目录结构
+- 测试文件命名为 `<module>.test.ts`
 - 核心模块覆盖率目标：lines/branches/functions/statements ≥ 80%
 - 运行：`npm test`（单次）、`npm run test:watch`（持续）
+- vitest 配置只扫描 `tests/**/*.test.ts`
 
 ## 配置体系
 

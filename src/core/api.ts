@@ -4,22 +4,24 @@
  * 职责：
  *   1. 封装 DeepSeek Chat Completion API 调用（OpenAI 兼容格式）
  *   2. 构造函数注入 baseUrl / apiKey / defaultModel，与 ConfigManager 解耦
- *   3. 非流式调用（Phase 3），流式在 Phase 4 扩展
+ *   3. 非流式调用 + 流式调用 (SSE)
  *   4. 统一错误处理：HTTP 错误 → ApiError
+ *   5. 实现 ModelProvider 接口
  *
  * 用法：
  *   const client = new ApiClient("https://api.deepseek.com", "sk-xxx", "deepseek-v4-pro");
  *   const resp = await client.chat([{ role: "user", content: "你好" }]);
  */
 
-import type { Message, ChatCompletionRequest, ChatCompletionResponse, StreamChunk, StreamOptions } from '../types/index.js';
+import type { Message, ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from '../types/index.js';
 import { ApiError } from '../types/index.js';
+import type { ModelProvider, ChatOptions, StreamChatOptions } from './model-provider.js';
 
 export { ApiError };
 
 const CHAT_ENDPOINT = '/v1/chat/completions';
 
-export class ApiClient {
+export class ApiClient implements ModelProvider {
 	private baseUrl: string;
 	private apiKey: string;
 	private defaultModel: string;
@@ -47,11 +49,7 @@ export class ApiClient {
 	 */
 	async chat(
 		messages: Message[],
-		options?: {
-			model?: string;
-			temperature?: number;
-			max_tokens?: number;
-		},
+		options?: ChatOptions,
 	): Promise<ChatCompletionResponse> {
 		const body: ChatCompletionRequest = {
 			model: options?.model ?? this.defaultModel,
@@ -111,11 +109,7 @@ export class ApiClient {
 	 */
 	async *chatStream(
 		messages: Message[],
-		options?: StreamOptions & {
-			model?: string;
-			temperature?: number;
-			max_tokens?: number;
-		},
+		options?: StreamChatOptions,
 	): AsyncGenerator<StreamChunk> {
 		const timeoutMs = options?.timeoutMs ?? 120_000;
 		const maxRetries = options?.maxRetries ?? 2;

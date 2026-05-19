@@ -24,5 +24,3 @@ data/*.sqlite
 # Environment
 .env
 .env.local
-
-*/**/*test*

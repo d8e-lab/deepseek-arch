@@ -117,7 +117,7 @@ node dist/index.js chat
 node --inspect-brk dist/index.js chat
 
 # 调试测试文件
-npx vitest --inspect-brk src/core/config.test.ts
+npx vitest --inspect-brk tests/core/config.test.ts
 ```
 
 然后在 Chrome 打开 `chrome://inspect` 连接调试器。
@@ -151,7 +151,9 @@ src/
 ├── core/
 │   ├── config.ts           # ConfigManager（TOML 单例）
 │   ├── storage.ts          # Storage（文件系统 Repository）
-│   ├── api.ts              # ApiClient（DeepSeek API 适配器）
+│   ├── api.ts              # ApiClient（DeepSeek API 适配器，实现 ModelProvider）
+│   ├── model-provider.ts   # ModelProvider 接口（抽象层）
+│   ├── mock-provider.ts    # MockProvider（本地伪装提供商）
 │   └── session.ts          # SessionManager（Facade）
 ├── types/
 │   ├── index.ts            # 类型重新导出
@@ -165,7 +167,23 @@ docs/                       # 模块设计文档
 data/                       # 运行时数据（git-ignored）
 ```
 
-当前测试文件仍与源码同目录，命名为 `<module>.test.ts`。如果后续要把测试和开发代码分离，建议改为独立 `tests/` 目录，迁移方案见 [docs/test-separation-and-mock-provider.md](./docs/test-separation-and-mock-provider.md)。
+测试文件统一放在独立的 `tests/` 目录下，镜像 `src/` 的目录结构：
+
+```
+tests/
+├── core/
+│   ├── config.test.ts
+│   ├── storage.test.ts
+│   ├── api.test.ts
+│   ├── session.test.ts
+│   └── mock-provider.test.ts
+├── cli/
+│   └── index.test.ts
+└── utils/
+    └── throttle.test.ts
+```
+
+测试总数：**7 个测试文件，117 条测试用例**。设计文档见 [docs/test-separation-and-mock-provider.md](./docs/test-separation-and-mock-provider.md)。
 
 ---
 

@@ -9,7 +9,7 @@
  */
 
 import { Storage } from './storage.js';
-import { ApiClient } from './api.js';
+import type { ModelProvider } from './model-provider.js';
 import { yieldEventLoop } from '../utils/event-loop.js';
 import type {
 	Message,
@@ -34,13 +34,13 @@ export interface StreamEvent {
 
 export class SessionManager {
 	private storage: Storage;
-	private client: ApiClient;
+	private provider: ModelProvider;
 	private session: Session | null = null;
 	private systemPrompt: Message | null = null;
 
-	constructor(storage: Storage, client: ApiClient) {
+	constructor(storage: Storage, provider: ModelProvider) {
 		this.storage = storage;
-		this.client = client;
+		this.provider = provider;
 	}
 
 	/** 设置 system prompt（每次请求前插入消息队列首位） */
@@ -106,7 +106,7 @@ export class SessionManager {
 		const messages = this.buildMessages(userContent);
 
 		// 调用 API
-		const response = await this.client.chat(messages);
+		const response = await this.provider.chat(messages);
 
 		const choice = response.choices[0];
 		const assistantMsg = choice?.message;
@@ -172,7 +172,7 @@ export class SessionManager {
 		let usage: TokenUsage | undefined;
 
 		try {
-			for await (const chunk of this.client.chatStream(messages, { signal })) {
+			for await (const chunk of this.provider.chatStream(messages, { signal })) {
 				// 记录元信息（首个 chunk）
 				if (!responseId) responseId = chunk.id;
 				if (!modelName) modelName = chunk.model;

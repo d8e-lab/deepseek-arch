@@ -2,8 +2,8 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    // co-location: test files next to source files
-    include: ['src/**/*.test.ts'],
+    // 测试文件统一在 tests/ 目录下，镜像 src/ 目录结构
+    include: ['tests/**/*.test.ts'],
     coverage: {
       provider: 'v8',
       include: ['src/core/**/*.ts'],

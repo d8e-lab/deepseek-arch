@@ -8,8 +8,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Storage } from './storage.js';
-import type { Message, TokenUsage } from '../types/index.js';
+import { Storage } from '../../src/core/storage.js';
+import type { Message, TokenUsage } from '../../src/types/index.js';
 
 /** 创建已初始化的 Storage（临时目录） */
 async function createStore(): Promise<Storage> {

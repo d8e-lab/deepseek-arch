@@ -24,20 +24,21 @@ deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ES
 │  src/core/session.ts (Phase 5)                   │
 └──┬──────────────┬──────────────┬────────────────┘
    │              │              │
-┌──▼──────┐ ┌─────▼──────┐ ┌────▼───────────┐
-│ConfigMgr│ │  Storage   │ │  ApiClient     │
-│(Singleton│ │(Repository)│ │  (Adapter)     │
-│TOML r/w) │ │JSON 文件   │ │  fetch + SSE   │
-└─────────┘ └────────────┘ └────┬───────────┘
-                                │
-                     ┌──────────▼──────────┐
-                     │  TokenCalculator    │
-                     │  费用计算 + 缓存统计  │
-                     │  (Phase 7 — 待实现)  │
-                     └─────────────────────┘
+┌──▼──────┐ ┌─────▼──────┐ ┌────▼────────────────┐
+│ConfigMgr│ │  Storage   │ │  ModelProvider (接口) │
+│(Singleton│ │(Repository)│ │  src/core/model-     │
+│TOML r/w) │ │JSON 文件   │ │  provider.ts         │
+└─────────┘ └────────────┘ └──┬────────┬─────────┘
+                              │        │
+                    ┌─────────▼┐  ┌────▼──────────┐
+                    │ ApiClient│  │  MockProvider  │
+                    │ (真实)   │  │  (本地伪装)    │
+                    │fetch+SSE │  │  src/core/     │
+                    └──────────┘  │  mock-provider │
+                                  └───────────────┘
 ```
 
-**依赖方向**：CLI → SessionManager → {ConfigManager, Storage, ApiClient, TokenCalculator}。无循环依赖。
+**依赖方向**：CLI → SessionManager → {ConfigManager, Storage, ModelProvider, TokenCalculator}。ApiClient/MockProvider 实现 ModelProvider 接口。无循环依赖。
 
 ## 模块职责
 
@@ -167,7 +168,7 @@ IDLE ── Enter ──► SENDING (spinner 旋转)
 
 ## 测试目录规划
 
-当前仓库仍采用“测试文件与源码同目录”的布局。若后续迁移为独立 `tests/` 目录，建议保持镜像结构：
+测试文件统一放在独立的 `tests/` 目录下，镜像 `src/` 的目录结构：
 
 ```text
 tests/
