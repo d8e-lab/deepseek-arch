@@ -1,10 +1,10 @@
 # 类型体系设计
 
-> 最后更新：2026-05-18 · 实现文件：`src/core/types.ts`
+> 最后更新：2026-05-19 · 实现文件：`src/types/`
 
 ## 设计原则
 
-- **集中定义**：所有领域类型集中在 `types.ts`，避免循环依赖
+- **按域拆分**：类型拆分到 `src/types/*.ts`，避免单文件膨胀
 - **纯数据结构**：interface 只描述数据形状，不含行为方法
 - **PascalCase 命名**：类型名用 PascalCase，字段用 snake_case（与 API/JSON 一致）
 

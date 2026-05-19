@@ -5,7 +5,7 @@
 ## 开发守则
 
 1. **设计先行**：编码前完成设计工作，遵循面向对象设计模式。
-2. **代码质量**：注意封装与耦合，保持模块职责单一。每个模块须配备对应的单元测试（`*.test.ts`），核心模块覆盖率 ≥ 80%。
+2. **代码质量**：注意封装与耦合，保持模块职责单一。每个模块须配备对应的单元测试，核心模块覆盖率 ≥ 80%。
 3. **Git 规范**：积极提交，commit message 说明变更内容；大功能更新打 version tag（语义化版本 vMAJOR.MINOR.PATCH）。
 4. **Wiki 维护**：及时更新 `docs/` 下的项目文档，方便其他开发者上手。
 5. **TODO 同步**：任务拆解完成后更新 `TODO.md`，保持与当前进度一致。
@@ -29,7 +29,8 @@
 
 ## 测试约定
 
-- 测试文件与源文件同目录，命名为 `<module>.test.ts`
+- 当前仓库仍采用源文件同目录测试，命名为 `<module>.test.ts`
+- 如果后续迁移到独立 `tests/` 目录，需要同步更新 `vitest.config.ts`、`tsconfig.json` 和 README
 - 核心模块覆盖率目标：lines/branches/functions/statements ≥ 80%
 - 运行：`npm test`（单次）、`npm run test:watch`（持续）
 
@@ -41,8 +42,10 @@
 ├── providers.toml        # 模型供应商
 ├── pricing.toml          # 价格（¥/1M tokens）
 ├── system-prompt.toml    # System Prompt 模板
-└── data.db               # SQLite 对话数据
+└── sessions/             # 文件系统会话数据
 ```
+
+> 说明：当前代码实际使用 `sessions/` + `turns.json` 文件存储，不再使用 SQLite。文档以源码为准。
 
 ## 版本信息
 

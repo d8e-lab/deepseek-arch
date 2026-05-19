@@ -1,6 +1,6 @@
 # 架构设计
 
-> 最后更新：2026-05-18 · v0.4.0
+> 最后更新：2026-05-19 · v0.4.0
 
 ## 概述
 
@@ -47,7 +47,7 @@ deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ES
 | **ChatUI** | `src/cli/chat-ui.ts` | 全屏 TUI，流式状态机 (IDLE/SENDING/STREAMING)，输入队列，ANSI 渲染，Spinner | ✅ |
 | **ConfigManager** | `src/core/config.ts` | TOML 多文件加载，文件跳转引用，持久化读写 | ✅ |
 | **Storage** | `src/core/storage.ts` | 文件系统存储，sessions 目录 + 单文件 turns.json | ✅ |
-| **Types** | `src/core/types.ts` | 全部领域类型定义（无行为） | ✅ |
+| **Types** | `src/types/` | 全部领域类型定义（无行为） | ✅ |
 | **ApiClient** | `src/core/api.ts` | DeepSeek Chat Completion API 调用，非流式 + 流式 (SSE 解析) | ✅ |
 | **SessionManager** | `src/core/session.ts` | 对话生命周期管理（Facade），非流式 + 流式发送 | ✅ |
 | **TokenCalculator** | `src/core/token-counter.ts` | 费用计算、缓存命中率 | ❌ Phase 7 |
@@ -128,7 +128,7 @@ SessionManager.sendMessage(content)
 | HTTP | fetch (built-in) | SSE 流式解析，超时/重试 |
 | UUID | uuid v14 | 会话 ID 生成 |
 | 终端 | chalk v5 | 彩色输出，ANSI 转义序列 |
-| 测试 | vitest v4 | 单元测试 + e2e |
+| 测试 | vitest v4 | 单元测试 + e2e（当前测试文件仍与源码同目录） |
 | 覆盖率 | @vitest/coverage-v8 | 目标 ≥ 80% |
 
 ## ChatUI 流式状态机
@@ -164,3 +164,22 @@ IDLE ── Enter ──► SENDING (spinner 旋转)
 | `src/core/api.test.ts` | 24 (含 10 流式) | ✅ |
 | `src/cli/index.test.ts` | 10 | ✅ |
 | **总计** | **91** | ✅ |
+
+## 测试目录规划
+
+当前仓库仍采用“测试文件与源码同目录”的布局。若后续迁移为独立 `tests/` 目录，建议保持镜像结构：
+
+```text
+tests/
+├── core/
+│   ├── config.test.ts
+│   ├── storage.test.ts
+│   ├── api.test.ts
+│   └── session.test.ts
+├── cli/
+│   └── index.test.ts
+└── utils/
+    └── throttle.test.ts
+```
+
+迁移时需要同步修改 `vitest.config.ts` 的 `include`，并更新 README / agent.md 中的测试约定。

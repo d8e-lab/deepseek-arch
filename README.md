@@ -30,7 +30,7 @@ node dist/index.js --help
 - **多轮对话**：自动持久化 turn JSON（含 `reasoning_content` 命中 kv-cache）
 - **会话管理**：/title 命名、/clear 清屏、退出显示恢复命令
 - **对话恢复**：按 ID 或标题恢复历史会话（`resume` 子命令）
-- **Token 统计**：实时记录 token 消耗、缓存命中/未命中、命中率
+- **Token 记录**：保存 API 返回的 `usage`，为后续费用计算预留
 - **配置外置**：TOML 文件管理，支持文件间跳转引用
 - **安全隔离**：操作范围限于 home 目录和项目工作目录
 
@@ -70,7 +70,7 @@ chat 命令可用快捷键：
 └── sessions/             # 对话数据（文件系统存储）
     └── <uuid>/
         ├── meta.json
-        └── turn-NNN.json
+        └── turns.json
 ```
 
 配置 `~/.deepseek-arch/providers.toml` 中的 `api_key` 后即可使用。
@@ -144,24 +144,28 @@ src/
 ├── index.ts                # 入口
 ├── cli/
 │   ├── index.ts            # Commander CLI 主程序
-│   ├── index.test.ts       # CLI e2e 测试
 │   ├── chat-ui.ts          # 全屏 TUI 对话界面
-│   └── commands/           # 子命令实现（待完成）
+│   ├── state/
+│   │   └── chat-state.ts   # 流式状态机
+│   └── components/         # ANSI / Spinner / 输入面板 / 渲染组件
 ├── core/
-│   ├── types.ts            # 领域类型定义
 │   ├── config.ts           # ConfigManager（TOML 单例）
-│   ├── config.test.ts      # ConfigManager 测试
 │   ├── storage.ts          # Storage（文件系统 Repository）
-│   ├── storage.test.ts     # Storage 测试
 │   ├── api.ts              # ApiClient（DeepSeek API 适配器）
-│   ├── api.test.ts         # ApiClient 测试
-│   ├── session.ts          # SessionManager（Facade）
-│   ├── session.test.ts     # SessionManager 测试
-│   └── token-counter.ts    # TokenCalculator（Phase 7）
+│   └── session.ts          # SessionManager（Facade）
+├── types/
+│   ├── index.ts            # 类型重新导出
+│   ├── chat.ts             # 消息与对话类型
+│   ├── session.ts          # 会话类型
+│   ├── config.ts           # 配置类型
+│   ├── api.ts              # API 请求/响应类型
+│   └── token.ts            # Token 用量类型
 ├── utils/                  # 工具函数
 docs/                       # 模块设计文档
 data/                       # 运行时数据（git-ignored）
 ```
+
+当前测试文件仍与源码同目录，命名为 `<module>.test.ts`。如果后续要把测试和开发代码分离，建议改为独立 `tests/` 目录，迁移方案见 [docs/test-separation-and-mock-provider.md](./docs/test-separation-and-mock-provider.md)。
 
 ---
 
@@ -238,6 +242,8 @@ npm publish --access public
 | [docs/architecture.md](./docs/architecture.md) | 整体架构设计 |
 | [docs/config.md](./docs/config.md) | ConfigManager 设计 |
 | [docs/storage.md](./docs/storage.md) | Storage 文件系统设计 |
+| [docs/types-modules.md](./docs/types-modules.md) | 类型拆分设计 |
+| [docs/test-separation-and-mock-provider.md](./docs/test-separation-and-mock-provider.md) | 测试目录分离 + 伪装模型提供商设计 |
 | [docs/cli.md](./docs/cli.md) | CLI 设计 |
 | [docs/types.md](./docs/types.md) | 类型体系设计 |
 
