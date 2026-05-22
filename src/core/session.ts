@@ -203,8 +203,6 @@ export class SessionManager {
 				total_tokens: 0,
 			};
 
-			onEvent({ type: 'done', usage: finalUsage });
-
 			const costRmb = 0; // Phase 7
 
 			const turn = await this.storage.saveTurn(
@@ -223,6 +221,10 @@ export class SessionManager {
 			this.session.turns.push(turn);
 			this.session.meta.turnCount = this.session.turns.length;
 			this.session.meta.updated_at = turn.created_at;
+
+			// done 事件必须在 turn 推入 session.turns 后触发，
+			// 否则 ChatUI.handleStreamEvent('done') 读取 session.turns 会得到空数据
+			onEvent({ type: 'done', usage: finalUsage });
 
 			return turn;
 		} catch (err: any) {

@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "total_checks": 9,
+  "passed_checks": 9,
+  "frames": [
+    "frame-00-initial",
+    "frame-01-after-enter",
+    "frame-02-streaming",
+    "frame-03-streaming-done"
+  ],
+  "details": {
+    "frame-00-initial": {
+      "startup_header": true,
+      "mock_mode": true,
+      "input_prompt": true
+    },
+    "frame-01-after-enter": {
+      "user_msg_displayed": true
+    },
+    "frame-02-streaming": {
+      "user_msg_preserved": true,
+      "reasoning_appeared": true,
+      "reply_appeared": true,
+      "inline_order": true
+    },
+    "frame-03-streaming-done": {
+      "no_extra_output": true
+    }
+  }
+}

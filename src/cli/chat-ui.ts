@@ -88,7 +88,6 @@ export class ChatUI {
 	private rawMode = false;
 	private lastInputHeight = 1;
 	private stdinIsTTY = false;
-	private lastStreamPhase: 'idle' | 'sending' | 'reasoning' | 'content' = 'idle';
 
 	constructor(config: ConfigManager, sessionManager?: SessionManager, mockMode = false) {
 		this.mockMode = mockMode;
@@ -113,6 +112,9 @@ export class ChatUI {
 			if (session) {
 				for (const turn of session.turns) {
 					this.display.append(turn.user.content, 'green');
+					if (turn.assistant.reasoning_content) {
+						this.display.append(turn.assistant.reasoning_content, 'gray');
+					}
 					if (turn.assistant.content) {
 						this.display.append(turn.assistant.content, 'white');
 					}
@@ -159,6 +161,7 @@ export class ChatUI {
 		this.enterAltScreen();
 		this.startRawMode();
 		this.fullDraw();
+		writeSync(1, SHOW_CURSOR);  // 显示光标到输入面板位置
 
 		readline.emitKeypressEvents(process.stdin);
 		(process.stdin as any).on('keypress', (str: string, key: KeyPress) => {
@@ -321,9 +324,11 @@ export class ChatUI {
 		if (content.trim() === '') return;
 
 		this.display.append(content, 'green');
+		this.fullDraw();
 
 		this.state.startSending();
-		this.spinner.start(() => {});
+		const self = this;
+		this.spinner.start(() => self.drawStreamUpdate());
 
 		const signal = this.state.createAbortController().signal;
 
@@ -462,6 +467,7 @@ export class ChatUI {
 		const cursor = this.input.calcCursor(inputHeight, this.termWidth);
 		const cursorRow = this.termHeight - inputHeight + cursor.cursorRow;
 		writeSync(1, cursorTo(cursorRow, cursor.cursorCol));
+		writeSync(1, SHOW_CURSOR);
 	}
 
 	/** 流式增量重绘 */
@@ -471,43 +477,45 @@ export class ChatUI {
 			return;
 		}
 
-		const ls = this.state.liveStream;
 		const inputHeight = this.input.calcHeight(this.termWidth);
-		const inputChanged = inputHeight !== this.lastInputHeight;
-		const phaseChanged = ls.phase !== this.lastStreamPhase || inputChanged;
-		this.lastStreamPhase = ls.phase;
 		this.lastInputHeight = inputHeight;
 		const sepLine = this.termHeight - inputHeight - 1;
 
-		if (phaseChanged) {
-			// 全量重绘：从内容区域开始擦除（分隔线上方）
-			const streamLines = ls.phase === 'content' && ls.reasoning ? 2 : 1;
-			writeSync(1, cursorTo(sepLine - streamLines));
-			writeSync(1, ERASE_SCREEN_BELOW);
-			this.writeStreamContent(ls);
-			writeSync(1, '\n' + '─'.repeat(this.termWidth) + '\n');
-			this.renderInputPanel(inputHeight);
-		} else {
-			// 原地更新：只重写流式文本（分隔线上方），不动分隔线和输入面板
-			const streamLines = ls.phase === 'content' && ls.reasoning ? 2 : 1;
-			for (let i = 0; i < streamLines; i++) {
-				writeSync(1, cursorTo(sepLine - streamLines + i));
-				writeSync(1, ERASE_LINE);
-			}
-			// 重新定位到流式内容起始行
-			writeSync(1, cursorTo(sepLine - streamLines));
-			this.writeStreamContent(ls);
+		// 从历史区域起点（标题栏 + 顶部分隔线之后，line 3）擦除到底部
+		writeSync(1, cursorTo(3, 0));
+		writeSync(1, ERASE_SCREEN_BELOW);
+
+		// 绘制历史对话行
+		const visibleLines = this.getVisibleLines();
+		for (const line of visibleLines) {
+			const colored = this.colorize(line.text, line.color);
+			const dw = strDisplayWidth(line.text);
+			const padding = Math.max(0, this.termWidth - dw);
+			writeSync(1, colored + ' '.repeat(padding) + '\n');
 		}
+
+		// 绘制流式内容（紧跟历史之后）
+		const ls = this.state.liveStream;
+		this.writeStreamContent(ls);
+		writeSync(1, '\n');
+
+		// 底部分隔线（锚定到输入面板上方一行）
+		writeSync(1, cursorTo(sepLine, 0));
+		writeSync(1, ERASE_SCREEN_BELOW);
+		writeSync(1, '─'.repeat(this.termWidth) + '\n');
+
+		this.renderInputPanel(inputHeight);
 
 		// 队列提示
 		if (this.input.hasQueue) {
-			writeSync(1, '\n' + chalk.dim(`⏳ 等待中 (${this.input.queueLength} 条)...`));
+			writeSync(1, chalk.dim(`\n⏳ 等待中 (${this.input.queueLength} 条)...`));
 		}
 
 		// 光标定位
 		const cursor = this.input.calcCursor(inputHeight, this.termWidth);
 		const cursorRow = this.termHeight - inputHeight + cursor.cursorRow;
 		writeSync(1, cursorTo(cursorRow, cursor.cursorCol));
+		writeSync(1, SHOW_CURSOR);
 	}
 
 	/** 写入流式内容（reasoning / content） */
@@ -556,9 +564,13 @@ export class ChatUI {
 				const line = prompt + wrappedInput[i];
 				const lineDisplayWidth = prompt.length + strDisplayWidth(wrappedInput[i]);
 				const padded = line + ' '.repeat(Math.max(0, this.termWidth - lineDisplayWidth));
-				writeSync(1, BG_GRAY + padded + RESET_BG + '\n');
+				writeSync(1, BG_GRAY + padded + RESET_BG);
 			} else {
-				writeSync(1, BG_GRAY + ' '.repeat(this.termWidth) + RESET_BG + '\n');
+				writeSync(1, BG_GRAY + ' '.repeat(this.termWidth) + RESET_BG);
+			}
+			// 最后一行不加 \n，避免在终端最后一行时触发上滚
+			if (i < inputHeight - 1) {
+				writeSync(1, '\n');
 			}
 		}
 	}
