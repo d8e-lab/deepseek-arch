@@ -1,16 +1,21 @@
 {
   "name": "deepseek-arch",
   "version": "0.1.0",
-  "description": "DeepSeek Terminal Agent — Linux 终端 AI 助手，支持多轮对话、会话持久化、Token 统计",
+  "description": "DeepSeek core library，提供会话、存储、配置与模型调用能力",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./core": "./dist/core/index.js",
+    "./types": "./dist/types/index.js"
+  },
   "bin": {
-    "deepseek-arch": "./dist/index.js"
+    "deepseek-arch": "dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/index.js",
+    "start": "node dist/cli/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
@@ -18,9 +23,9 @@
   "keywords": [
     "deepseek",
     "ai",
-    "terminal",
-    "agent",
-    "cli"
+    "library",
+    "sdk",
+    "core"
   ],
   "author": "helcksun",
   "license": "MIT",
