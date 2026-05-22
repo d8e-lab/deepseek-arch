@@ -44,7 +44,7 @@ import { Spinner } from './components/spinner.js';
 
 import { DisplayLines, type LineColor } from './components/display-lines.js';
 
-import { ChatState } from './state/chat-state.js';
+import { ChatState, type LiveStreamState } from './state/chat-state.js';
 
 import {
 	InputPanel,
@@ -72,6 +72,7 @@ export class ChatUI {
 	// 依赖
 	private config: ConfigManager;
 	private sessionManager: SessionManager | null = null;
+	private mockMode = false;
 
 	// 组件
 	private state = new ChatState();
@@ -87,8 +88,10 @@ export class ChatUI {
 	private rawMode = false;
 	private lastInputHeight = 1;
 	private stdinIsTTY = false;
+	private lastStreamPhase: 'idle' | 'sending' | 'reasoning' | 'content' = 'idle';
 
-	constructor(config: ConfigManager, sessionManager?: SessionManager) {
+	constructor(config: ConfigManager, sessionManager?: SessionManager, mockMode = false) {
+		this.mockMode = mockMode;
 		this.config = config;
 		if (sessionManager) this.sessionManager = sessionManager;
 	}
@@ -113,6 +116,16 @@ export class ChatUI {
 					if (turn.assistant.content) {
 						this.display.append(turn.assistant.content, 'white');
 					}
+				}
+			} else {
+				// 预建 SessionManager（无活跃会话）：启动新会话
+				await this.sessionManager.startNewSession();
+
+				// 加载 system prompt
+				const sysPromptName = this.config.get<string>('defaults.system_prompt') ?? 'default';
+				const sysPromptContent = this.config.get<string>(`systemPrompts.${sysPromptName}.content`);
+				if (sysPromptContent) {
+					this.sessionManager.setSystemPrompt({ role: 'system', content: sysPromptContent });
 				}
 			}
 		} else {
@@ -192,99 +205,97 @@ export class ChatUI {
 		this.fullDraw();
 	}
 
-	// ─── 键盘事件 ──────────────────────────────────
+	// ─── 键盘处理 ──────────────────────────────────
 
 	private handleKeyPress(str: string, key: KeyPress): void {
-		if (this.state.isIdle()) {
-			this.handleIdleKeyPress(str, key);
-		} else {
-			this.handleStreamingKeyPress(str, key);
-		}
-	}
+		const { name, ctrl } = key;
 
-	private handleIdleKeyPress(str: string, key: KeyPress): void {
-		const { name, ctrl, meta, shift } = key;
-
-		// Ctrl+C / /exit 命令 → 退出
+		// Ctrl+C: 流式期间中断，否则退出
 		if ((ctrl && name === 'c') || this.input.text === '/exit') {
+			if (this.state.isStreaming() || this.state.isSending()) {
+				this.interruptStream();
+				return;
+			}
 			this.input.clear();
 			this.printExitSummary();
 			this.cleanup();
 			process.exit(0);
 		}
 
-		// Ctrl+L / /clear 命令 → 清屏
-		if ((ctrl && name === 'l') || this.input.text === '/clear') {
-			this.input.clear();
+		// 流式期间：允许继续编辑输入框、排队发送、中断
+		if (!this.state.isIdle()) {
+			if (name === 'escape') {
+				this.interruptStream();
+				return;
+			}
+			// 普通按键 → 编辑输入框（正常处理但不发送）
+			if (name === 'return') {
+				this.handleEnter(); // 会排队
+				return;
+			}
+			this.handleEditKey(str, key);
+			return;
+		}
+
+		// 空闲态：处理所有按键
+		this.handleEditKey(str, key);
+	}
+
+	private handleEditKey(str: string, key: KeyPress): void {
+		const { name, ctrl } = key;
+
+		switch (name) {
+			case 'return':
+				this.handleEnter();
+				break;
+			case 'backspace':
+				this.input.deleteChar();
+				this.drawStreamUpdate();
+				break;
+			case 'delete':
+				this.input.deleteForward();
+				this.drawStreamUpdate();
+				break;
+			case 'left':
+				this.input.moveCursor(-1);
+				this.drawStreamUpdate();
+				break;
+			case 'right':
+				this.input.moveCursor(1);
+				this.drawStreamUpdate();
+				break;
+			case 'up':
+				this.input.navigateHistory(-1);
+				this.drawStreamUpdate();
+				break;
+			case 'down':
+				this.input.navigateHistory(1);
+				this.drawStreamUpdate();
+				break;
+			default:
+				// 普通字符输入
+				if (str && str.length > 0 && !ctrl) {
+					// 跳过控制序列和功能键
+					if (name && ['escape', 'tab', 'home', 'end', 'pageup', 'pagedown', 'insert'].includes(name)) {
+						break;
+					}
+					this.input.insertChar(str);
+					this.drawStreamUpdate();
+				}
+				break;
+		}
+	}
+
+	// ─── 消息发送 ──────────────────────────────────
+
+	private async handleEnter(): Promise<void> {
+		// /commands
+		if (this.input.text.startsWith('/clear')) {
 			this.display.clear();
+			this.input.clear();
 			this.fullDraw();
 			return;
 		}
-
-		// Ctrl+Enter / Ctrl+J → 换行 (必须在 Enter 前面检查)
-		if (str === '\n' || (ctrl && name === 'return')) {
-			this.input.insertNewline();
-			this.fullDraw();
-			return;
-		}
-
-		// Enter → 发送
-		if (name === 'return') {
-			this.handleEnter();
-			return;
-		}
-
-		// Backspace
-		if (name === 'backspace') {
-			this.input.deleteChar();
-			this.fullDraw();
-			return;
-		}
-
-		// Delete
-		if (name === 'delete' || name === 'del') {
-			this.input.deleteForward();
-			this.fullDraw();
-			return;
-		}
-
-		// ← / →
-		if (name === 'left') {
-			this.input.moveCursor(-1);
-			this.fullDraw();
-			return;
-		}
-		if (name === 'right') {
-			this.input.moveCursor(1);
-			this.fullDraw();
-			return;
-		}
-
-		// ↑ / ↓ → 输入历史
-		if (name === 'up') {
-			this.input.navigateHistory(-1);
-			this.fullDraw();
-			return;
-		}
-		if (name === 'down') {
-			this.input.navigateHistory(1);
-			this.fullDraw();
-			return;
-		}
-
-		// Home / End
-		if (name === 'home') {
-			this.input.moveCursor(-this.input.cursorPos);
-			this.fullDraw();
-			return;
-		}
-		if (name === 'end') {
-			this.input.moveCursor(this.input.text.length - this.input.cursorPos);
-			this.fullDraw();
-			return;
-		}
-
-		// /title <name> 命令
 		if (this.input.text.startsWith('/title ')) {
 			const title = this.input.text.slice(7).trim();
 			if (title) {
@@ -296,89 +307,23 @@ export class ChatUI {
 			return;
 		}
 
-		// 普通字符
-		if (str && !ctrl && !meta && str.length === 1 && str.charCodeAt(0) >= 32) {
-			this.input.insertChar(str);
-			this.fullDraw();
-		}
-	}
-
-	private handleStreamingKeyPress(str: string, key: KeyPress): void {
-		const { name, ctrl } = key;
-
-		// ESC 或 Ctrl+C → 中断流式
-		if (name === 'escape' || (ctrl && name === 'c')) {
-			this.interruptStream();
-			return;
-		}
-
-		// Ctrl+Enter / Ctrl+J → 换行 (必须在 Enter 前面检查)
-		if (str === '\n' || (ctrl && name === 'return')) {
-			this.input.insertNewline();
+		// 如果正在流式输出，排队
+		if (!this.state.isIdle()) {
+			const content = this.input.submit();
+			if (content.trim() === '') return;
+			this.input.enqueue(content);
+			this.display.append(content, 'green');
 			this.drawStreamUpdate();
 			return;
 		}
 
-		// Enter → 暂存到输入队列
-		if (name === 'return' && this.input.text.trim()) {
-			const text = this.input.text;
-			this.input.clear();
-			this.input.enqueue(text);
-			this.drawStreamUpdate();
-			return;
-		}
-
-		// Backspace / Delete
-		if (name === 'backspace') {
-			this.input.deleteChar();
-			this.drawStreamUpdate();
-			return;
-		}
-		if (name === 'delete' || name === 'del') {
-			this.input.deleteForward();
-			this.drawStreamUpdate();
-			return;
-		}
-
-		// ← / →
-		if (name === 'left') {
-			this.input.moveCursor(-1);
-			this.drawStreamUpdate();
-			return;
-		}
-		if (name === 'right') {
-			this.input.moveCursor(1);
-			this.drawStreamUpdate();
-			return;
-		}
-
-		// 普通字符（流式期间仍可编辑输入框）
-		if (str && !ctrl && str.length === 1 && str.charCodeAt(0) >= 32) {
-			this.input.insertChar(str);
-			this.drawStreamUpdate();
-		}
-	}
-
-	// ─── 发送消息 ──────────────────────────────────
-
-	private async handleEnter(): Promise<void> {
 		const content = this.input.submit();
-		if (!content) return;
+		if (content.trim() === '') return;
 
 		this.display.append(content, 'green');
 
-		// 检查命令
-		if (content.startsWith('/')) {
-			this.fullDraw();
-			return;
-		}
-
-		// 启动流式发送
 		this.state.startSending();
-		this.renderThrottle.reset();
-		this.spinner.start((frame) => {
-			this.drawStreamUpdate();
-		});
+		this.spinner.start(() => {});
 
 		const signal = this.state.createAbortController().signal;
 
@@ -388,96 +333,76 @@ export class ChatUI {
 				(event) => this.handleStreamEvent(event),
 				signal,
 			);
-		} catch {
-			// sendMessageStream 内部已通过 onEvent 报告错误
+		} catch (err: any) {
+			if (err.name !== 'AbortError') {
+				this.display.append(`[错误] ${err.message}`, 'gray');
+			}
+		} finally {
+			this.spinner.stop();
+			this.state.releaseAbortController();
+			this.processInputQueue();
 		}
+	}
 
-		this.spinner.stop();
-		this.state.resetToIdle();
-		this.state.releaseAbortController();
-
-		// 处理输入队列
-		this.processInputQueue();
+	private interruptStream(): void {
+		this.state.abortStream();
 	}
 
 	private processInputQueue(): void {
-		if (!this.input.hasQueue) {
-			this.fullDraw();
-			return;
-		}
 		const next = this.input.dequeue();
-		if (next) {
-			this.input.setText(next);
-			this.handleEnter();
-		}
+		if (!next) return;
+		this.input.setText(next);
+		this.handleEnter();
 	}
-
-	// ─── 流式事件 ──────────────────────────────────
 
 	private handleStreamEvent(event: StreamEvent): void {
 		switch (event.type) {
 			case 'reasoning_delta':
-				this.state.addReasoningDelta(event.text!);
-				this.renderThrottle.run(() => this.drawStreamUpdate());
+				if (!this.state.streamAbort?.signal.aborted) {
+					this.state.addReasoningDelta(event.text ?? '');
+					this.drawStreamUpdate();
+				}
 				break;
 
 			case 'content_delta':
-				if (!this.state.isStreaming()) {
-					// 首次 content_delta：streaming 阶段
-					this.state.startStreaming();
-					this.spinner.stop();
+				if (!this.state.streamAbort?.signal.aborted) {
+					if (this.state.isSending()) {
+						this.state.startStreaming();
+						this.spinner.stop();
+					}
+					this.state.addContentDelta(event.text ?? '');
+					this.drawStreamUpdate();
 				}
-				this.state.addContentDelta(event.text!);
-				this.renderThrottle.run(() => this.drawStreamUpdate());
 				break;
 
-			case 'done': {
-				const ls = this.state.liveStream;
-				if (ls) {
-					if (ls.reasoning) {
-						this.display.append(ls.reasoning, 'gray');
-					}
-					this.display.append(ls.content || '(空回复)', 'white');
-				}
-				// 立即清空 liveStream，避免 fullDraw 重复渲染流式内容
+			case 'done':
 				this.state.resetToIdle();
+
+				// 把完成的轮次追加到渲染缓冲区
+				const session = this.sessionManager?.getSession();
+				if (session && session.turns.length > 0) {
+					const lastTurn = session.turns[session.turns.length - 1];
+					if (lastTurn.assistant.reasoning_content) {
+						this.display.append(lastTurn.assistant.reasoning_content, 'gray');
+					}
+					if (lastTurn.assistant.content) {
+						this.display.append(lastTurn.assistant.content, 'white');
+					}
+				}
+
 				this.fullDraw();
 				break;
-			}
 
 			case 'error':
-				if (event.error === '已中断') {
-					this.display.append('[已中断]', 'gray');
-				} else {
-					this.display.append(`[错误: ${event.error}]`, 'gray');
-				}
-				this.drawStreamUpdate();
+				this.state.resetToIdle();
+				this.spinner.stop();
+				this.display.append(`[已中断]`, 'gray');
+				this.fullDraw();
 				break;
 		}
 	}
 
-	// ─── 流式中断 ──────────────────────────────────
-
-	private interruptStream(): void {
-		this.spinner.stop();
-		this.state.abortStream();
-
-		const ls = this.state.liveStream;
-		if (ls) {
-			if (ls.reasoning) {
-				this.display.append(ls.reasoning, 'gray');
-			}
-			if (ls.content) {
-				this.display.append(ls.content, 'white');
-			}
-			this.display.append('[已中断]', 'gray');
-		}
-
-		this.state.releaseAbortController();
-		this.drawStreamUpdate();
-	}
-
-	// ─── 渲染 ──────────────────────────────────────
+	// ─── 渲染布局 ──────────────────────────────────
 
 	/** 全屏重绘 */
 	private fullDraw(): void {
@@ -486,12 +411,13 @@ export class ChatUI {
 		// 顶部信息栏
 		const provider = this.config.get<string>('defaults.provider') ?? 'deepseek';
 		const model = this.config.get<string>('defaults.model') ?? 'deepseek-v4-pro';
-		const header = chalk.bold(` DeepSeek Arch v${VERSION}`);
-		const info = chalk.dim(`  Provider: ${provider} | Model: ${model}`);
+		const header = chalk.bold(` DeepSeek Arch v${VERSION}${this.mockMode ? chalk.yellow(' [MOCK]') : ''}`);
+		const info = chalk.dim(`  Provider: ${this.mockMode ? 'mock' : provider} | Model: ${this.mockMode ? 'mock-chat' : model}`);
 
 		writeSync(1, header + '\n');
 		writeSync(1, info + '\n');
 
+		// 顶部分隔线
 		writeSync(1, '─'.repeat(this.termWidth) + '\n');
 
 		// 对话区域
@@ -546,16 +472,47 @@ export class ChatUI {
 		}
 
 		const ls = this.state.liveStream;
-		const sepLine = this.termHeight - this.lastInputHeight - 1;
+		const inputHeight = this.input.calcHeight(this.termWidth);
+		const inputChanged = inputHeight !== this.lastInputHeight;
+		const phaseChanged = ls.phase !== this.lastStreamPhase || inputChanged;
+		this.lastStreamPhase = ls.phase;
+		this.lastInputHeight = inputHeight;
+		const sepLine = this.termHeight - inputHeight - 1;
 
-		// 定位到对话区域末尾
-		writeSync(1, cursorTo(sepLine));
-		writeSync(1, ERASE_SCREEN_BELOW);
+		if (phaseChanged) {
+			// 全量重绘：从内容区域开始擦除（分隔线上方）
+			const streamLines = ls.phase === 'content' && ls.reasoning ? 2 : 1;
+			writeSync(1, cursorTo(sepLine - streamLines));
+			writeSync(1, ERASE_SCREEN_BELOW);
+			this.writeStreamContent(ls);
+			writeSync(1, '\n' + '─'.repeat(this.termWidth) + '\n');
+			this.renderInputPanel(inputHeight);
+		} else {
+			// 原地更新：只重写流式文本（分隔线上方），不动分隔线和输入面板
+			const streamLines = ls.phase === 'content' && ls.reasoning ? 2 : 1;
+			for (let i = 0; i < streamLines; i++) {
+				writeSync(1, cursorTo(sepLine - streamLines + i));
+				writeSync(1, ERASE_LINE);
+			}
+			// 重新定位到流式内容起始行
+			writeSync(1, cursorTo(sepLine - streamLines));
+			this.writeStreamContent(ls);
+		}
 
-		// 流式内容
+		// 队列提示
+		if (this.input.hasQueue) {
+			writeSync(1, '\n' + chalk.dim(`⏳ 等待中 (${this.input.queueLength} 条)...`));
+		}
+
+		// 光标定位
+		const cursor = this.input.calcCursor(inputHeight, this.termWidth);
+		const cursorRow = this.termHeight - inputHeight + cursor.cursorRow;
+		writeSync(1, cursorTo(cursorRow, cursor.cursorCol));
+	}
+
+	/** 写入流式内容（reasoning / content） */
+	private writeStreamContent(ls: LiveStreamState): void {
 		if (ls.phase === 'sending') {
-			// spinner
-			writeSync(1, cursorTo(sepLine));
 			writeSync(1, this.spinner.getFrame());
 		} else if (ls.phase === 'reasoning') {
 			writeSync(1, chalk.gray(ls.reasoning));
@@ -565,24 +522,6 @@ export class ChatUI {
 			}
 			writeSync(1, chalk.white(ls.content));
 		}
-
-		// 分隔线
-		writeSync(1, '\n' + '─'.repeat(this.termWidth) + '\n');
-
-		// 输入面板
-		const inputHeight = this.input.calcHeight(this.termWidth);
-		this.lastInputHeight = inputHeight;
-		this.renderInputPanel(inputHeight);
-
-		// 队列提示
-		if (this.input.hasQueue) {
-			writeSync(1, chalk.dim(`\n⏳ 等待中 (${this.input.queueLength} 条)...`));
-		}
-
-		// 光标定位
-		const cursor = this.input.calcCursor(inputHeight, this.termWidth);
-		const cursorRow = this.termHeight - inputHeight + cursor.cursorRow;
-		writeSync(1, cursorTo(cursorRow, cursor.cursorCol));
 	}
 
 	// ─── 辅助渲染 ──────────────────────────────────

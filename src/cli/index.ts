@@ -48,14 +48,28 @@ export function createProgram(): Command {
 
 	// ---- chat 子命令 ----
 	const chatCmd = new Command('chat')
-	.description('开始新对话')
-	.option('--title <name>', '设置对话标题')
+		.description('开始新对话')
+		.option('--mock', '使用 MockProvider 测试渲染效果')
+		.option('--title <name>', '设置对话标题')
 	.helpOption('-h, --help', '显示 chat 命令帮助')
 	.action(async (options) => {
 		const { ChatUI } = await import('./chat-ui.js');
 		const config = await ConfigManager.getInstance().load();
-		const ui = new ChatUI(config);
-		await ui.start();
+
+		if (options.mock) {
+			const { MockProvider } = await import('../core/mock-provider.js');
+			const { Storage } = await import('../core/storage.js');
+			const { SessionManager } = await import('../core/session.js');
+
+			const provider = new MockProvider('mock-chat', 50);
+			const storage = new Storage(config.getSessionsDir());
+			const sessionManager = new SessionManager(storage, provider);
+			const ui = new ChatUI(config, sessionManager, true);
+			await ui.start();
+		} else {
+			const ui = new ChatUI(config);
+			await ui.start();
+		}
 	});
 
 	// ---- resume 子命令 ----

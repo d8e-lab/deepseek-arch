@@ -234,6 +234,7 @@ npm publish --access public
 - [ ] 更新 `src/cli/index.ts` 中的 `VERSION` / `RELEASE_DATE` 常量
 - [ ] 全量测试通过：`npm test`
 - [ ] 覆盖率达标：`npm run test:coverage`
+- [ ] `chat-ui` 测试策略已确认：见 [docs/chat-ui-testing.md](./docs/chat-ui-testing.md)
 - [ ] `git tag vX.Y.Z` 并推送
 
 ---

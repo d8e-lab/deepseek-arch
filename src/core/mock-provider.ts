@@ -37,9 +37,11 @@ const STANDARD_USAGE: TokenUsage = {
 
 export class MockProvider implements ModelProvider {
 	private modelName: string;
+	private streamDelayMs: number;
 
-	constructor(modelName = 'mock-chat') {
+	constructor(modelName = 'mock-chat', streamDelayMs = 0) {
 		this.modelName = modelName;
+		this.streamDelayMs = streamDelayMs;
 	}
 
 	/** 提取最后一条 user 消息内容 */
@@ -86,13 +88,18 @@ export class MockProvider implements ModelProvider {
 					message: {
 						role: 'assistant',
 						content: reply,
-						reasoning_content: content.includes('#nothink') ? undefined : `[模拟思考] 用户说了 "${content}"`,
+						reasoning_content: content.includes('#nothink') ? undefined : `[模拟思考] 用户说了 "${content}"`.repeat(20),
 					},
 					finish_reason: 'stop',
 				},
 			],
 			usage: { ...STANDARD_USAGE },
 		};
+	}
+
+	/** 流式延迟（模拟网络传输） */
+	private async delay(): Promise<void> {
+		if (this.streamDelayMs > 0) await new Promise(r => setTimeout(r, this.streamDelayMs));
 	}
 
 	/**
@@ -134,6 +141,7 @@ export class MockProvider implements ModelProvider {
 						},
 					],
 				};
+				await this.delay();
 			}
 		}
 
@@ -155,6 +163,7 @@ export class MockProvider implements ModelProvider {
 				],
 				usage: isLast ? { ...STANDARD_USAGE } : undefined,
 			};
+			await this.delay();
 		}
 	}
 }

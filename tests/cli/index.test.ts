@@ -73,6 +73,11 @@ describe('CLI (e2e)', () => {
       const { stdout } = run(['chat', '--help']);
       expect(stdout).toContain('--title');
     });
+
+    it('chat --help 显示 --mock 选项', () => {
+      const { stdout } = run(['chat', '--help']);
+      expect(stdout).toContain('--mock');
+    });
   });
 
   describe('resume 子命令', () => {
