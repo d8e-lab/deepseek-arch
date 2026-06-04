@@ -9,13 +9,14 @@
  *   - MockProvider（src/core/mock-provider.ts）— 本地伪装返回
  */
 
-import type { Message, ChatCompletionResponse, StreamChunk } from '../types/index.js';
+import type { Message, ChatCompletionResponse, StreamChunk, ToolDefinition } from '../types/index.js';
 
 /** 非流式调用选项 */
 export interface ChatOptions {
 	model?: string;
 	temperature?: number;
 	max_tokens?: number;
+	tools?: ToolDefinition[];
 }
 
 /** 流式调用选项（含非流式选项 + 超时/重试/中断） */

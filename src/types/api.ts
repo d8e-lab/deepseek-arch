@@ -4,6 +4,16 @@
 
 import type { Message } from './chat.js';
 
+/** 工具定义（发送给 API） */
+export interface ToolDefinition {
+	type: 'function';
+	function: {
+		name: string;
+		description: string;
+		parameters: Record<string, any>;
+	};
+}
+
 /** DeepSeek Chat Completion 请求体 */
 export interface ChatCompletionRequest {
 	model: string;
@@ -12,6 +22,29 @@ export interface ChatCompletionRequest {
 	temperature?: number;
 	max_tokens?: number;
 	top_p?: number;
+	tools?: ToolDefinition[];
+	tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
+}
+
+/** Tool call delta（流式增量） */
+export interface ToolCallDelta {
+	index: number;
+	id?: string;
+	type?: 'function';
+	function?: {
+		name?: string;
+		arguments?: string;
+	};
+}
+
+/** Tool call（非流式完整返回） */
+export interface ToolCall {
+	id: string;
+	type: 'function';
+	function: {
+		name: string;
+		arguments: string;
+	};
 }
 
 /** DeepSeek Delta (流式) */
@@ -19,6 +52,7 @@ export interface StreamDelta {
 	role?: string;
 	content?: string;
 	reasoning_content?: string;
+	tool_calls?: ToolCallDelta[];
 }
 
 /** DeepSeek Choice */

@@ -204,6 +204,7 @@ export class Storage {
 		usage: TokenUsage,
 		costRmb: number,
 		interrupted = false,
+		toolCalls?: import('../tools/types.js').ToolCallRecord[],
 	): Promise<TurnRecord> {
 		// 确保会话目录存在
 		try {
@@ -221,7 +222,7 @@ export class Storage {
 			delete t.usage;
 		}
 
-		const turn: TurnRecord = {
+		const turn: Record<string, unknown> = {
 			turn: turnNumber,
 			user: userMessage,
 			assistant: {
@@ -236,8 +237,12 @@ export class Storage {
 			...(interrupted ? { interrupted: true } : {}),
 		};
 
+		if (toolCalls && toolCalls.length > 0) {
+			turn.tool_calls = toolCalls;
+		}
+
 		// 将所有轮次写入单个 turns.json
-		const allTurns = [...existingTurns, turn];
+		const allTurns = [...existingTurns, turn as unknown as TurnRecord];
 		await this.writeJSON(this.turnsPath(sessionId), allTurns);
 
 		// 更新元数据
@@ -248,7 +253,7 @@ export class Storage {
 			lastUsage: usage,
 		});
 
-		return turn;
+		return turn as unknown as TurnRecord;
 	}
 
 	/** 加载会话的所有轮次 */

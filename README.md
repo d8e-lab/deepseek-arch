@@ -15,10 +15,10 @@ npm install
 npm run build
 
 # 首次运行（自动创建默认配置文件 ~/.deepseek-arch/）
-node dist/index.js --version
+node dist/cli/index.js --version
 
 # 查看帮助
-node dist/index.js --help
+node dist/cli/index.js --help
 ```
 
 ## 功能概览
@@ -101,20 +101,20 @@ npm run build          # TypeScript → dist/
 
 ```bash
 # 开发模式（直接运行编译结果）
-npm run build && node dist/index.js --help
+npm run build && node dist/cli/index.js --help
 
 # 持续编译（修改后自动重新编译）
 npm run dev
 
 # 在另一个终端运行
-node dist/index.js chat
+node dist/cli/index.js chat
 ```
 
 ### 调试
 
 ```bash
 # Node.js 内置调试器 + Chrome DevTools
-node --inspect-brk dist/index.js chat
+node --inspect-brk dist/cli/index.js chat
 
 # 调试测试文件
 npx vitest --inspect-brk tests/core/config.test.ts

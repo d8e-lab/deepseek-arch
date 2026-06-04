@@ -63,6 +63,9 @@ export class ApiClient implements ModelProvider {
 		if (options?.max_tokens !== undefined) {
 			body.max_tokens = options.max_tokens;
 		}
+		if (options?.tools?.length) {
+			body.tools = options.tools;
+		}
 
 		const url = `${this.baseUrl}${CHAT_ENDPOINT}`;
 
@@ -127,6 +130,7 @@ export class ApiClient implements ModelProvider {
 		};
 		if (options?.temperature !== undefined) body.temperature = options.temperature;
 		if (options?.max_tokens !== undefined) body.max_tokens = options.max_tokens;
+		if (options?.tools?.length) body.tools = options.tools;
 
 		const url = `${this.baseUrl}${CHAT_ENDPOINT}`;
 

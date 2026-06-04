@@ -8,7 +8,8 @@
 
 import type { Session } from '../../types/index.js';
 import { SessionManager } from '../../core/session.js';
-import type { StreamEvent } from '../../core/session.js';
+import type { StreamEvent } from '../../types/index.js';
+import type { Tool } from '../../tools/types.js';
 import { ConversationView } from './conversation.js';
 import { InputEditor } from './input-editor.js';
 import {
@@ -20,8 +21,10 @@ import {
 	clearLine,
 	GRAY_BG_START,
 	GRAY_BG_END,
+	cyan,
 	dim,
 	green,
+	yellow,
 	red,
 	padToWidth,
 } from './renderer.js';
@@ -40,6 +43,7 @@ const CLEAR_TO_END = '\x1b[0J';
 export class TuiApp {
 	private sessionMgr: SessionManager;
 	private config: TuiConfig;
+	private tools: Tool[];
 	private conversation: ConversationView;
 	private input: InputEditor;
 	private state: AppState = AppState.IDLE;
@@ -48,9 +52,10 @@ export class TuiApp {
 	/** 上次渲染的可见行数（用于缩小时清理残留行） */
 	private lastVisibleInputRows = 1;
 
-	constructor(sessionMgr: SessionManager, config: TuiConfig) {
+	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[]) {
 		this.sessionMgr = sessionMgr;
 		this.config = config;
+		this.tools = tools ?? [];
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
 	}
@@ -354,6 +359,32 @@ export class TuiApp {
 
 	// ─── 流式发送 ──────────────────────────────────
 
+	/** 工具执行确认：在流式期间切换到 y/n 输入 */
+	private requestToolConfirm(
+		toolName: string,
+		params: Record<string, unknown>,
+	): Promise<boolean> {
+		return new Promise((resolve) => {
+			const command = String(params.command ?? '');
+			process.stdout.write(yellow(`\n[Confirm] ${command}\n`));
+			process.stdout.write(yellow('Execute? [y/N] '));
+
+			const prevHandler = this.stdinHandler;
+			this.stdinHandler = (data: string) => {
+				process.stdout.write('\n');
+				this.stdinHandler = prevHandler;
+				if (data === '\x03') {
+					// Ctrl+C = deny + abort
+					this.abortController?.abort();
+					resolve(false);
+					return;
+				}
+				const ch = data.length > 0 ? data[0] : '';
+				resolve(ch.toLowerCase() === 'y');
+			};
+		});
+	}
+
 	private async sendMessageStream(content: string): Promise<void> {
 		this.setState(AppState.SENDING);
 		this.abortController = new AbortController();
@@ -385,10 +416,36 @@ export class TuiApp {
 						case 'content_delta':
 							this.setState(AppState.STREAMING);
 							if (reasoningStarted && !contentStarted) {
+								contentStarted = true;
+							}
+							if (!contentStarted) {
 								process.stdout.write('\n\n');
 								contentStarted = true;
 							}
 							process.stdout.write(event.text ?? '');
+							break;
+						case 'tool_call_start': {
+							const shortName = (event.toolName ?? '?').replace('execute_', '');
+							process.stdout.write(
+								cyan(`\n[T: ${shortName}] `) + dim(JSON.stringify(event.toolArgs ?? {})) + '\n',
+							);
+							break;
+						}
+						case 'tool_call_delta':
+							// tool call 参数增量（不渲染，静默累积）
+							break;
+						case 'tool_result':
+							if (event.toolDenied) {
+								process.stdout.write(red('\n[Denied]\n'));
+							} else {
+								const lines = (event.toolResult ?? '').split('\n').slice(0, 12);
+								for (const line of lines) {
+									process.stdout.write(cyan(' │ ') + dim(line) + '\n');
+								}
+								if ((event.toolResult ?? '').split('\n').length > 12) {
+									process.stdout.write(cyan(' │ ') + dim('...') + '\n');
+								}
+							}
 							break;
 						case 'done':
 							process.stdout.write('\n');
@@ -401,6 +458,9 @@ export class TuiApp {
 					}
 				},
 				this.abortController.signal,
+				this.tools.length > 0
+					? (toolName, params) => this.requestToolConfirm(toolName, params)
+					: undefined,
 			);
 		} catch (err: any) {
 			if (err?.name === 'AbortError') {

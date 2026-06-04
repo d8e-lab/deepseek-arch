@@ -8,7 +8,7 @@
  */
 
 import type { TurnRecord, TokenUsage } from '../../types/index.js';
-import { strDisplayWidth, dim, green } from './renderer.js';
+import { strDisplayWidth, cyan, dim, green, red } from './renderer.js';
 
 /** think 最大显示行数 */
 const THINK_MAX_LINES = 4;
@@ -122,6 +122,33 @@ export class ConversationView {
 					lines.push(' '.repeat(thinkLabelWidth) + dim('...'));
 				}
 
+				lines.push('');
+			}
+
+			// 工具调用记录
+			const tcRecords = (turn as any).tool_calls;
+			if (tcRecords && Array.isArray(tcRecords) && tcRecords.length > 0) {
+				for (const tcr of tcRecords) {
+					const shortName = tcr.name.replace('execute_', '');
+					const label = cyan(`[T: ${shortName}] `);
+					const labelWidth = strDisplayWidth(`[T: ${shortName}] `);
+					const argsStr = JSON.stringify(tcr.arguments);
+					lines.push(label + dim(`${argsStr}  (${tcr.duration_ms}ms)`));
+
+					if (tcr.error) {
+						const errLabel = tcr.error === 'denied' ? '[Denied]' : `Error: ${tcr.error}`;
+						lines.push(' '.repeat(labelWidth) + red(errLabel));
+					}
+					if (tcr.result) {
+						const resultLines = tcr.result.split('\n').slice(0, 6);
+						for (const rl of resultLines) {
+							lines.push(cyan(' │ ') + dim(rl));
+						}
+						if (tcr.result.split('\n').length > 6) {
+							lines.push(cyan(' │ ') + dim('...'));
+						}
+					}
+				}
 				lines.push('');
 			}
 

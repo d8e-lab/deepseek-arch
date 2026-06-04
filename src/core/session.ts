@@ -6,6 +6,7 @@
  *   2. 发送消息 → API 调用 → 自动持久化 turn JSON
  *   3. 构建请求消息队列（含历史轮次的 reasoning_content 以命中 kv-cache）
  *   4. 更新标题
+ *   5. Agent loop（tool calling 支持）
  */
 
 import { Storage } from './storage.js';
@@ -19,28 +20,29 @@ import type {
 	TokenUsage,
 	ChatCompletionResponse,
 	StreamChunk,
+	StreamEvent,
+	ToolDefinition,
 } from '../types/index.js';
 
-/** 流式事件（SessionManager → ChatUI 回调） */
-export interface StreamEvent {
-	type: 'reasoning_delta' | 'content_delta' | 'done' | 'error';
-	/** 增量文本（reasoning_delta / content_delta） */
-	text?: string;
-	/** token 用量（done 事件） */
-	usage?: TokenUsage;
-	/** 错误信息（error 事件） */
-	error?: string;
-}
+// Re-export for backward compatibility (chat-ui.ts imports from here)
+export type { StreamEvent };
+import type { Tool, ToolCallRecord } from '../tools/types.js';
+import type { ToolCall, ToolCallDelta } from '../types/api.js';
+
+/** 单次 agent loop 最大迭代次数 */
+const MAX_AGENT_ROUNDS = 25;
 
 export class SessionManager {
 	private storage: Storage;
 	private provider: ModelProvider;
 	private session: Session | null = null;
 	private systemPrompt: Message | null = null;
+	private tools: Tool[] = [];
 
-	constructor(storage: Storage, provider: ModelProvider) {
+	constructor(storage: Storage, provider: ModelProvider, tools?: Tool[]) {
 		this.storage = storage;
 		this.provider = provider;
+		if (tools) this.tools = tools;
 	}
 
 	/** 设置 system prompt（每次请求前插入消息队列首位） */
@@ -87,6 +89,37 @@ export class SessionManager {
 		this.session.meta.updated_at = new Date().toISOString();
 	}
 
+	// ─── Tool 辅助 ──────────────────────────────────
+
+	/** 将 Tool[] 转为 API 所需的 ToolDefinition[] */
+	private toolsToDefinitions(): ToolDefinition[] {
+		return this.tools.map((t) => ({
+			type: 'function' as const,
+			function: {
+				name: t.name,
+				description: t.description,
+				parameters: t.parameters,
+			},
+		}));
+	}
+
+	/** 将流式 tool_calls delta 累积到 ToolCall[] 中 */
+	private accumulateToolCalls(
+		acc: ToolCall[],
+		deltas: ToolCallDelta[],
+	): void {
+		for (const delta of deltas) {
+			// 找到或创建对应 index 的 ToolCall
+			while (acc.length <= delta.index) {
+				acc.push({ id: '', type: 'function', function: { name: '', arguments: '' } });
+			}
+			const tc = acc[delta.index];
+			if (delta.id) tc.id = delta.id;
+			if (delta.function?.name) tc.function.name += delta.function.name;
+			if (delta.function?.arguments) tc.function.arguments += delta.function.arguments;
+		}
+	}
+
 	// ─── 消息收发 ─────────────────────────────────
 
 	/**
@@ -105,8 +138,9 @@ export class SessionManager {
 		// 构建完整消息队列
 		const messages = this.buildMessages(userContent);
 
-		// 调用 API
-		const response = await this.provider.chat(messages);
+		// 调用 API（带上 tools）
+		const options = this.tools.length > 0 ? { tools: this.toolsToDefinitions() } : undefined;
+		const response = await this.provider.chat(messages, options);
 
 		const choice = response.choices[0];
 		const assistantMsg = choice?.message;
@@ -147,7 +181,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * 流式发送用户消息
+	 * 流式发送用户消息（支持 agent loop + tool calling）
+	 *
+	 * 当 tools 不为空时，模型可能返回 tool_calls。执行工具后将结果发回模型，
+	 * 循环直到模型返回纯文本或无更多工具调用（最多 25 轮）。
 	 *
 	 * 通过 onEvent 回调推送增量内容，支持外部 AbortSignal 中断。
 	 * 流式完成后自动持久化 turn；中断时保存不完整轮次（interrupted=true）。
@@ -158,45 +195,177 @@ export class SessionManager {
 		userContent: string,
 		onEvent: (event: StreamEvent) => void,
 		signal?: AbortSignal,
+		onConfirm?: (toolName: string, params: Record<string, unknown>) => Promise<boolean>,
 	): Promise<TurnRecord | null> {
 		if (!this.session) {
 			throw new Error('未创建会话——请先调用 startNewSession() 或 resumeSession()');
 		}
 
-		const messages = this.buildMessages(userContent);
+		const baseMessages = this.buildMessages(userContent);
+		const toolDefs = this.tools.length > 0 ? this.toolsToDefinitions() : undefined;
 
 		let responseId = '';
 		let modelName = '';
-		let fullReasoning = '';
-		let fullContent = '';
+		let finalContent = '';
+		let finalReasoning = '';
 		let usage: TokenUsage | undefined;
+		const toolRecords: ToolCallRecord[] = [];
+		/** Agent loop 中累积的 tool_call/results 消息 */
+		const agentMessages: Message[] = [];
 
 		try {
-			for await (const chunk of this.provider.chatStream(messages, { signal })) {
-				// 记录元信息（首个 chunk）
-				if (!responseId) responseId = chunk.id;
-				if (!modelName) modelName = chunk.model;
+			// ── Agent Loop ──────────────────────────
+			let userDenied = false;
 
-				const delta = chunk.choices[0]?.delta;
-				if (delta?.reasoning_content) {
-					fullReasoning += delta.reasoning_content;
-					onEvent({ type: 'reasoning_delta', text: delta.reasoning_content });
-				}
-				if (delta?.content) {
-					fullContent += delta.content;
-					onEvent({ type: 'content_delta', text: delta.content });
+			for (let round = 0; round < MAX_AGENT_ROUNDS && !userDenied; round++) {
+				const roundMessages = [...baseMessages, ...agentMessages];
+
+				let roundContent = '';
+				let roundReasoning = '';
+				const pendingToolCalls: ToolCall[] = [];
+
+				for await (const chunk of this.provider.chatStream(roundMessages, {
+					tools: toolDefs,
+					signal,
+				})) {
+					if (!responseId) responseId = chunk.id;
+					if (!modelName) modelName = chunk.model;
+
+					const delta = chunk.choices[0]?.delta;
+					if (!delta) continue;
+
+					// reasoning delta
+					if (delta.reasoning_content) {
+						roundReasoning += delta.reasoning_content;
+						finalReasoning += delta.reasoning_content;
+						onEvent({ type: 'reasoning_delta', text: delta.reasoning_content });
+					}
+
+					// content delta
+					if (delta.content) {
+						roundContent += delta.content;
+						finalContent += delta.content;
+						onEvent({ type: 'content_delta', text: delta.content });
+					}
+
+					// tool_calls delta
+					if (delta.tool_calls && delta.tool_calls.length > 0) {
+						this.accumulateToolCalls(pendingToolCalls, delta.tool_calls);
+						// 发送 tool_call_delta 事件（TUI 可选择性展示）
+						for (const tcd of delta.tool_calls) {
+							if (tcd.function?.arguments) {
+								onEvent({ type: 'tool_call_delta', text: tcd.function.arguments });
+							}
+						}
+					}
+
+					if (chunk.usage) usage = chunk.usage;
+					await yieldEventLoop();
 				}
 
-				// 最后一个 chunk 携带 usage
-				if (chunk.usage) {
-					usage = chunk.usage;
+				// 本轮无 tool_calls → 自然终止
+				if (pendingToolCalls.length === 0) {
+					// 保存最终的 assistant 响应到 agentMessages（用于后续轮次重建）
+					agentMessages.push({
+						role: 'assistant',
+						content: roundContent,
+						reasoning_content: roundReasoning || undefined,
+					});
+					break;
 				}
 
-				// 让出事件循环，给 timers (spinner) 和 I/O (终端渲染) 执行机会
-				await yieldEventLoop();
+				// ── 执行 tool calls ──────────────────
+				// 添加 assistant 消息（含 tool_calls，无 content）
+				agentMessages.push({
+					role: 'assistant',
+					content: roundContent || '',
+					tool_calls: pendingToolCalls,
+				});
+
+				for (const tc of pendingToolCalls) {
+					const tool = this.tools.find((t) => t.name === tc.function.name);
+					let args: Record<string, unknown> = {};
+					try {
+						args = JSON.parse(tc.function.arguments);
+					} catch {
+						// JSON 解析失败，args 留空
+					}
+
+					// 通知 TUI：工具开始执行
+					onEvent({
+						type: 'tool_call_start',
+						toolCallId: tc.id,
+						toolName: tc.function.name,
+						toolArgs: args,
+					});
+
+					// 需要用户确认的工具：通过 onConfirm 回调确认
+					let denied = false;
+					if (tool?.requiresConfirm && onConfirm) {
+						const approved = await onConfirm(tc.function.name, args);
+						if (!approved) {
+							denied = true;
+							userDenied = true;
+						}
+					}
+
+					const startMs = Date.now();
+					let toolResult: string;
+					let toolError: string | undefined;
+
+					if (denied) {
+						toolResult = 'Execution denied by user.';
+						toolError = 'denied';
+					} else if (tool) {
+						const r = await tool.execute(args);
+						toolResult = r.content;
+						toolError = r.error;
+					} else {
+						toolResult = `Unknown tool: ${tc.function.name}`;
+						toolError = 'unknown_tool';
+					}
+
+					const durationMs = Date.now() - startMs;
+
+					toolRecords.push({
+						id: tc.id,
+						name: tc.function.name,
+						arguments: args,
+						result: toolResult,
+						error: toolError,
+						duration_ms: durationMs,
+					});
+
+					// 通知 TUI：工具执行完成
+					onEvent({
+						type: 'tool_result',
+						toolCallId: tc.id,
+						toolName: tc.function.name,
+						toolResult,
+						error: toolError,
+						toolDenied: denied,
+					});
+
+					// 拒绝执行时不再将结果送回模型，直接退出 agent loop
+					if (denied) break;
+
+					// 将 tool 结果加入 messages
+					agentMessages.push({
+						role: 'tool',
+						content: toolResult,
+						tool_call_id: tc.id,
+					});
+				}
 			}
 
-			// 流式完成
+			// 超过最大轮次仍未结束：截断
+			if (!finalContent && toolRecords.length > 0) {
+				const truncMsg = '(Reached max tool rounds — stopping.)';
+				finalContent = truncMsg;
+				onEvent({ type: 'content_delta', text: truncMsg });
+			}
+
+			// ── 持久化 ──────────────────────────────
 			const finalUsage = usage ?? {
 				prompt_tokens: 0,
 				completion_tokens: 0,
@@ -211,27 +380,26 @@ export class SessionManager {
 				{
 					id: responseId || '',
 					role: 'assistant',
-					content: fullContent,
-					reasoning_content: fullReasoning || undefined,
+					content: finalContent || '(no response)',
+					reasoning_content: finalReasoning || undefined,
 				},
 				finalUsage,
 				costRmb,
+				false,
+				toolRecords.length > 0 ? toolRecords : undefined,
 			);
 
 			this.session.turns.push(turn);
 			this.session.meta.turnCount = this.session.turns.length;
 			this.session.meta.updated_at = turn.created_at;
 
-			// done 事件必须在 turn 推入 session.turns 后触发，
-			// 否则 ChatUI.handleStreamEvent('done') 读取 session.turns 会得到空数据
 			onEvent({ type: 'done', usage: finalUsage });
-
 			return turn;
-		} catch (err: any) {
+		} catch (err: unknown) {
 			const isAbort = err instanceof Error && err.name === 'AbortError';
-			const msg = err?.message ?? String(err);
+			const msg = err instanceof Error ? err.message : String(err);
 
-			if (isAbort && (fullReasoning || fullContent)) {
+			if (isAbort && (finalReasoning || finalContent)) {
 				// 中断：保存不完整轮次
 				const partialUsage = usage ?? {
 					prompt_tokens: 0,
@@ -246,13 +414,15 @@ export class SessionManager {
 						{
 							id: responseId || '',
 							role: 'assistant',
-							content: fullContent || '[已中断]',
-							reasoning_content: fullReasoning || undefined,
+							content: finalContent || '[已中断]',
+							reasoning_content: finalReasoning || undefined,
 						},
 						partialUsage,
 						0,
 						true, // interrupted
+						toolRecords.length > 0 ? toolRecords : undefined,
 					);
+
 					this.session.turns.push(turn);
 					this.session.meta.turnCount = this.session.turns.length;
 					this.session.meta.updated_at = turn.created_at;
@@ -281,7 +451,38 @@ export class SessionManager {
 		// 2. 历史轮次（跳过中断的不完整轮次）
 		for (const turn of this.session!.turns) {
 			if (turn.interrupted) continue;
+
+			// 用户消息
 			messages.push(turn.user);
+
+			// 工具调用消息（如果本 turn 有 tool_calls
+			const tcRecords = (turn as unknown as Record<string, unknown>).tool_calls as ToolCallRecord[] | undefined;
+			if (tcRecords && tcRecords.length > 0) {
+				// 重建 assistant tool_calls 消息
+				const toolCalls: ToolCall[] = tcRecords.map((tcr) => ({
+					id: tcr.id,
+					type: 'function' as const,
+					function: {
+						name: tcr.name,
+						arguments: JSON.stringify(tcr.arguments),
+					},
+				}));
+				messages.push({
+					role: 'assistant',
+					content: '',
+					tool_calls: toolCalls,
+				});
+				// 各 tool 结果
+				for (const tcr of tcRecords) {
+					messages.push({
+						role: 'tool',
+						content: tcr.result ?? tcr.error ?? '',
+						tool_call_id: tcr.id,
+					});
+				}
+			}
+
+			// 助手最终回复
 			messages.push({
 				role: 'assistant',
 				content: turn.assistant.content,

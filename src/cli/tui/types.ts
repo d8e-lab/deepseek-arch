@@ -7,6 +7,8 @@ export enum AppState {
 	IDLE = 'IDLE',
 	SENDING = 'SENDING',
 	STREAMING = 'STREAMING',
+	/** 等待用户确认 tool call 执行 */
+	CONFIRMING = 'CONFIRMING',
 	ERROR = 'ERROR',
 }
 

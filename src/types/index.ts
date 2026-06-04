@@ -39,6 +39,9 @@ export type {
 // ─── api ─────────────────────────────────────────────
 export type {
 	ChatCompletionRequest,
+	ToolDefinition,
+	ToolCallDelta,
+	ToolCall,
 	StreamDelta,
 	ChatChoice,
 	ChatCompletionResponse,

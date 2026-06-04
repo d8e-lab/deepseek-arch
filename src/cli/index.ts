@@ -15,6 +15,13 @@ import { SessionManager } from '../core/session.js';
 import { Storage } from '../core/storage.js';
 import { TuiApp } from './tui/app.js';
 import type { TuiConfig } from './tui/types.js';
+import * as toolModules from '../tools/index.js';
+
+/** 从 barrel file 获取所有已注册的工具 */
+function loadTools() {
+	const tools = Object.values(toolModules);
+	return tools;
+}
 
 const PACKAGE_VERSION = '0.1.0';
 
@@ -40,7 +47,7 @@ function createSessionManager(config: TuiConfig): SessionManager {
 	const sessionsDir = cfg.getSessionsDir();
 	const storage = new Storage(sessionsDir);
 
-	const sessionMgr = new SessionManager(storage, apiClient);
+	const sessionMgr = new SessionManager(storage, apiClient, loadTools());
 
 	// 设置 system prompt
 	const defaultPrompt = cfg.get<string>('defaults.system_prompt') ?? 'default';
@@ -89,13 +96,13 @@ program
 					process.exit(1);
 				}
 				await sessionMgr.resumeSession(session.meta.id);
-				const app = new TuiApp(sessionMgr, tuiConfig);
+				const app = new TuiApp(sessionMgr, tuiConfig, loadTools());
 				await app.start(session);
 				return;
 			}
 
 			// 新会话
-			const app = new TuiApp(sessionMgr, tuiConfig);
+			const app = new TuiApp(sessionMgr, tuiConfig, loadTools());
 			await app.start();
 		} catch (err: any) {
 			console.error('Failed to start:', err?.message ?? err);
@@ -127,7 +134,7 @@ program
 				const sessionMgr = createSessionManager(tuiConfig);
 				await sessionMgr.resumeSession(session.meta.id);
 
-				const app = new TuiApp(sessionMgr, tuiConfig);
+				const app = new TuiApp(sessionMgr, tuiConfig, loadTools());
 				await app.start(session);
 				return;
 			}
@@ -182,7 +189,7 @@ program
 			const sessionMgr = createSessionManager(tuiConfig);
 			await sessionMgr.resumeSession(session.meta.id);
 
-			const app = new TuiApp(sessionMgr, tuiConfig);
+			const app = new TuiApp(sessionMgr, tuiConfig, loadTools());
 			await app.start(session);
 		} catch (err: any) {
 			console.error('Failed:', err?.message ?? err);
