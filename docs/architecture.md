@@ -1,56 +1,57 @@
 # 架构设计
 
-> 最后更新：2026-05-19 · v0.4.0
+> 最后更新：2026-06-05 · v0.5.0
 
 ## 概述
 
-deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ESM)，通过 DeepSeek API 进行多轮对话，支持流式输出和异步交互。
+deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ESM)，通过 DeepSeek API 进行多轮对话，支持流式输出和 Agent Loop + Tool Calling。
 
 ## 分层架构
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  CLI Layer                       │
-│  Commander.js: --version, --help, chat, resume   │
-│  src/cli/index.ts                                │
-│  ChatUI: 全屏 TUI + 流式状态机 + 输入队列         │
-│  src/cli/chat-ui.ts                              │
-└────────────────────┬────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────┐
-│             SessionManager (Facade)              │
-│  协调 ApiClient + Storage + TokenCalculator      │
-│  流式: sendMessageStream → onEvent 回调           │
-│  src/core/session.ts (Phase 5)                   │
-└──┬──────────────┬──────────────┬────────────────┘
-   │              │              │
-┌──▼──────┐ ┌─────▼──────┐ ┌────▼────────────────┐
-│ConfigMgr│ │  Storage   │ │  ModelProvider (接口) │
-│(Singleton│ │(Repository)│ │  src/core/model-     │
-│TOML r/w) │ │JSON 文件   │ │  provider.ts         │
-└─────────┘ └────────────┘ └──┬────────┬─────────┘
-                              │        │
-                    ┌─────────▼┐  ┌────▼──────────┐
-                    │ ApiClient│  │  MockProvider  │
-                    │ (真实)   │  │  (本地伪装)    │
-                    │fetch+SSE │  │  src/core/     │
-                    └──────────┘  │  mock-provider │
-                                  └───────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                      CLI Layer                            │
+│  Commander.js: --version, --help, chat, resume            │
+│  src/cli/index.ts                                         │
+│  TuiApp: 内联 TUI + 流式渲染 + 工具确认                    │
+│  src/cli/tui/app.ts                                       │
+└────────────┬─────────────────────────────────┬───────────┘
+             │                                 │
+┌────────────▼──────────────┐  ┌───────────────▼───────────┐
+│     SessionManager (Facade │  │      Tools (Barrel File)  │
+│     + Agent Loop)          │  │  src/tools/               │
+│  sendMessageStream → while │  │  ├── types.ts (Tool接口)  │
+│  循环处理 tool_calls        │  │  ├── shell.ts             │
+│  onConfirm 回调             │  │  └── index.ts (注册)      │
+│  src/core/session.ts       │  └───────────────────────────┘
+└──┬───────────┬──────────┬──┘
+   │           │          │
+┌──▼──┐  ┌────▼───┐  ┌──▼──────────────────┐
+│Conf │  │Storage │  │ModelProvider (接口)   │
+│igMgr│  │(Repo)  │  │src/core/model-       │
+│(Sing│  │JSON文件 │  │provider.ts           │
+│leton│  └────────┘  └──┬────────┬──────────┘
+└─────┘                 │        │
+              ┌─────────▼┐  ┌───▼───────────┐
+              │ApiClient │  │  MockProvider  │
+              │fetch+SSE │  │  本地伪装      │
+              └──────────┘  └───────────────┘
 ```
 
-**依赖方向**：CLI → SessionManager → {ConfigManager, Storage, ModelProvider, TokenCalculator}。ApiClient/MockProvider 实现 ModelProvider 接口。无循环依赖。
+**依赖方向**：CLI → SessionManager + Tools。SessionManager → {ConfigManager, Storage, ModelProvider}。Tools 无内部依赖。ApiClient/MockProvider 实现 ModelProvider 接口。无循环依赖。
 
 ## 模块职责
 
 | 模块 | 文件 | 职责 | 状态 |
 |------|------|------|------|
-| **CLI (Commander)** | `src/cli/index.ts` | Commander.js 命令行解析，注册子命令 | ✅ |
-| **ChatUI** | `src/cli/chat-ui.ts` | 全屏 TUI，流式状态机 (IDLE/SENDING/STREAMING)，输入队列，ANSI 渲染，Spinner | ✅ |
+| **CLI (Commander)** | `src/cli/index.ts` | Commander.js 命令行解析，注册子命令，加载 Tools | ✅ |
+| **TuiApp** | `src/cli/tui/app.ts` | 内联 TUI，流式渲染，工具确认 (y/N) | ✅ |
 | **ConfigManager** | `src/core/config.ts` | TOML 多文件加载，文件跳转引用，持久化读写 | ✅ |
-| **Storage** | `src/core/storage.ts` | 文件系统存储，sessions 目录 + 单文件 turns.json | ✅ |
-| **Types** | `src/types/` | 全部领域类型定义（无行为） | ✅ |
-| **ApiClient** | `src/core/api.ts` | DeepSeek Chat Completion API 调用，非流式 + 流式 (SSE 解析) | ✅ |
-| **SessionManager** | `src/core/session.ts` | 对话生命周期管理（Facade），非流式 + 流式发送 | ✅ |
+| **Storage** | `src/core/storage.ts` | 文件系统存储，sessions 目录 + turns.json（含 tool_calls） | ✅ |
+| **Types** | `src/types/` | 全部领域类型定义（含 ToolDefinition/ToolCall 等 API 类型） | ✅ |
+| **ApiClient** | `src/core/api.ts` | DeepSeek Chat Completion API，非流式 + SSE 流式，tools 传递 | ✅ |
+| **SessionManager** | `src/core/session.ts` | Facade + Agent Loop，buildMessages 含 tool 上下文重建 | ✅ |
+| **Tools** | `src/tools/` | Barrel file 注册，Tool 接口，Shell 执行工具 | ✅ |
 | **TokenCalculator** | `src/core/token-counter.ts` | 费用计算、缓存命中率 | ❌ Phase 7 |
 
 ## 设计模式
@@ -59,9 +60,10 @@ deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ES
 |------|------|
 | **Singleton** | ConfigManager — 全局唯一配置实例 |
 | **Repository** | Storage — 封装数据访问，隐藏存储细节 |
-| **Facade** | SessionManager — 统一入口，协调多个子系统 |
+| **Facade** | SessionManager — 统一入口，协调多个子系统 + Agent Loop |
 | **Adapter** | ApiClient — 封装第三方 API，隔离变化 |
-| **状态机** | ChatUI — IDLE → SENDING → STREAMING → IDLE |
+| **Barrel File** | src/tools/index.ts — 统一注册工具，新增只需一行 export |
+| **状态机** | TuiApp — IDLE → SENDING → STREAMING → CONFIRMING → IDLE |
 
 ## 数据流
 
@@ -104,6 +106,36 @@ SessionManager.sendMessage(content)
   └─► UIState = IDLE
 ```
 
+### Agent Loop (Tool Calling)
+
+```
+用户输入 → TuiApp.sendMessageStream()
+  │
+  ├─► sessionManager.sendMessageStream(content, onEvent, signal, onConfirm)
+  │     │
+  │     ├─► buildMessages(content)        → system + 历史（含 tool_calls 重建） + 当前
+  │     └─► Agent Loop (最多 25 轮):
+  │           │
+  │           ├─► apiClient.chatStream(messages, { tools, signal })
+  │           │     ├─► reasoning_delta   → onEvent → 灰度显示
+  │           │     ├─► content_delta     → onEvent → 白色显示
+  │           │     └─► tool_calls delta  → accumulateToolCalls()
+  │           │
+  │           ├─► 无 tool_calls → 持久化 turn → onEvent(done) → 结束
+  │           │
+  │           └─► 有 tool_calls:
+  │                 ├─► onEvent(tool_call_start) → TUI 渲染 [T: xxx]
+  │                 ├─► requiresConfirm? → onConfirm() → y/N 确认
+  │                 ├─► 拒绝 → 终止 agent loop（不发送回模型）
+  │                 ├─► tool.execute(args) → onEvent(tool_result)
+  │                 ├─► 结果 push 到 messages → 继续循环
+  │                 └─► 超过 25 轮 → 截断 → 持久化
+  │
+  └─► 持久化 turn（含 tool_calls[] 记录）
+```
+
+**确认流程**：`requiresConfirm: true` 的工具执行前，SessionManager 通过 `onConfirm` 回调询问 TUI。TUI 暂时接管 stdin，显示 `Execute? [y/N]`，等待单字符输入。拒绝后 agent loop 立刻终止，已执行的 tool 结果保留在上下文中。
+
 ## 配置体系
 
 ```
@@ -132,24 +164,22 @@ SessionManager.sendMessage(content)
 | 测试 | vitest v4 | 单元测试 + e2e（当前测试文件仍与源码同目录） |
 | 覆盖率 | @vitest/coverage-v8 | 目标 ≥ 80% |
 
-## ChatUI 流式状态机
+## TuiApp 状态机
 
 ```
-IDLE ── Enter ──► SENDING (spinner 旋转)
+IDLE ── Enter ──► SENDING
                     │
-                    ├── first reasoning_delta  → phase=reasoning
-                    ├── first content_delta   → STREAMING (停 spinner)
+                    ├── reasoning_delta   → STREAMING
+                    ├── content_delta     → STREAMING
                     │
-                    ├── done  → IDLE (显示 token 摘要)
-                    ├── error → IDLE
-                    └── ESC/Ctrl+C → abort → IDLE + 标记 `[已中断]`
+                    ├── tool_call_start   → 渲染 [T: xxx]
+                    ├── 需要确认? → CONFIRMING → y/N
+                    │
+                    ├── tool_result       → cyan 竖线渲染结果
+                    ├── done              → IDLE (显示 token)
+                    ├── error             → IDLE
+                    └── Ctrl+C            → abort → IDLE + `[已中断]`
 ```
-
-流式期间：
-- 普通按键 → 继续编辑输入框
-- Enter → 加入输入队列 (`inputQueue`)，显示 `⏳ 等待中 (N 条)...`
-- Ctrl+C/ESC → 中断流式输出
-- /exit, /clear 等命令 → 排队等待流式完成后执行
 
 ## 中断处理
 
@@ -159,28 +189,11 @@ IDLE ── Enter ──► SENDING (spinner 旋转)
 
 | 文件 | 测试数 | 状态 |
 |------|--------|------|
-| `src/core/config.test.ts` | 12 | ✅ |
-| `src/core/storage.test.ts` | 25 | ✅ |
-| `src/core/session.test.ts` | 20 (含 5 流式) | ✅ |
-| `src/core/api.test.ts` | 24 (含 10 流式) | ✅ |
-| `src/cli/index.test.ts` | 10 | ✅ |
-| **总计** | **91** | ✅ |
-
-## 测试目录规划
-
-测试文件统一放在独立的 `tests/` 目录下，镜像 `src/` 的目录结构：
-
-```text
-tests/
-├── core/
-│   ├── config.test.ts
-│   ├── storage.test.ts
-│   ├── api.test.ts
-│   └── session.test.ts
-├── cli/
-│   └── index.test.ts
-└── utils/
-    └── throttle.test.ts
-```
-
-迁移时需要同步修改 `vitest.config.ts` 的 `include`，并更新 README / agent.md 中的测试约定。
+| `tests/core/config.test.ts` | 12 | ✅ |
+| `tests/core/storage.test.ts` | 25 | ✅ |
+| `tests/core/session.test.ts` | 16 | ✅ |
+| `tests/core/api.test.ts` | 24 | ✅ |
+| `tests/core/mock-provider.test.ts` | 26 | ✅ |
+| `tests/cli/index.test.ts` | 11 | ⚠️ 待更新 |
+| `tests/utils/throttle.test.ts` | 4 | ✅ |
+| **总计** | **119** | ✅ |

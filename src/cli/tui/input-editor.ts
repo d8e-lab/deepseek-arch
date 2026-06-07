@@ -160,7 +160,7 @@ export class InputEditor {
 			if (direction === -1) {
 				this.historyIndex = Math.max(0, this.historyIndex);
 			} else {
-				if (this.historyIndex > this.history.length) {
+				if (this.historyIndex >= this.history.length) {
 					this.historyIndex = -1;
 					this.lines = this.savedInput ?? [''];
 					this.savedInput = null;

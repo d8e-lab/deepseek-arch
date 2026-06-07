@@ -90,6 +90,30 @@
 - [x] 9.9 文档同步（README, agent.md, docs/architecture.md, docs/refactoring-analysis.md）
 - [x] 全量 117 tests passed，`tsc --noEmit` 零错误
 
+### Phase 10 — Agent Loop + Tool Calling ✅ (2026-06-05)
+
+- [x] 10.1 Tool 接口定义（`src/tools/types.ts`）— Tool/ToolResult/ToolCallRecord
+- [x] 10.2 Shell 工具实现 — sudo 禁止、目录限制、10min 超时、输出截断
+- [x] 10.3 Barrel file 注册模式（`src/tools/index.ts`）
+- [x] 10.4 API 类型扩展 — `tools`/`tool_choice`/`tool_calls`/`ToolCall` 等
+- [x] 10.5 Agent Loop — `sendMessageStream` 内 while 循环（最多 25 轮）
+- [x] 10.6 用户确认机制 — requiresConfirm + onConfirm 回调 + y/N 提示
+- [x] 10.7 拒绝执行后终止 agent loop
+- [x] 10.8 Tool Calls 持久化 — Storage.saveTurn 写入 tool_calls, resume 重建
+- [x] 10.9 TUI 四色渲染 — cyan 工具调用/结果, 竖线框区分
+- [x] 10.10 文档更新 — README/TODO/docs/architecture.md
+
+- [x] 9.1 测试文件从 `src/` 迁移到独立 `tests/` 目录（6 文件）
+- [x] 9.2 `vitest.config.ts` 扫描范围改为 `tests/**/*.test.ts`
+- [x] 9.3 新增 `ModelProvider` 接口 (`src/core/model-provider.ts`)
+- [x] 9.4 新增 `MockProvider` 实现 (`src/core/mock-provider.ts`)
+- [x] 9.5 `ApiClient` 实现 `ModelProvider` 接口
+- [x] 9.6 `SessionManager` 从依赖 `ApiClient` 改为依赖 `ModelProvider`
+- [x] 9.7 MockProvider 单元测试（26 tests）
+- [x] 9.8 修复 2 个预存测试 bug
+- [x] 9.9 文档同步（README, agent.md, docs/architecture.md, docs/refactoring-analysis.md）
+- [x] 全量 117 tests passed，`tsc --noEmit` 零错误
+
 ---
 
 ## 版本历史
@@ -102,3 +126,4 @@
 | v0.2.2 | Phase 6: resume 功能（--id/--name/无参数列表选择），Storage 单文件 turns.json，tool role 预留 |
 | v0.3.0 | 修复 resume 显示 bug（历史回合渲染），Storage 仅保留最后一轮 usage |
 | v0.4.0 | Phase 4: 流式输出 (SSE) — 增量渲染、spinner、ESC中断、输入队列、超时重试 |
+| v0.5.0 | Phase 10: Agent Loop + Tool Calling — shell 工具、用户确认、barrel file 注册、cyan 竖线渲染 |

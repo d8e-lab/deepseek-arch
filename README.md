@@ -4,6 +4,7 @@
 
 基于 Node.js + TypeScript 的终端对话工具，支持调用 DeepSeek API 进行多轮对话，
 持久化保存对话历史（含 thinking 内容以命中 kv-cache），Token 消耗统计与费用计算。
+支持 Agent Loop + Tool Calling：模型可自主调用 shell 等工具，结果自动送回继续对话。
 
 ## 快速开始
 
@@ -23,13 +24,14 @@ node dist/cli/index.js --help
 
 ## 功能概览
 
-- **全屏 TUI**：独立终端界面，灰底多行输入面板（Ctrl+Enter 换行），三色渲染（用户绿/think灰/回复白），中文原生支持
-- **流式输出**：SSE 实时增量渲染，spinner 动画提示等待，ESC/Ctrl+C 中断模型输出
-- **异步交互**：流式输出期间不阻塞输入，支持输入队列（等待标识），发送后立即继续编辑
-- **超时重试**：可配置请求超时（默认 120s）与自动重试（指数退避，默认 2 次）
-- **多轮对话**：自动持久化 turn JSON（含 `reasoning_content` 命中 kv-cache）
+- **Agent Loop**：模型可自主调用 shell 等工具，工具结果自动送回模型继续对话（最多 25 轮）
+- **Tool Calling**：barrel file 注册模式，新增工具只需一个文件 + 一行 export
+- **Shell 工具**：模型可直接执行 shell 命令（禁止 sudo，10min 超时），用户 y/N 确认后执行
+- **四色渲染**：用户绿 / Think 灰 / 模型白 / 工具调用 cyan 竖线框
+- **流式输出**：SSE 实时增量渲染，ESC/Ctrl+C 中断模型输出
+- **多轮对话**：自动持久化 turn JSON（含 `reasoning_content` 命中 kv-cache + `tool_calls` 记录）
 - **会话管理**：/title 命名、/clear 清屏、退出显示恢复命令
-- **对话恢复**：按 ID 或标题恢复历史会话（`resume` 子命令）
+- **对话恢复**：按 ID 或标题恢复历史会话（含工具调用上下文重建）
 - **Token 记录**：保存 API 返回的 `usage`，为后续费用计算预留
 - **配置外置**：TOML 文件管理，支持文件间跳转引用
 - **安全隔离**：操作范围限于 home 目录和项目工作目录
@@ -141,20 +143,27 @@ npm run test:coverage
 
 ```
 src/
-├── index.ts                # 入口
+├── index.ts                # 库入口（export 类型/类）
 ├── cli/
 │   ├── index.ts            # Commander CLI 主程序
 │   ├── chat-ui.ts          # 全屏 TUI 对话界面
-│   ├── state/
-│   │   └── chat-state.ts   # 流式状态机
-│   └── components/         # ANSI / Spinner / 输入面板 / 渲染组件
+│   └── tui/                # 内联 TUI
+│       ├── app.ts          # TuiApp 主应用
+│       ├── conversation.ts # 对话历史渲染
+│       ├── input-editor.ts # 多行输入编辑器
+│       ├── renderer.ts     # ANSI 渲染工具
+│       └── types.ts        # TUI 类型
 ├── core/
 │   ├── config.ts           # ConfigManager（TOML 单例）
 │   ├── storage.ts          # Storage（文件系统 Repository）
 │   ├── api.ts              # ApiClient（DeepSeek API 适配器，实现 ModelProvider）
 │   ├── model-provider.ts   # ModelProvider 接口（抽象层）
 │   ├── mock-provider.ts    # MockProvider（本地伪装提供商）
-│   └── session.ts          # SessionManager（Facade）
+│   └── session.ts          # SessionManager（Facade + Agent Loop）
+├── tools/
+│   ├── types.ts            # Tool 接口（name, description, parameters, execute）
+│   ├── shell.ts            # Shell 执行工具
+│   └── index.ts            # Barrel file（统一注册所有工具）
 ├── types/
 │   ├── index.ts            # 类型重新导出
 │   ├── chat.ts             # 消息与对话类型
@@ -183,7 +192,38 @@ tests/
     └── throttle.test.ts
 ```
 
-测试总数：**7 个测试文件，117 条测试用例**。设计文档见 [docs/test-separation-and-mock-provider.md](./docs/test-separation-and-mock-provider.md)。
+测试总数：**8 个测试文件，119 条测试用例**。设计文档见 [docs/test-separation-and-mock-provider.md](./docs/test-separation-and-mock-provider.md)。
+
+---
+
+## 工具系统（Tools）
+
+模型可通过 Tool Calling 调用工具。采用 barrel file 注册模式：
+
+| 工具 | 名称 | 说明 |
+|------|------|------|
+| Shell 执行 | `execute_command` | 在会话目录执行 shell 命令（需用户 y/N 确认，禁止 sudo，10min 超时） |
+
+### 新增工具
+
+1. 创建 `src/tools/xxx.ts`，导出具名 `Tool` 对象
+2. 在 `src/tools/index.ts` 加一行 `export { xxxTool } from './xxx.js';`
+
+```typescript
+import type { Tool, ToolResult } from './types.js';
+
+export const xxxTool: Tool = {
+  name: 'my_tool',
+  description: '工具描述（模型可见）',
+  parameters: { type: 'object', properties: {}, required: [] },
+  requiresConfirm: false,
+  async execute(params): Promise<ToolResult> {
+    return { content: 'result' };
+  },
+};
+```
+
+**确认机制**：`requiresConfirm: true` 的工具（如 shell）执行前会弹出 `Execute? [y/N]` 确认。拒绝执行后 Agent Loop 立刻终止，控制权交还用户。
 
 ---
 
@@ -269,5 +309,5 @@ npm publish --access public
 ## 版本
 
 - 作者：helcksun
-- 当前版本：v0.4.0
+- 当前版本：v0.5.0
 - 许可证：MIT
