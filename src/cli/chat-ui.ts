@@ -595,17 +595,14 @@ export class ChatUI {
 
 	private printExitSummary(): void {
 		this.exitAltScreen();
-		this.fullDraw();
-		writeSync(1, CURSOR_HOME);
+		// exitAltScreen 已切回主屏，直接输出退出信息即可
 
 		const sessionId = this.sessionManager?.getSessionId();
 		if (sessionId) {
-			console.log(`\n会话已保存 (id: ${sessionId})`);
-			console.log(`恢复此会话:`);
-			console.log(`  deepseek-arch resume --id ${sessionId}`);
+			writeSync(1, `\n会话已保存 (id: ${sessionId})\n`);
+			writeSync(1, `恢复此会话:\n`);
+			writeSync(1, `  deepseek-arch resume --id ${sessionId}\n`);
 		}
-
-		// Token 摘要（Phase 7 扩展为详细输出）
-		console.log('');
+		writeSync(1, '\n');
 	}
 }

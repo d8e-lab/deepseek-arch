@@ -134,6 +134,33 @@ export class InputEditor {
 		this.clampScroll();
 	}
 
+	/** 左移一个字符（CJK 宽字符一次跳过 2 列） */
+	moveCursorLeft(): void {
+		this.exitHistory();
+		if (this.cursorCol === 0) {
+			if (this.cursorRow === 0) return;
+			this.cursorRow--;
+			this.cursorCol = strDisplayWidth(this.lines[this.cursorRow]);
+			this.clampScroll();
+			return;
+		}
+		this.cursorCol = this.prevCharBoundary(this.lines[this.cursorRow], this.cursorCol);
+	}
+
+	/** 右移一个字符（CJK 宽字符一次跳过 2 列） */
+	moveCursorRight(): void {
+		this.exitHistory();
+		const line = this.lines[this.cursorRow];
+		if (this.cursorCol >= strDisplayWidth(line)) {
+			if (this.cursorRow >= this.lines.length - 1) return;
+			this.cursorRow++;
+			this.cursorCol = 0;
+			this.clampScroll();
+			return;
+		}
+		this.cursorCol = this.nextCharBoundary(line, this.cursorCol);
+	}
+
 	moveToLineStart(): void {
 		this.exitHistory();
 		this.cursorCol = 0;
@@ -256,6 +283,28 @@ export class InputEditor {
 	}
 
 	// ─── 私有方法 ──────────────────────────────────
+
+	/** 找到光标左侧最近的字边界显示列位置 */
+	private prevCharBoundary(line: string, col: number): number {
+		let width = 0;
+		for (const ch of line) {
+			const cw = charDisplayWidth(ch);
+			if (width + cw >= col) return width;
+			width += cw;
+		}
+		return width;
+	}
+
+	/** 找到光标右侧最近的字边界显示列位置 */
+	private nextCharBoundary(line: string, col: number): number {
+		let width = 0;
+		for (const ch of line) {
+			const cw = charDisplayWidth(ch);
+			if (width + cw > col) return width + cw;
+			width += cw;
+		}
+		return width;
+	}
 
 	/** 显示列位置 → 行内字符串下标 */
 	private displayColToIndex(line: string, displayCol: number): number {

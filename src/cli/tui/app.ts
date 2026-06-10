@@ -12,6 +12,7 @@ import type { StreamEvent } from '../../types/index.js';
 import type { Tool } from '../../tools/types.js';
 import { ConversationView } from './conversation.js';
 import { InputEditor } from './input-editor.js';
+import { Throttle } from '../../utils/throttle.js';
 import {
 	getTermSize,
 	enableBracketedPaste,
@@ -19,6 +20,8 @@ import {
 	hideCursor,
 	showCursor,
 	clearLine,
+	onResize,
+	offResize,
 	GRAY_BG_START,
 	GRAY_BG_END,
 	cyan,
@@ -35,9 +38,6 @@ import type { TuiConfig } from './types.js';
 /** 输入框最大可见行数 */
 const MAX_INPUT_ROWS = 5;
 
-/** ANSI 光标保存/恢复 */
-const SAVE_CURSOR = '\x1b[s';
-const RESTORE_CURSOR = '\x1b[u';
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
 
@@ -52,6 +52,8 @@ export class TuiApp {
 	private running = false;
 	/** 上次渲染的可见行数（用于缩小时清理残留行） */
 	private lastVisibleInputRows = 1;
+	/** 上次渲染后的光标所在输入行号（0-based，用于下次回到起点） */
+	private lastCursorDisplayRow = 0;
 
 	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[]) {
 		this.sessionMgr = sessionMgr;
@@ -96,34 +98,35 @@ export class TuiApp {
 		const lastUsage = session?.meta.lastUsage;
 
 		process.stdout.write(
-			`deepseek-arch v${this.config.version}  |  Provider: ${this.config.provider}  |  Model: ${this.config.model}\n`,
+			`deepseek-arch v${this.config.version}  |  Provider: ${this.config.provider}  |  Model: ${this.config.model}\r\n`,
 		);
 
 		let infoStr = `Session: ${sessionId.slice(0, 8)}...  |  Turns: ${turnCount}`;
 		if (lastUsage && lastUsage.total_tokens > 0) {
 			infoStr += `  |  Last tokens: ${lastUsage.prompt_tokens} in + ${lastUsage.completion_tokens} out`;
 		}
-		process.stdout.write(dim(infoStr) + '\n');
+		process.stdout.write(dim(infoStr) + '\r\n');
 	}
 
 	private printSeparator(): void {
 		const cols = getTermSize().cols;
-		process.stdout.write('─'.repeat(cols) + '\n');
+		// cols-1 避免 auto-wrap，\r\n 确保 raw mode 下正确换行
+		process.stdout.write('─'.repeat(cols - 1) + '\r\n');
 	}
 
 	private printConversation(turns: import('../../types/index.js').TurnRecord[]): void {
 		const cols = getTermSize().cols;
 		const lines = this.conversation.render(turns, cols);
 		for (const line of lines) {
-			process.stdout.write(line + '\n');
+			process.stdout.write(line + '\r\n');
 		}
 	}
 
 	private printExitInfo(): void {
 		const sessionId = this.sessionMgr.getSessionId();
 		if (sessionId) {
-			process.stdout.write(`Session saved: ${sessionId}\n`);
-			process.stdout.write(`To resume: deepseek-arch chat --resume ${sessionId}\n`);
+			process.stdout.write(`Session saved: ${sessionId}\r\n`);
+			process.stdout.write(`To resume: deepseek-arch chat --resume ${sessionId}\r\n`);
 		}
 	}
 
@@ -137,13 +140,32 @@ export class TuiApp {
 
 		// 全局 stdin 监听：根据当前 stdinHandler 分发
 		process.stdin.on('data', this.onStdinData);
+
+		// 终端 resize 监听
+		onResize(this.onTermResize);
 	}
 
 	private onStdinData = (data: string): void => {
 		if (this.stdinHandler) this.stdinHandler(data);
 	};
 
+	private onTermResize = (): void => {
+		// 仅空闲态重绘输入区域（流式/确认态的输出已在 scrollback 中）
+		if (this.state !== AppState.IDLE) return;
+		// 回到输入区域起点 → 清到屏底 → 重画 → 重渲染
+		if (this.lastCursorDisplayRow > 0) {
+			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		}
+		process.stdout.write('\r');
+		process.stdout.write(CLEAR_TO_END);
+		this.drawInputArea();
+		process.stdout.write('\r');
+		this.lastCursorDisplayRow = 0;
+		this.renderInput();
+	};
+
 	private cleanupRawMode(): void {
+		offResize(this.onTermResize);
 		process.stdin.off('data', this.onStdinData);
 		disableBracketedPaste();
 		showCursor();
@@ -155,19 +177,20 @@ export class TuiApp {
 
 	private async inputCycle(): Promise<void> {
 		this.lastVisibleInputRows = 1;
+		this.lastCursorDisplayRow = 0;
 
 		// 画输入区域
-		process.stdout.write(SAVE_CURSOR);
 		this.drawInputArea();
-		// drawInputArea 写入 1 行灰底（无 \n），光标在行末
-		// \r 回到第一个输入行的列 0
 		process.stdout.write('\r');
 
 		this.input.clear();
 		const content = await this.readUserInput();
 
-		// 清除输入区域
-		process.stdout.write(RESTORE_CURSOR);
+		// 清除输入区域：回到起点（无历史记录时即当前行），清到屏底
+		if (this.lastCursorDisplayRow > 0) {
+			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		}
+		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
 
 		if (content === null) {
@@ -176,7 +199,7 @@ export class TuiApp {
 		}
 
 		// 打印用户消息（绿色）
-		process.stdout.write(green('[You] ') + content + '\n\n');
+		process.stdout.write(green('[You] ') + content + '\r\n\r\n');
 
 		// 发送并流式输出
 		await this.sendMessageStream(content);
@@ -279,7 +302,13 @@ export class TuiApp {
 			}
 
 			if (ch === '\x0d') {
-				// Enter：提交
+				// \r\n（Windows 换行格式的粘贴）→ 视为换行
+				if (i + 1 < data.length && data[i + 1] === '\x0a') {
+					this.input.insertNewline();
+					i++; // 跳过 \n
+					continue;
+				}
+				// 独立 \r → Enter 提交
 				if (this.input.isEmpty()) continue;
 				const content = this.input.buildSubmitContent();
 				this.stdinHandler = null;
@@ -301,8 +330,8 @@ export class TuiApp {
 		switch (seq) {
 			case 'A': this.input.navigateHistory(-1) || this.input.moveCursor(-1, 0); break;
 			case 'B': this.input.navigateHistory(1) || this.input.moveCursor(1, 0); break;
-			case 'C': this.input.moveCursor(0, 1); break;
-			case 'D': this.input.moveCursor(0, -1); break;
+			case 'C': this.input.moveCursorRight(); break;
+			case 'D': this.input.moveCursorLeft(); break;
 			case 'H': this.input.moveToLineStart(); break;
 			case 'F': this.input.moveToLineEnd(); break;
 			case '3~': this.input.deleteAfterCursor(); break;
@@ -313,8 +342,8 @@ export class TuiApp {
 
 	private drawInputArea(): void {
 		const cols = getTermSize().cols;
-		const empty = ' '.repeat(cols);
-		// 初始只画 1 行
+		// cols-1 避免终端 auto-wrap 导致光标错位
+		const empty = ' '.repeat(cols - 1);
 		process.stdout.write(GRAY_BG_START + empty + GRAY_BG_END);
 	}
 
@@ -328,33 +357,36 @@ export class TuiApp {
 		const visibleLines = Math.max(1, Math.min(inputLines.length, MAX_INPUT_ROWS));
 		const linesToDraw = Math.max(visibleLines, this.lastVisibleInputRows);
 
-		// 回到输入区域起始行
-		process.stdout.write(RESTORE_CURSOR);
+		// 回到输入区域起始行：从上次光标位置向上移动
+		if (this.lastCursorDisplayRow > 0) {
+			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		}
+		process.stdout.write('\r');
 
 		// 绘制每一行
 		for (let r = 0; r < linesToDraw; r++) {
 			clearLine();
 			if (r < inputLines.length && r < MAX_INPUT_ROWS) {
-				const text = padToWidth(inputLines[r].slice(0, cols - 2), cols);
+				// cols-1 避免终端 auto-wrap 导致行偏移
+				const text = padToWidth(inputLines[r].slice(0, cols - 2), cols - 1);
 				process.stdout.write(GRAY_BG_START + text + GRAY_BG_END);
 			}
 			// r >= inputLines.length: 清除残留行（不用灰底）
-			if (r < linesToDraw - 1) process.stdout.write('\n');
+			if (r < linesToDraw - 1) process.stdout.write('\r\n');
 		}
 		this.lastVisibleInputRows = visibleLines;
 
 		// 定位光标：
-		// for 循环结束后，光标在最后一行行末。
-		// saved_row=0, 循环画了 N 行后, 光标在 row=N-1。
-		// 需要三个步骤回到正确位置：
+		// for 循环结束后，光标在最后一行行首（每行末 \r\n 回到下行行首）。
 		//   1. \r 归零列
-		//   2. 上移 N-1 行回到第一个输入行 (row=0)
+		//   2. 上移 linesToDraw-1 行回到第一个输入行
 		//   3. 下移 cursorPos.row，右移 cursorPos.col
 		process.stdout.write('\r');
 		if (linesToDraw > 1) process.stdout.write(`\x1b[${linesToDraw - 1}A`);
 		if (cursorPos.row > 0) process.stdout.write(`\x1b[${cursorPos.row}B`);
 		if (cursorPos.col > 0) process.stdout.write(`\x1b[${cursorPos.col}C`);
 
+		this.lastCursorDisplayRow = cursorPos.row;
 		showCursor();
 	}
 
@@ -367,12 +399,12 @@ export class TuiApp {
 	): Promise<boolean> {
 		return new Promise((resolve) => {
 			const command = String(params.command ?? '');
-			process.stdout.write(yellow(`\n[Confirm] ${command}\n`));
+			process.stdout.write(yellow(`\r\n[Confirm] ${command}\r\n`));
 			process.stdout.write(yellow('Execute? [y/N] '));
 
 			const prevHandler = this.stdinHandler;
 			this.stdinHandler = (data: string) => {
-				process.stdout.write('\n');
+				process.stdout.write('\r\n');
 				this.stdinHandler = prevHandler;
 				if (data === '\x03') {
 					// Ctrl+C = deny + abort
@@ -393,6 +425,16 @@ export class TuiApp {
 		let reasoningStarted = false;
 		let contentStarted = false;
 
+		// 流式输出节流：累积 delta，30fps 批量写出
+		const renderThrottle = new Throttle(30);
+		let pending = '';
+		let pendingIsReasoning = false;
+		const flush = (): void => {
+			if (!pending) return;
+			process.stdout.write(pendingIsReasoning ? dim(pending) : pending);
+			pending = '';
+		};
+
 		// 流式期间的数据处理：只处理 Ctrl+C
 		const prevHandler = this.stdinHandler;
 		this.stdinHandler = (data: string) => {
@@ -409,26 +451,32 @@ export class TuiApp {
 						case 'reasoning_delta':
 							this.setState(AppState.STREAMING);
 							if (!reasoningStarted) {
-								process.stdout.write(dim('[Think] '));
+								pending += '[Think] ';
 								reasoningStarted = true;
 							}
-							process.stdout.write(dim(event.text ?? ''));
+							pending += event.text ?? '';
+							pendingIsReasoning = true;
+							renderThrottle.run(flush);
 							break;
 						case 'content_delta':
 							this.setState(AppState.STREAMING);
 							if (reasoningStarted && !contentStarted) {
+								flush(); // reasoning → content 过渡，写出剩余 reasoning
 								contentStarted = true;
 							}
-							if (!contentStarted) {
-								process.stdout.write('\n\n');
+							if (!contentStarted && !reasoningStarted) {
+								process.stdout.write('\r\n\r\n');
 								contentStarted = true;
 							}
-							process.stdout.write(event.text ?? '');
+							pending += event.text ?? '';
+							pendingIsReasoning = false;
+							renderThrottle.run(flush);
 							break;
 						case 'tool_call_start': {
+							flush();
 							const shortName = (event.toolName ?? '?').replace('execute_', '');
 							process.stdout.write(
-								cyan(`\n[T: ${shortName}] `) + dim(JSON.stringify(event.toolArgs ?? {})) + '\n',
+								cyan(`\r\n[T: ${shortName}] `) + dim(JSON.stringify(event.toolArgs ?? {})) + '\r\n',
 							);
 							break;
 						}
@@ -436,35 +484,39 @@ export class TuiApp {
 							// tool call 参数增量（不渲染，静默累积）
 							break;
 						case 'tool_preview': {
+							flush();
 							// diff 预览 — 原生格式，仅着色，不加额外前缀
 							const preview = event.toolPreview ?? '';
 							if (preview) {
 								for (const line of preview.split('\n')) {
-									process.stdout.write(renderDiffLine(line, '') + '\n');
+									process.stdout.write(renderDiffLine(line, '') + '\r\n');
 								}
 							}
 							break;
 						}
 						case 'tool_result':
+							flush();
 							if (event.toolDenied) {
-								process.stdout.write(red('\n[Denied]\n'));
+								process.stdout.write(red('\r\n[Denied]\r\n'));
 							} else {
 								const lines = (event.toolResult ?? '').split('\n').slice(0, 12);
 								for (const line of lines) {
-									process.stdout.write(cyan(' │ ') + dim(line) + '\n');
+									process.stdout.write(cyan(' │ ') + dim(line) + '\r\n');
 								}
 								if ((event.toolResult ?? '').split('\n').length > 12) {
-									process.stdout.write(cyan(' │ ') + dim('...') + '\n');
+									process.stdout.write(cyan(' │ ') + dim('...') + '\r\n');
 								}
 							}
 							break;
 						case 'done':
-							process.stdout.write('\n');
+							flush();
+							process.stdout.write('\r\n');
 							this.printUsage(event);
 							break;
 						case 'error':
-							process.stdout.write('\n');
-							process.stdout.write(red(`Error: ${event.error ?? 'unknown'}`) + '\n');
+							flush();
+							process.stdout.write('\r\n');
+							process.stdout.write(red(`Error: ${event.error ?? 'unknown'}`) + '\r\n');
 							break;
 					}
 				},
@@ -475,9 +527,9 @@ export class TuiApp {
 			);
 		} catch (err: any) {
 			if (err?.name === 'AbortError') {
-				process.stdout.write(dim('\n[interrupted]\n'));
+				process.stdout.write(dim('\r\n[interrupted]\r\n'));
 			} else {
-				process.stdout.write(red(`\nError: ${err?.message ?? err}`) + '\n');
+				process.stdout.write(red(`\r\nError: ${err?.message ?? err}`) + '\r\n');
 			}
 		} finally {
 			this.stdinHandler = prevHandler;
@@ -493,7 +545,7 @@ export class TuiApp {
 		if (u.prompt_tokens > 0) parts.push(`${u.prompt_tokens} in`);
 		if (u.completion_tokens > 0) parts.push(`${u.completion_tokens} out`);
 		if (parts.length > 0) {
-			process.stdout.write(dim(`--- token: ${parts.join(' + ')} ---`) + '\n');
+			process.stdout.write(dim(`--- token: ${parts.join(' + ')} ---`) + '\r\n');
 		}
 	}
 

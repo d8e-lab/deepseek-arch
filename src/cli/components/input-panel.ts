@@ -11,21 +11,33 @@ const MAX_INPUT_HEIGHT = 10;
 /**
  * 字符显示宽度
  * CJK / 全角 = 2，ASCII = 1
+ * 与 renderer.ts 的 isWideChar() 保持一致的 Unicode 覆盖范围
  */
 export function charDisplayWidth(char: string): number {
 	const code = char.codePointAt(0) ?? 0;
-	if (
-		(code >= 0x4e00 && code <= 0x9fff) ||
-		(code >= 0x3400 && code <= 0x4dbf) ||
-		(code >= 0xf900 && code <= 0xfaff) ||
-		(code >= 0x2e80 && code <= 0x2eff) ||
-		(code >= 0x3000 && code <= 0x303f) ||
-		(code >= 0xff00 && code <= 0xffef) ||
-		(code >= 0x20000 && code <= 0x2ffff)
-	) {
-		return 2;
-	}
-	return 1;
+	// 控制字符宽度为 0
+	if (code < 0x20) return 0;
+	if (code >= 0x7f && code <= 0x9f) return 0;
+	return isWideChar(code) ? 2 : 1;
+}
+
+/** 判断字符是否为 CJK 宽字符（显示宽度 = 2） */
+function isWideChar(code: number): boolean {
+	return (
+		(code >= 0x1100 && code <= 0x115f) || // Hangul Jamo
+		(code >= 0x2329 && code <= 0x232a) || // Angle brackets
+		(code >= 0x2e80 && code <= 0x303e) || // CJK Radicals / Symbols
+		(code >= 0x3040 && code <= 0x33bf) || // Hiragana, Katakana, Bopomofo, Hangul Compatibility Jamo, Kanbun
+		(code >= 0x3400 && code <= 0x4dbf) || // CJK Unified Ideographs Extension A
+		(code >= 0x4e00 && code <= 0xa4cf) || // CJK Unified Ideographs + Yi
+		(code >= 0xac00 && code <= 0xd7af) || // Hangul Syllables
+		(code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility Ideographs
+		(code >= 0xfe10 && code <= 0xfe6f) || // Vertical forms, CJK Compatibility Forms, Small Form Variants
+		(code >= 0xff01 && code <= 0xff60) || // Fullwidth Forms
+		(code >= 0xffe0 && code <= 0xffe6) || // Fullwidth Signs
+		(code >= 0x20000 && code <= 0x2ffff) || // CJK Unified Ideographs Extension B+
+		(code >= 0x30000 && code <= 0x3ffff) // CJK Unified Ideographs Extension G+
+	);
 }
 
 /** 字符串显示宽度 */
