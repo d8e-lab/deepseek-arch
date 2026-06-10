@@ -34,6 +34,11 @@ export interface Tool {
 	parameters: Record<string, any>;
 	/** 是否需要用户确认后才执行（shell 等危险操作需要） */
 	requiresConfirm: boolean;
+	/**
+	 * 生成执行前的 diff 预览（可选，如文件修改工具）。
+	 * 返回 null 表示无预览（session.ts 跳过预览步骤）。
+	 */
+	preview?(params: Record<string, unknown>): Promise<string | null>;
 	/** 执行工具并返回结果 */
 	execute(params: Record<string, unknown>): Promise<ToolResult>;
 }

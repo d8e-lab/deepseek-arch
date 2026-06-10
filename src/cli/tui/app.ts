@@ -27,6 +27,7 @@ import {
 	yellow,
 	red,
 	padToWidth,
+	renderDiffLine,
 } from './renderer.js';
 import { AppState } from './types.js';
 import type { TuiConfig } from './types.js';
@@ -434,6 +435,16 @@ export class TuiApp {
 						case 'tool_call_delta':
 							// tool call 参数增量（不渲染，静默累积）
 							break;
+						case 'tool_preview': {
+							// diff 预览 — 着色渲染
+							const preview = event.toolPreview ?? '';
+							if (preview) {
+								for (const line of preview.split('\n')) {
+									process.stdout.write(renderDiffLine(line, cyan(' │ ')) + '\n');
+								}
+							}
+							break;
+						}
 						case 'tool_result':
 							if (event.toolDenied) {
 								process.stdout.write(red('\n[Denied]\n'));

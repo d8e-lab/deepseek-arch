@@ -118,6 +118,31 @@ export function red(text: string): string {
 	return `\x1b[31m${text}\x1b[0m`;
 }
 
+// ─── Diff 渲染（背景色）───────────────────────────
+
+/** 深绿色背景（新增行） */
+export const GREEN_BG_START = '\x1b[48;5;22m';
+/** 深红色背景（删除行） */
+export const RED_BG_START = '\x1b[48;5;52m';
+
+/**
+ * 渲染一行 diff——根据行前缀选择颜色
+ * - "+" → 绿底
+ * - "-" → 红底
+ * - "@@" → cyan dim
+ * - "---" / "+++" → dim
+ * - 其他 → dim
+ */
+export function renderDiffLine(line: string, indent: string): string {
+	if (line.startsWith('+')) {
+		return GREEN_BG_START + indent + line + '\x1b[0m';
+	}
+	if (line.startsWith('-')) {
+		return RED_BG_START + indent + line + '\x1b[0m';
+	}
+	return dim(indent + line);
+}
+
 // ─── CJK 字符宽度 ─────────────────────────────────
 
 /**

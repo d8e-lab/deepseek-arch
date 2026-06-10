@@ -299,7 +299,20 @@ export class SessionManager {
 						toolArgs: args,
 					});
 
-					// 需要用户确认的工具：通过 onConfirm 回调确认
+					// 生成 diff 预览（文件修改工具）
+					if (tool?.preview) {
+						const preview = await tool.preview(args);
+						if (preview !== null && preview !== undefined) {
+							onEvent({
+								type: 'tool_preview',
+								toolCallId: tc.id,
+								toolName: tc.function.name,
+								toolPreview: preview,
+							});
+						}
+					}
+
+					// 需要用户确认的工具：通过 onConfirm 回调确认（diff 已渲染在屏幕上）
 					let denied = false;
 					if (tool?.requiresConfirm && onConfirm) {
 						const approved = await onConfirm(tc.function.name, args);

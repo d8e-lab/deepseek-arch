@@ -10,3 +10,5 @@
 export { shellTool } from './shell.js';
 export { readFileTool } from './read-file.js';
 export { searchContentTool } from './search-content.js';
+export { writeFileTool } from './write-file.js';
+export { editFileTool } from './edit-file.js';

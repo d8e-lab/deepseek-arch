@@ -58,19 +58,21 @@ export interface TurnRecord {
 /** 流式事件（SessionManager → ChatUI 回调） */
 export interface StreamEvent {
 	type: 'reasoning_delta' | 'content_delta' | 'done' | 'error'
-		| 'tool_call_delta' | 'tool_call_start' | 'tool_result';
+		| 'tool_call_delta' | 'tool_call_start' | 'tool_preview' | 'tool_result';
 	/** 增量文本（reasoning_delta / content_delta / tool_call_delta） */
 	text?: string;
 	/** token 用量（done 事件） */
 	usage?: TokenUsage;
 	/** 错误信息（error 事件） */
 	error?: string;
-	/** tool call ID（tool_call_delta / tool_call_start / tool_result） */
+	/** tool call ID（tool_call_delta / tool_call_start / tool_preview / tool_result） */
 	toolCallId?: string;
-	/** tool 名称（tool_call_start） */
+	/** tool 名称（tool_call_start / tool_preview） */
 	toolName?: string;
 	/** tool 参数（tool_call_start） */
 	toolArgs?: Record<string, unknown>;
+	/** diff 预览内容（tool_preview） */
+	toolPreview?: string;
 	/** tool 执行结果（tool_result） */
 	toolResult?: string;
 	/** tool 是否被拒绝执行（tool_result） */
