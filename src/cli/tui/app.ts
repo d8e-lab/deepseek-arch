@@ -350,6 +350,9 @@ export class TuiApp {
 	/** 原地刷新输入区域 */
 	private renderInput(): void {
 		const cols = getTermSize().cols;
+		// cols-1 为可用显示宽度（避免 auto-wrap），留 1 列余量给换行光标
+		const availWidth = cols - 1;
+		this.input.setWrapWidth(availWidth);
 		hideCursor();
 
 		const inputLines = this.input.getDisplayLines();
@@ -367,8 +370,8 @@ export class TuiApp {
 		for (let r = 0; r < linesToDraw; r++) {
 			clearLine();
 			if (r < inputLines.length && r < MAX_INPUT_ROWS) {
-				// cols-1 避免终端 auto-wrap 导致行偏移
-				const text = padToWidth(inputLines[r].slice(0, cols - 2), cols - 1);
+				// 软换行后的段已由 InputEditor 截断，只做右侧填充
+				const text = padToWidth(inputLines[r], availWidth);
 				process.stdout.write(GRAY_BG_START + text + GRAY_BG_END);
 			}
 			// r >= inputLines.length: 清除残留行（不用灰底）

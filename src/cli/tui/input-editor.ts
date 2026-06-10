@@ -13,13 +13,13 @@
 import { charDisplayWidth, strDisplayWidth } from './renderer.js';
 
 export class InputEditor {
-	/** 当前输入的文本行 */
+	/** 当前输入的文本行（硬行，\n 分隔） */
 	private lines: string[] = [''];
 	/** 光标行（0-based，在 lines 内） */
 	private cursorRow: number = 0;
-	/** 光标列（显示宽度列，0-based） */
+	/** 光标列（显示宽度列，0-based，从硬行首计） */
 	private cursorCol: number = 0;
-	/** 滚动偏移（第一可见行的索引） */
+	/** 滚动偏移（显示行索引，非硬行索引） */
 	private scrollOffset: number = 0;
 	/** 历史输入 */
 	private history: string[] = [];
@@ -31,6 +31,13 @@ export class InputEditor {
 	private pasteContents: string[] = [];
 	/** 最大可见行数 */
 	readonly maxVisibleLines: number = 5;
+	/** 软换行宽度（0 = 不自动换行） */
+	private wrapWidth: number = 0;
+
+	/** 设置软换行宽度 */
+	setWrapWidth(width: number): void {
+		this.wrapWidth = Math.max(0, width);
+	}
 
 	// ─── 查询 ──────────────────────────────────────
 
@@ -261,28 +268,112 @@ export class InputEditor {
 
 	// ─── 显示输出 ──────────────────────────────────
 
-	/** 获取用于渲染的可见行（受 scrollOffset 和 maxVisibleLines 限制） */
+	/** 获取用于渲染的可见行（软换行后，受 scrollOffset 和 maxVisibleLines 限制） */
 	getDisplayLines(): string[] {
-		const max = Math.min(this.lines.length, this.scrollOffset + this.maxVisibleLines);
-		const visible = this.lines.slice(this.scrollOffset, max);
-		// 右侧截断以适应终端宽度（由渲染层处理）
-		return visible;
+		if (this.wrapWidth <= 0) {
+			const max = Math.min(this.lines.length, this.scrollOffset + this.maxVisibleLines);
+			return this.lines.slice(this.scrollOffset, max);
+		}
+		const result: string[] = [];
+		let displayIdx = 0;
+		for (let li = 0; li < this.lines.length && result.length < this.maxVisibleLines; li++) {
+			for (const seg of this.softWrap(this.lines[li])) {
+				if (displayIdx >= this.scrollOffset) {
+					result.push(seg);
+					if (result.length >= this.maxVisibleLines) break;
+				}
+				displayIdx++;
+			}
+		}
+		return result;
 	}
 
-	/** 获取光标在显示区域中的位置 */
+	/** 获取光标在显示区域中的位置（软换行感知） */
 	getCursorDisplayPos(): { row: number; col: number } {
+		if (this.wrapWidth <= 0) {
+			return { row: this.cursorRow - this.scrollOffset, col: this.cursorCol };
+		}
+		// 累计 cursorRow 之前硬行的显示行数
+		let globalRow = 0;
+		for (let li = 0; li < this.cursorRow; li++) {
+			globalRow += this.softWrap(this.lines[li]).length;
+		}
+		// 在 cursorRow 硬行内找光标所在的软换行段
+		const line = this.lines[this.cursorRow];
+		let segStartCol = 0;
+		for (const w of this.softWrap(line)) {
+			const segEndCol = segStartCol + strDisplayWidth(w);
+			if (this.cursorCol <= segEndCol) {
+				return {
+					row: globalRow - this.scrollOffset,
+					col: this.cursorCol - segStartCol,
+				};
+			}
+			segStartCol = segEndCol;
+			globalRow++;
+		}
+		// 光标在最后一行的末尾
 		return {
-			row: this.cursorRow - this.scrollOffset,
-			col: this.cursorCol,
+			row: globalRow - this.scrollOffset,
+			col: this.cursorCol - segStartCol,
 		};
 	}
 
-	/** 总有内容需要渲染 */
+	/** 计算总显示行数 */
 	getLineCount(): number {
-		return Math.min(this.lines.length, this.maxVisibleLines);
+		return this.countDisplayRows();
 	}
 
 	// ─── 私有方法 ──────────────────────────────────
+
+	/** 按显示宽度软换行 */
+	private softWrap(line: string): string[] {
+		const width = this.wrapWidth;
+		if (width <= 0 || line.length === 0) return [line || ''];
+		const result: string[] = [];
+		let cur = '';
+		let curW = 0;
+		for (const ch of line) {
+			const cw = charDisplayWidth(ch);
+			if (curW + cw > width) {
+				result.push(cur);
+				cur = ch;
+				curW = cw;
+			} else {
+				cur += ch;
+				curW += cw;
+			}
+		}
+		if (cur || result.length === 0) result.push(cur);
+		return result;
+	}
+
+	/** 计算所有行的总显示行数 */
+	private countDisplayRows(): number {
+		if (this.wrapWidth <= 0) return this.lines.length;
+		let count = 0;
+		for (const line of this.lines) {
+			count += this.softWrap(line).length;
+		}
+		return Math.max(1, count);
+	}
+
+	/** 计算光标所在全局显示行号（不受 scrollOffset 影响） */
+	private getCursorDisplayRow(): number {
+		if (this.wrapWidth <= 0) return this.cursorRow;
+		let row = 0;
+		for (let li = 0; li < this.cursorRow; li++) {
+			row += this.softWrap(this.lines[li]).length;
+		}
+		const line = this.lines[this.cursorRow];
+		let segStart = 0;
+		for (const w of this.softWrap(line)) {
+			if (segStart + strDisplayWidth(w) > this.cursorCol) break;
+			segStart += strDisplayWidth(w);
+			row++;
+		}
+		return row;
+	}
 
 	/** 找到光标左侧最近的字边界显示列位置 */
 	private prevCharBoundary(line: string, col: number): number {
@@ -319,14 +410,17 @@ export class InputEditor {
 		return i;
 	}
 
-	/** 更新 scrollOffset，确保光标在可见区域内 */
+	/** 更新 scrollOffset（显示行偏移），确保光标在可见区域内 */
 	private clampScroll(): void {
-		if (this.cursorRow < this.scrollOffset) {
-			this.scrollOffset = this.cursorRow;
-		} else if (this.cursorRow >= this.scrollOffset + this.maxVisibleLines) {
-			this.scrollOffset = this.cursorRow - this.maxVisibleLines + 1;
+		const cursorRow = this.getCursorDisplayRow();
+		const totalRows = this.countDisplayRows();
+
+		if (cursorRow < this.scrollOffset) {
+			this.scrollOffset = cursorRow;
+		} else if (cursorRow >= this.scrollOffset + this.maxVisibleLines) {
+			this.scrollOffset = cursorRow - this.maxVisibleLines + 1;
 		}
-		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, this.lines.length - 1));
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, Math.max(0, totalRows - 1)));
 	}
 
 	private clamp(val: number, min: number, max: number): number {
