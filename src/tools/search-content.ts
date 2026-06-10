@@ -79,10 +79,9 @@ async function collectFiles(
 export const searchContentTool: Tool = {
 	name: 'search_content',
 	description:
-		'搜索项目中的函数名、类名、变量名、字符串字面量、错误消息等代码关键词。' +
-		'支持 | 分隔多关键词 OR 搜索，显示匹配行及上下文。' +
-		'请勿用于搜索文件名——找文件用 read_file 直接读。' +
-		'跳过 node_modules/.git/dist 等目录和二进制文件。',
+		'在文件中搜索关键词，返回匹配行及上下文行（默认前后各 1 行），并标注命中文件路径。' +
+		'支持 | 分隔多关键词 OR 搜索。跳过 node_modules/.git/dist 等目录和二进制文件。' +
+		'已知文件路径后，用 read_file 读取完整内容；不要用 shell grep/rg 代替本工具。',
 	parameters: {
 		type: 'object',
 		properties: {

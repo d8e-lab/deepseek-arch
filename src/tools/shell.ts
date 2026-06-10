@@ -30,9 +30,7 @@ function truncateOutput(raw: string, maxBytes: number): string {
 export const shellTool: Tool = {
 	name: 'execute_command',
 	description:
-		'在项目目录中执行 shell 命令。支持管道、重定向等 shell 语法。' +
-		'请尽量使用非交互式命令（如 git diff、ls -la、npm test 等）。' +
-		'禁止使用 sudo。工作目录默认为会话目录。',
+		'执行 shell 命令。文件操作有专属工具（read_file/edit_file/write_file/search_content），仅在无专属工具覆盖时才用本工具。典型适用场景：git、npm/pip、测试运行、构建脚本、权限修改等系统操作。禁止 sudo。默认工作目录为会话目录。',
 	parameters: {
 		type: 'object',
 		properties: {
