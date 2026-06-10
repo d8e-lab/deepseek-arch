@@ -22,6 +22,8 @@ export interface ToolCallRecord extends ToolCallRequest {
 	result?: string;
 	error?: string;
 	duration_ms: number;
+	/** diff 预览内容（文件修改工具执行前生成，resume 时用于重现展示） */
+	preview?: string;
 }
 
 /** Tool 接口 — 每个工具必须实现 */

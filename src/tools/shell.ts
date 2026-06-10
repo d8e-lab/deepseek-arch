@@ -111,6 +111,8 @@ export const shellTool: Tool = {
 					resolveResult(result);
 				},
 			);
+			// 立即关闭 stdin，防止交互式命令（如 ssh、vim、git commit 无 -m）无限阻塞
+			child.stdin?.end();
 		});
 	},
 };

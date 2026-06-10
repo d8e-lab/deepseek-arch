@@ -8,7 +8,7 @@
  */
 
 import type { TurnRecord, TokenUsage } from '../../types/index.js';
-import { strDisplayWidth, cyan, dim, green, red } from './renderer.js';
+import { strDisplayWidth, cyan, dim, green, red, renderDiffLine } from './renderer.js';
 
 /** think 最大显示行数 */
 const THINK_MAX_LINES = 4;
@@ -135,6 +135,11 @@ export class ConversationView {
 					const argsStr = JSON.stringify(tcr.arguments);
 					lines.push(label + dim(`${argsStr}  (${tcr.duration_ms}ms)`));
 
+					if (tcr.preview) {
+						for (const line of tcr.preview.split('\n')) {
+							lines.push(renderDiffLine(line, ''));
+						}
+					}
 					if (tcr.error) {
 						const errLabel = tcr.error === 'denied' ? '[Denied]' : `Error: ${tcr.error}`;
 						lines.push(' '.repeat(labelWidth) + red(errLabel));

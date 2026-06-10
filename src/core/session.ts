@@ -300,9 +300,11 @@ export class SessionManager {
 					});
 
 					// 生成 diff 预览（文件修改工具）
+					let previewText: string | undefined;
 					if (tool?.preview) {
 						const preview = await tool.preview(args);
 						if (preview !== null && preview !== undefined) {
+							previewText = preview;
 							onEvent({
 								type: 'tool_preview',
 								toolCallId: tc.id,
@@ -347,6 +349,7 @@ export class SessionManager {
 						result: toolResult,
 						error: toolError,
 						duration_ms: durationMs,
+						preview: previewText,
 					});
 
 					// 通知 TUI：工具执行完成
