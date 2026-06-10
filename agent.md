@@ -16,6 +16,42 @@
    - 工作目录内的文件操作无限制
 8. **制表符缩进**：尽量使用缩进长度为4的制表符
 
+## Git 工作流
+
+**启动新功能/修改前**：
+1. `git stash` — 暂存当前工作区未提交的修改（如果有）
+2. `git checkout -b feature/<name>` — 从 main 创建功能分支
+3. 在分支上执行所有修改
+
+**开发过程中**：
+- 每完成一个逻辑步骤后 `git add` + `git commit`，保持 commit 粒度小、可回溯
+- commit message 以中文描述变更内容和原因
+- 不修改已发布的历史（不 rebase 已 push 的 commit）
+
+**完成开发后**：
+- 运行 `npm test` 确保全部测试通过
+- `git checkout main && git merge feature/<name>` 合并回 main
+- 仅在用户明确批准后执行 merge
+
+**依赖 git 回滚**：
+- 不额外做文件快照/备份
+- 修改后的文件通过 `git diff` 查看变更
+- 回滚通过 `git checkout -- <file>`（未提交）或 `git revert`（已提交）
+
+**禁止操作**（需用户明确确认）：
+- `git reset --hard` — 丢失未提交工作区修改，不可恢复
+- `git clean -fd` — 删除未跟踪文件，不可恢复
+- `git push --force` — 覆盖远端历史
+- `git branch -D` — 强删分支（未 merge）
+
+## 文件修改工具设计原则
+
+1. **精确字符串匹配**：编辑文件使用 `old_string` + `new_string` 精确匹配替换（不用行号）。
+2. **乐观并发**：不预检查文件变更；`old_string` 未找到或不唯一时报错，让模型重新读取。
+3. **预览后确认**：所有写工具执行前生成 diff 预览，用户看过变更后再确认写入。
+4. **原子写入**：先写临时文件再 rename，防止崩溃时写一半。
+5. **不备份**：不创建 `.bak` 快照；依赖 git 管理变更历史。
+
 ## 技术栈
 
 | 层级 | 技术 |
