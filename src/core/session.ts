@@ -9,6 +9,8 @@
  *   5. Agent loop（tool calling 支持）
  */
 
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { Storage } from './storage.js';
 import type { ModelProvider } from './model-provider.js';
 import { yieldEventLoop } from '../utils/event-loop.js';
@@ -52,7 +54,7 @@ export class SessionManager {
 
 	// ─── 会话生命周期 ──────────────────────────────
 
-	/** 创建新会话并持久化 meta.json */
+	/** 创建新会话并持久化 meta.json，同时保存 system prompt 供调试检查 */
 	async startNewSession(title = ''): Promise<SessionMeta> {
 		const meta = await this.storage.createSession(title);
 		this.session = {
@@ -60,6 +62,13 @@ export class SessionManager {
 			turns: [],
 			systemPrompt: this.systemPrompt?.content,
 		};
+
+		// 将完整 system prompt 写入会话目录，方便调试 kv-cache 命中率
+		if (this.systemPrompt?.content) {
+			const dir = this.storage.sessionDir(meta.id);
+			await writeFile(join(dir, 'system-prompt.txt'), this.systemPrompt.content, 'utf-8');
+		}
+
 		return meta;
 	}
 

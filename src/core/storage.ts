@@ -51,7 +51,7 @@ export class Storage {
 	}
 
 	/** 获取会话目录路径 */
-	private sessionDir(id: string): string {
+	sessionDir(id: string): string {
 		return join(this.sessionsDir, id);
 	}
 

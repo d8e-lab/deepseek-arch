@@ -16,6 +16,7 @@ import { Storage } from '../core/storage.js';
 import { TuiApp } from './tui/app.js';
 import type { TuiConfig } from './tui/types.js';
 import * as toolModules from '../tools/index.js';
+import { buildSystemPromptContext } from '../core/system-info.js';
 
 /** 从 barrel file 获取所有已注册的工具 */
 function loadTools() {
@@ -41,7 +42,7 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	};
 }
 
-function createSessionManager(config: TuiConfig): SessionManager {
+async function createSessionManager(config: TuiConfig): Promise<SessionManager> {
 	const apiClient = new ApiClient(config.baseUrl, config.apiKey, config.model);
 	const cfg = ConfigManager.getInstance();
 	const sessionsDir = cfg.getSessionsDir();
@@ -53,7 +54,9 @@ function createSessionManager(config: TuiConfig): SessionManager {
 	const defaultPrompt = cfg.get<string>('defaults.system_prompt') ?? 'default';
 	const sysContent = cfg.get<string>(`systemPrompts.${defaultPrompt}.content`);
 	if (sysContent) {
-		sessionMgr.setSystemPrompt({ role: 'system', content: sysContent });
+		// 收集系统与环境信息，注入到 system prompt
+		const envContext = await buildSystemPromptContext();
+		sessionMgr.setSystemPrompt({ role: 'system', content: sysContent + '\n' + envContext });
 	}
 
 	return sessionMgr;
@@ -82,7 +85,7 @@ program
 				process.exit(1);
 			}
 
-			const sessionMgr = createSessionManager(tuiConfig);
+			const sessionMgr = await createSessionManager(tuiConfig);
 
 			if (options.resume) {
 				// 按 ID 或名称查找会话
@@ -131,7 +134,7 @@ program
 				}
 
 				const tuiConfig = await createTuiConfig();
-				const sessionMgr = createSessionManager(tuiConfig);
+				const sessionMgr = await createSessionManager(tuiConfig);
 				await sessionMgr.resumeSession(session.meta.id);
 
 				const app = new TuiApp(sessionMgr, tuiConfig, loadTools());
@@ -186,7 +189,7 @@ program
 			}
 
 			const tuiConfig = await createTuiConfig();
-			const sessionMgr = createSessionManager(tuiConfig);
+			const sessionMgr = await createSessionManager(tuiConfig);
 			await sessionMgr.resumeSession(session.meta.id);
 
 			const app = new TuiApp(sessionMgr, tuiConfig, loadTools());

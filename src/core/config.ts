@@ -15,6 +15,7 @@
 
 import { readFile, writeFile, mkdir, access } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { parse as tomlParse, stringify as tomlStringify } from 'smol-toml';
 
@@ -62,14 +63,34 @@ const DEFAULT_PRICING: PricingConfig = {
 	},
 };
 
-const DEFAULT_SYSTEM_PROMPTS: SystemPromptConfig = {
-	default: {
-		content: `Reasoning Effort: 
+/** 硬编码兜底——system_prompt.txt 找不到时使用 */
+const FALLBACK_SYSTEM_PROMPT = `Reasoning Effort:
 Absolute maximum with no shortcuts permitted.
 You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.
-Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.`,
-	},
-};
+Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.`;
+
+/**
+ * 从项目根目录下的 system_prompt.txt 读取默认 system prompt。
+ * 定位方式：通过 import.meta.url 向上找到项目根（src/core → ../../ 或 dist/core → ../../）。
+ * 找不到文件时返回硬编码兜底。
+ */
+async function readDefaultSystemPrompt(): Promise<SystemPromptConfig> {
+	const __filename = fileURLToPath(import.meta.url);
+	const __dirname = dirname(__filename);
+	const projectRoot = resolve(__dirname, '..', '..');
+	const txtPath = resolve(projectRoot, 'system_prompt.txt');
+
+	try {
+		const content = await readFile(txtPath, 'utf-8');
+		return {
+			default: { content },
+		};
+	} catch {
+		return {
+			default: { content: FALLBACK_SYSTEM_PROMPT },
+		};
+	}
+}
 
 /** 配置子树来源追踪 */
 type SourceFile = 'main' | 'providers' | 'pricing' | 'system_prompt';
@@ -143,6 +164,8 @@ export class ConfigManager {
 
 		if (!appConfig) {
 			// 首次运行：写入所有默认配置文件
+			// system prompt 从项目根 system_prompt.txt 读取，避免硬编码
+			const defaultSystemPrompts = await readDefaultSystemPrompt();
 			await this.writeTomlFile(mainConfigPath, DEFAULT_MAIN_CONFIG as unknown as Record<string, unknown>);
 			await this.writeTomlFile(
 				this.resolvePath('providers.toml'),
@@ -154,7 +177,7 @@ export class ConfigManager {
 			);
 			await this.writeTomlFile(
 				this.resolvePath('system-prompt.toml'),
-				DEFAULT_SYSTEM_PROMPTS as unknown as Record<string, unknown>,
+				defaultSystemPrompts as unknown as Record<string, unknown>,
 			);
 			appConfig = DEFAULT_MAIN_CONFIG;
 		}
