@@ -28,4 +28,11 @@ data/*.sqlite
 .env
 .env.local
 
+# Tests
 tests/
+
+# npm pack tarballs
+*.tgz
+
+# Demo test files
+demo_test/

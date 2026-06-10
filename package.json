@@ -1,7 +1,7 @@
 {
   "name": "deepseek-arch",
-  "version": "0.1.0",
-  "description": "DeepSeek core library，提供会话、存储、配置与模型调用能力",
+  "version": "1.0.0",
+  "description": "DeepSeek Terminal Agent — Linux 终端 AI 助手，支持多轮对话、Agent Loop、Tool Calling 与持久化存储",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -12,20 +12,39 @@
   "bin": {
     "deepseek-arch": "dist/cli/index.js"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/d8e-lab/deepseek-arch.git"
+  },
+  "homepage": "https://github.com/d8e-lab/deepseek-arch#readme",
+  "bugs": {
+    "url": "https://github.com/d8e-lab/deepseek-arch/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/cli/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "prepack": "npm run build:release",
+    "build:release": "tsc -p tsconfig.release.json"
   },
   "keywords": [
     "deepseek",
     "ai",
-    "library",
-    "sdk",
-    "core"
+    "terminal",
+    "agent",
+    "cli",
+    "tool-calling"
   ],
   "author": "helcksun",
   "license": "MIT",
@@ -41,5 +60,8 @@
     "@vitest/coverage-v8": "^4.1.6",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
