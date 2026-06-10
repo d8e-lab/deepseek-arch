@@ -28,8 +28,8 @@ async function fileExists(path: string): Promise<boolean> {
 export const writeFileTool: Tool = {
 	name: 'write_file',
 	description:
-		'创建新文件或覆盖已有文件。会先生成变更预览（diff），用户确认后原子写入。' +
-		'自动创建不存在的父目录。',
+		'创建新文件或完整重写已有文件，生成 diff 预览后由用户确认再原子写入。自动创建父目录。' +
+		'仅用于新建文件或必须整体替换的场景；修改已有文件的部分内容应使用 edit_file。',
 	parameters: {
 		type: 'object',
 		properties: {

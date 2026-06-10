@@ -34,9 +34,9 @@ function findAllMatches(content: string, oldStr: string): number[] {
 export const editFileTool: Tool = {
 	name: 'edit_file',
 	description:
-		'对文件执行精确字符串替换，生成 diff 预览后由用户确认再写入。' +
-		'old_string 必须在文件中精确存在。默认要求 old_string 唯一匹配；使用 replace_all 可替换所有匹配项。' +
-		'不可靠的行号——使用精确字符串匹配代替。',
+		'修改已有文件，通过精确字符串匹配替换，生成 diff 预览后由用户确认再写入。' +
+		'修改文件时始终使用本工具，不要用 shell sed/awk 代替。old_string 必须唯一匹配（或指定 replace_all）。' +
+		'先 read_file 确认要改的内容，再用本工具精确替换。',
 	parameters: {
 		type: 'object',
 		properties: {

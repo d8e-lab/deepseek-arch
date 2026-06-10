@@ -20,8 +20,9 @@ const MAX_LIMIT = 500;
 export const readFileTool: Tool = {
 	name: 'read_file',
 	description:
-		'读取指定文本文件的内容。返回指定行范围的内容，末尾附带文件修改时间。' +
-		'使用 offset 和 limit 参数可以分段读取大文件。',
+		'读取文件内容，返回带行号的文本并附文件修改时间。支持分段读取大文件（offset/limit）。' +
+		'始终使用本工具读取文件，不要用 shell cat/head/tail 代替。' +
+		'先用 search_content 查看匹配行和上下文，再用本工具读取完整文件内容。',
 	parameters: {
 		type: 'object',
 		properties: {
