@@ -72,19 +72,81 @@ tool_call_start → preview (生成 diff) → onConfirm → execute
 
 ### 当前实现：系统 diff -u（`src/tools/diff.ts`）
 
-使用 Linux `diff -u` 命令生成 unified diff：
+使用 Linux `diff -u` 命令生成 unified diff。核心函数签名：
+
+```typescript
+async function unifiedDiff(
+  oldText: string,
+  newText: string,
+  oldLabel?: string,  // 如 "a/src/foo.ts"
+  newLabel?: string,  // 如 "b/src/foo.ts"
+): Promise<string>
+```
+
+**执行机制——临时文件对比：**
+
+磁盘上的文件从头到尾都不被修改。preview 阶段的操作全部在内存中完成，diff 通过临时文件进行：
 
 ```
-diff -u --label a/foo.ts /tmp/old --label b/foo.ts /tmp/new
+edit_file preview 流程：
+
+  磁盘 foo.ts                 内存                    /tmp/deepseek-diff-xxx/
+  ──────────                 ────                    ───────────────────────
+  const a = 1;   readFile    const a = 1;   写入    a 文件: const a = 1;
+  const b = 2;  ─────────►   const b = 2;  ──────►              const b = 2;
+  const c = 3;               const c = 3;                       const c = 3;
+                                    │
+                              old_string = "const b = 2;"
+                              String.replace()  ← 仅在内存中
+                                    │
+                                    ▼
+                              const a = 1;   写入    b 文件: const a = 1;
+                              const b = 99;  ──────►           const b = 99;
+                              const c = 3;                      const c = 3;
+                                                          │
+                                                    diff -u a b
+                                                    --label a/foo.ts
+                                                    --label b/foo.ts
+                                                          │
+                                                          ▼
+                                                    unified diff 文本
+                                                    (stdout 作为字符串返回)
+                                                          │
+                                                    立即 rm -rf 清理
 ```
 
-流程：
-1. 将 old/new 内容分别写入两个临时文件（`/tmp/deepseek-diff-xxx/a`, `/tmp/deepseek-diff-xxx/b`）
-2. `execFile('diff', ['-u', ...])` 执行对比
-3. 读取输出后立即 `rm -rf` 清理临时目录
-4. exit code 0 = 无差异（返回空字符串），1 = 有差异（返回 diff），≥2 = 错误
+**实现细节：**
 
-**优点**：久经考验、支持大型文件、边界情况覆盖完整。
+1. `mkdtemp('/tmp/deepseek-diff-xxx')` 创建独立临时目录
+2. `Promise.all([writeFile(a), writeFile(b)])` 并行写入两份内容
+3. `execFile('diff', ['-u', '--label', oldLabel, oldPath, '--label', newLabel, newPath])` 执行对比
+4. 根据 exit code 判断结果：
+   - 0 → 内容相同，返回空字符串
+   - 1 → 有差异，返回 diff 文本
+   - ≥2 → diff 命令自身出错，抛出异常
+5. `finally { rm(dir, { recursive: true }) }` 无论成功失败都清理临时目录
+
+### write_file 的特殊情况
+
+`write_file` 的 preview 根据文件是否存在有两种路径：
+
+**文件不存在（新建）：**
+```
+旧内容 = ""（空字符串）
+新内容 = 用户指定的完整内容
+  ↓
+diff -u /dev/null b   效果等价 → 全部行显示为新增（+ 前缀）
+```
+
+**文件已存在（覆盖）：**
+```
+旧内容 = readFile(磁盘文件)
+新内容 = 用户指定的完整内容
+  ↓
+正常 diff 对比，展示全部变更
+```
+
+> 关键：无论是哪种情况，磁盘文件都没有被修改——preview 只读文件、在内存中处理、通过临时文件生成 diff。真正的写入只在用户确认后由 `execute()` 完成。
 
 ### 已弃用：LCS 自实现（`src/tools/line-diff.ts`）
 
