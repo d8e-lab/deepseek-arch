@@ -1,6 +1,6 @@
 # 架构设计
 
-> 最后更新：2026-06-05 · v0.5.0
+> 最后更新：2026-06-10 · v0.6.0
 
 ## 概述
 
@@ -45,13 +45,13 @@ deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ES
 | 模块 | 文件 | 职责 | 状态 |
 |------|------|------|------|
 | **CLI (Commander)** | `src/cli/index.ts` | Commander.js 命令行解析，注册子命令，加载 Tools | ✅ |
-| **TuiApp** | `src/cli/tui/app.ts` | 内联 TUI，流式渲染，工具确认 (y/N) | ✅ |
+| **TuiApp** | `src/cli/tui/app.ts` | 内联 TUI，流式渲染，工具确认 (y/N)，diff 着色 | ✅ |
 | **ConfigManager** | `src/core/config.ts` | TOML 多文件加载，文件跳转引用，持久化读写 | ✅ |
 | **Storage** | `src/core/storage.ts` | 文件系统存储，sessions 目录 + turns.json（含 tool_calls） | ✅ |
 | **Types** | `src/types/` | 全部领域类型定义（含 ToolDefinition/ToolCall 等 API 类型） | ✅ |
 | **ApiClient** | `src/core/api.ts` | DeepSeek Chat Completion API，非流式 + SSE 流式，tools 传递 | ✅ |
-| **SessionManager** | `src/core/session.ts` | Facade + Agent Loop，buildMessages 含 tool 上下文重建 | ✅ |
-| **Tools** | `src/tools/` | Barrel file 注册，Tool 接口，Shell 执行工具 | ✅ |
+| **SessionManager** | `src/core/session.ts` | Facade + Agent Loop + preview→confirm→execute 流程 | ✅ |
+| **Tools** | `src/tools/` | Barrel file 注册，5 个工具（shell/read/search/write/edit） | ✅ |
 | **TokenCalculator** | `src/core/token-counter.ts` | 费用计算、缓存命中率 | ❌ Phase 7 |
 
 ## 设计模式

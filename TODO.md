@@ -103,6 +103,18 @@
 - [x] 10.9 TUI 四色渲染 — cyan 工具调用/结果, 竖线框区分
 - [x] 10.10 文档更新 — README/TODO/docs/architecture.md
 
+### Phase 11 — 文件修改工具 + diff 预览 ✅ (2026-06-10)
+
+- [x] 11.1 LCS 行级 unified diff 算法（`src/tools/line-diff.ts`）
+- [x] 11.2 `edit_file` 工具 — 精确字符串替换，唯一性检查，原子写入
+- [x] 11.3 `write_file` 工具 — 创建/覆盖文件，原子写入
+- [x] 11.4 Tool 接口新增 `preview()` 方法
+- [x] 11.5 `StreamEvent` 新增 `tool_preview` 类型
+- [x] 11.6 SessionManager agent loop 新增 preview→confirm→execute 流程
+- [x] 11.7 TUI diff 着色渲染（绿底+/红底-/cyan hunk header）
+- [x] 11.8 3 个测试文件 29 条用例
+- [x] 11.9 文档更新（agent.md Git 工作流规范）
+
 - [x] 9.1 测试文件从 `src/` 迁移到独立 `tests/` 目录（6 文件）
 - [x] 9.2 `vitest.config.ts` 扫描范围改为 `tests/**/*.test.ts`
 - [x] 9.3 新增 `ModelProvider` 接口 (`src/core/model-provider.ts`)
@@ -127,3 +139,4 @@
 | v0.3.0 | 修复 resume 显示 bug（历史回合渲染），Storage 仅保留最后一轮 usage |
 | v0.4.0 | Phase 4: 流式输出 (SSE) — 增量渲染、spinner、ESC中断、输入队列、超时重试 |
 | v0.5.0 | Phase 10: Agent Loop + Tool Calling — shell 工具、用户确认、barrel file 注册、cyan 竖线渲染 |
+| v0.6.0 | Phase 11: 文件修改工具 — edit_file/write_file + diff 预览 + 原子写入 |

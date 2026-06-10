@@ -203,6 +203,10 @@ tests/
 | 工具 | 名称 | 说明 |
 |------|------|------|
 | Shell 执行 | `execute_command` | 在会话目录执行 shell 命令（需用户 y/N 确认，禁止 sudo，10min 超时） |
+| 读取文件 | `read_file` | 读取文本文件，支持 offset/limit 分段读取 |
+| 内容搜索 | `search_content` | 多关键词 OR 搜索，上下文行显示，glob 过滤 |
+| 写入文件 | `write_file` | 创建/覆盖文件，diff 预览后确认，原子写入 |
+| 精确编辑 | `edit_file` | 精确字符串替换（不用行号），唯一性检查，diff 预览后确认 |
 
 ### 新增工具
 
