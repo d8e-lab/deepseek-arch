@@ -314,5 +314,5 @@ npm publish --access public
 ## 版本
 
 - 作者：helcksun
-- 当前版本：v0.5.0
+- 当前版本：v1.0.1
 - 许可证：MIT

@@ -1,10 +1,10 @@
 # CLI 设计
 
-> 最后更新：2026-05-18 · 实现文件：`src/cli/index.ts`, `src/cli/chat-ui.ts`, `src/index.ts`
+> 最后更新：2026-06-11 · 实现文件：`src/cli/index.ts`, `src/cli/tui/app.ts`, `src/cli/tui/input-editor.ts`
 
 ## 概述
 
-基于 Commander.js v14 的命令行接口，提供全局选项和子命令。`chat` 子命令启动全屏 TUI，支持流式输出、中断、输入队列等异步交互。
+基于 Commander.js v14 的命令行接口，提供全局选项和子命令。`chat` 子命令启动内联 TUI（`TuiApp`），不使用 alternate screen，支持流式输出、多行输入（软换行 + CJK 感知）、中断、输入队列等异步交互。旧版全屏 `ChatUI`（alternate screen）保留作为备选。
 
 ## 入口
 
@@ -130,19 +130,17 @@ IDLE ── Enter ──► SENDING (spinner 旋转)
 
 ## 版本信息
 
-版本号、作者、发布日期硬编码在 `src/cli/chat-ui.ts` 和 `src/cli/index.ts` 的常量中：
+版本号硬编码在 `package.json`、`src/cli/index.ts` 和 `src/cli/chat-ui.ts` 中：
 
 ```typescript
 // src/cli/index.ts
-const VERSION = '0.4.0';
-const AUTHOR = 'helcksun';
-const RELEASE_DATE = '2026-05-18';
+const PACKAGE_VERSION = '1.0.1';
 
 // src/cli/chat-ui.ts
-const VERSION = '0.4.0';  // 顶部信息栏显示
+const VERSION = '1.0.1';
 ```
 
-发版时同步更新这些常量。
+发版时同步更新这三处。
 
 ## 测试
 

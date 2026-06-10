@@ -246,19 +246,25 @@ state.liveStream              → 读取当前累积内容
 签名: (char: string): number
 ```
 
-实现：取 `char.codePointAt(0)`，检查是否落在 CJK 区间（Unicode 范围：CJK Unified Ideographs, Compatibility, Extension A/B, Radicals, Symbols, Fullwidth Forms）。CJK/全角 → 2，否则 → 1。
+实现：取 `char.codePointAt(0)`，检查是否落在 CJK 区间。控制字符(0x00-0x1F, 0x7F-0x9F)宽度为 0，CJK/全角 → 2，否则 → 1。与 `src/cli/tui/renderer.ts` 的 `isWideChar()` 保持一致的 Unicode 覆盖范围（v1.0.1 统一）。
 
 覆盖的 Unicode 范围：
 
 | 范围 | 名称 |
 |------|------|
-| `0x4E00-0x9FFF` | CJK Unified Ideographs |
+| `0x1100-0x115F` | Hangul Jamo |
+| `0x2329-0x232A` | Angle brackets |
+| `0x2E80-0x303E` | CJK Radicals / Symbols |
+| `0x3040-0x33BF` | Hiragana, Katakana, Bopomofo, Hangul Compatibility Jamo, Kanbun |
 | `0x3400-0x4DBF` | CJK Extension A |
+| `0x4E00-0xA4CF` | CJK Unified Ideographs + Yi |
+| `0xAC00-0xD7AF` | Hangul Syllables |
 | `0xF900-0xFAFF` | CJK Compatibility |
-| `0x2E80-0x2EFF` | CJK Radicals |
-| `0x3000-0x303F` | CJK Symbols |
-| `0xFF00-0xFFEF` | Halfwidth/Fullwidth |
+| `0xFE10-0xFE6F` | Vertical forms, CJK Compatibility Forms, Small Form Variants |
+| `0xFF01-0xFF60` | Fullwidth Forms |
+| `0xFFE0-0xFFE6` | Fullwidth Signs |
 | `0x20000-0x2FFFF` | CJK Extension B+ |
+| `0x30000-0x3FFFF` | CJK Extension G+ |
 
 #### `strDisplayWidth(s)`
 
