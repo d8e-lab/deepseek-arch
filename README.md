@@ -309,6 +309,7 @@ npm publish --access public
 | [docs/test-separation-and-mock-provider.md](./docs/test-separation-and-mock-provider.md) | 测试目录分离 + 伪装模型提供商设计 |
 | [docs/cli.md](./docs/cli.md) | CLI 设计 |
 | [docs/types.md](./docs/types.md) | 类型体系设计 |
+| [docs/file-edit-tools.md](./docs/file-edit-tools.md) | 文件修改工具设计（write/edit + diff + 确认流程） |
 
 ## 版本
 
