@@ -13,7 +13,7 @@ import { relative, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Tool, ToolResult } from './types.js';
 import { checkPath } from './utils.js';
-import { unifiedDiff } from './line-diff.js';
+import { unifiedDiff } from './diff.js';
 
 /** 判断文件是否存在 */
 async function fileExists(path: string): Promise<boolean> {
@@ -60,7 +60,7 @@ export const writeFileTool: Tool = {
 		const exists = await fileExists(check.resolved);
 		const oldContent = exists ? await readFile(check.resolved, 'utf-8') : '';
 
-		const diff = unifiedDiff(
+		const diff = await unifiedDiff(
 			oldContent,
 			newContent,
 			exists ? `a/${relPath}` : undefined,

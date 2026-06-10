@@ -1,8 +1,11 @@
 /**
- * 行级 unified diff 生成器
+ * 行级 unified diff 生成器（已弃用）
  *
- * 使用 LCS（最长公共子序列）算法生成与 git diff 兼容的 unified diff 输出。
+ * 使用 LCS（最长公共子序列）算法生成 unified diff。
  * 纯内存操作，不依赖外部命令。
+ *
+ * @deprecated 请使用 ./diff.ts 中的 unifiedDiff，基于系统 diff -u 命令实现。
+ *             系统 diff 更稳定、支持大文件流式处理、边界情况覆盖更完整。
  */
 
 /** 一条 diff 输出行 */
@@ -26,14 +29,10 @@ export interface DiffHunk {
 }
 
 /**
+ * @deprecated 请使用 ./diff.ts 中的 unifiedDiff
+ *
  * 生成两个文本的 unified diff 文本。
  * 只输出带变更的 hunk，上下文行数默认 3。
- *
- * @param oldText 旧文本
- * @param newText 新文本
- * @param oldLabel 旧文件标签（如 "a/src/foo.ts"），可选
- * @param newLabel 新文件标签（如 "b/src/foo.ts"），可选
- * @param contextLines 上下文行数，默认 3
  */
 export function unifiedDiff(
 	oldText: string,
@@ -117,6 +116,8 @@ function backtrack(
 }
 
 /**
+ * @deprecated 请使用 ./diff.ts 中的 unifiedDiff
+ *
  * 生成 diff hunks
  */
 export function generateDiffHunks(

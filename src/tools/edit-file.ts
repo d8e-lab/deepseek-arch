@@ -13,7 +13,7 @@ import { relative, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Tool, ToolResult } from './types.js';
 import { checkPath } from './utils.js';
-import { unifiedDiff } from './line-diff.js';
+import { unifiedDiff } from './diff.js';
 
 /**
  * 在 content 中查找 old_string 的匹配位置。
@@ -95,7 +95,7 @@ export const editFileTool: Tool = {
 		const replaced = original.replaceAll(oldStr, newStr);
 
 		const relPath = relative(sessionCwd, check.resolved);
-		const diff = unifiedDiff(original, replaced, `a/${relPath}`, `b/${relPath}`);
+		const diff = await unifiedDiff(original, replaced, `a/${relPath}`, `b/${relPath}`);
 		if (!diff) return 'no changes';
 		return diff;
 	},
