@@ -436,11 +436,11 @@ export class TuiApp {
 							// tool call 参数增量（不渲染，静默累积）
 							break;
 						case 'tool_preview': {
-							// diff 预览 — 着色渲染
+							// diff 预览 — 原生格式，仅着色，不加额外前缀
 							const preview = event.toolPreview ?? '';
 							if (preview) {
 								for (const line of preview.split('\n')) {
-									process.stdout.write(renderDiffLine(line, cyan(' │ ')) + '\n');
+									process.stdout.write(renderDiffLine(line, '') + '\n');
 								}
 							}
 							break;
