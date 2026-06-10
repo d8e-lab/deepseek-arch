@@ -327,7 +327,7 @@ export class SessionManager {
 					let toolError: string | undefined;
 
 					if (denied) {
-						toolResult = 'Execution denied by user.';
+						toolResult = 'The user rejected this operation. Do not retry the same approach. Explain the reason for the change and suggest an alternative, or ask the user for guidance.';
 						toolError = 'denied';
 					} else if (tool) {
 						const r = await tool.execute(args);
@@ -359,8 +359,15 @@ export class SessionManager {
 						toolDenied: denied,
 					});
 
-					// 拒绝执行时不再将结果送回模型，直接退出 agent loop
-					if (denied) break;
+					// 拒绝执行时将拒绝结果写入上下文，然后退出 agent loop
+					if (denied) {
+						agentMessages.push({
+							role: 'tool',
+							content: toolResult,
+							tool_call_id: tc.id,
+						});
+						break;
+					}
 
 					// 将 tool 结果加入 messages
 					agentMessages.push({
@@ -371,9 +378,11 @@ export class SessionManager {
 				}
 			}
 
-			// 超过最大轮次仍未结束：截断
+			// 超过最大轮次或用户拒绝：截断
 			if (!finalContent && toolRecords.length > 0) {
-				const truncMsg = '(Reached max tool rounds — stopping.)';
+				const truncMsg = userDenied
+					? '(User denied the operation — stopping.)'
+					: '(Reached max tool rounds — stopping.)';
 				finalContent = truncMsg;
 				onEvent({ type: 'content_delta', text: truncMsg });
 			}
