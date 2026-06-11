@@ -12,6 +12,7 @@ export type {
 	Message,
 	TurnRecord,
 	StreamEvent,
+	RoundUsage,
 } from './chat.js';
 
 // ─── session ─────────────────────────────────────────

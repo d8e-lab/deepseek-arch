@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { Storage } from './storage.js';
 import type { ModelProvider } from './model-provider.js';
 import { yieldEventLoop } from '../utils/event-loop.js';
+import { appendCacheLog } from './cache-log.js';
 import type {
 	Message,
 	Session,
@@ -24,6 +25,7 @@ import type {
 	StreamChunk,
 	StreamEvent,
 	ToolDefinition,
+	RoundUsage,
 } from '../types/index.js';
 
 // Re-export for backward compatibility (chat-ui.ts imports from here)
@@ -225,6 +227,8 @@ export class SessionManager {
 		const toolRecords: ToolCallRecord[] = [];
 		/** Agent loop 中累积的 tool_call/results 消息 */
 		const agentMessages: Message[] = [];
+		/** 每轮 API 调用的 token 用量（用于监控缓存命中率） */
+		const roundUsages: RoundUsage[] = [];
 
 		try {
 			// ── Agent Loop ──────────────────────────
@@ -274,6 +278,17 @@ export class SessionManager {
 
 					if (chunk.usage) usage = chunk.usage;
 					await yieldEventLoop();
+				}
+
+				// 记录本轮 API 调用的 token 用量
+				if (usage) {
+					roundUsages.push({
+						round,
+						prompt_tokens: usage.prompt_tokens,
+						completion_tokens: usage.completion_tokens,
+						cache_hit_tokens: usage.prompt_cache_hit_tokens ?? 0,
+						cache_miss_tokens: usage.prompt_cache_miss_tokens ?? 0,
+					});
 				}
 
 				// 本轮无 tool_calls → 自然终止
@@ -437,7 +452,14 @@ export class SessionManager {
 				false,
 				toolRecords.length > 0 ? toolRecords : undefined,
 				agentMessages.length > 0 ? agentMessages : undefined,
+				roundUsages.length > 0 ? roundUsages : undefined,
 			);
+
+			// 写入缓存命中率监控日志
+			if (roundUsages.length > 0) {
+				const dir = this.storage.sessionDir(this.session.meta.id);
+				appendCacheLog(dir, this.session.meta.id, this.session.turns.length + 1, roundUsages);
+			}
 
 			this.session.turns.push(turn);
 			this.session.meta.turnCount = this.session.turns.length;
@@ -472,6 +494,7 @@ export class SessionManager {
 						true, // interrupted
 						toolRecords.length > 0 ? toolRecords : undefined,
 						agentMessages.length > 0 ? agentMessages : undefined,
+						roundUsages.length > 0 ? roundUsages : undefined,
 					);
 
 					this.session.turns.push(turn);

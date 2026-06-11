@@ -59,6 +59,22 @@ export interface TurnRecord {
 	 * 不存在时回退到从 tool_calls 重建（兼容旧数据）。
 	 */
 	messages?: Message[];
+	/** Agent loop 每轮 API 调用的 token 用量（用于监控缓存命中率） */
+	round_usage?: RoundUsage[];
+}
+
+/** Agent loop 单轮 token 用量（用于记录每轮 API 调用的缓存行为） */
+export interface RoundUsage {
+	/** agent loop 中的轮次（从 0 开始） */
+	round: number;
+	/** 本轮 prompt tokens */
+	prompt_tokens: number;
+	/** 本轮 completion tokens */
+	completion_tokens: number;
+	/** 本轮命中缓存 tokens */
+	cache_hit_tokens: number;
+	/** 本轮未命中缓存 tokens */
+	cache_miss_tokens: number;
 }
 
 /** 流式事件（SessionManager → ChatUI 回调） */

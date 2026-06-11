@@ -215,6 +215,8 @@ export class Storage {
 		toolCalls?: import('../tools/types.js').ToolCallRecord[],
 		/** 本轮完整消息序列（含 user + 所有 agent loop 中间消息），用于 KV cache 精确回放 */
 		agentLoopMessages?: Message[],
+		/** Agent loop 每轮 API 调用的 token 用量，用于缓存命中率监控 */
+		roundUsages?: import('../types/chat.js').RoundUsage[],
 	): Promise<TurnRecord> {
 		// 确保会话目录存在
 		try {
@@ -248,6 +250,10 @@ export class Storage {
 
 		if (agentLoopMessages && agentLoopMessages.length > 0) {
 			turn.messages = [userMessage, ...agentLoopMessages];
+		}
+
+		if (roundUsages && roundUsages.length > 0) {
+			turn.round_usage = roundUsages;
 		}
 
 		// 将所有轮次写入单个 turns.json
