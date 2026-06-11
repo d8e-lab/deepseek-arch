@@ -22,7 +22,6 @@ import type {
 	TurnRecord,
 	TokenUsage,
 	ChatCompletionResponse,
-	StreamChunk,
 	StreamEvent,
 	ToolDefinition,
 	RoundUsage,
@@ -229,20 +228,6 @@ export class SessionManager {
 		const agentMessages: Message[] = [];
 		/** 每轮 API 调用的 token 用量（用于监控缓存命中率） */
 		const roundUsages: RoundUsage[] = [];
-		/** 每轮 API 请求/响应的完整 dump（调试用） */
-		const roundDumps: {
-			request: { model: string; stream: boolean; messages: Message[]; tools?: ToolDefinition[] };
-			response: {
-				model: string;
-				reasoning_content?: string;
-				content?: string;
-				tool_calls?: ToolCall[];
-				finish_reason: string | null;
-				usage?: TokenUsage;
-			};
-			chunks: StreamChunk[];
-		}[] = [];
-
 		try {
 			// ── Agent Loop ──────────────────────────
 			let userDenied = false;
@@ -254,7 +239,6 @@ export class SessionManager {
 				let roundReasoning = '';
 				let finishReason: string | null = null;
 				const pendingToolCalls: ToolCall[] = [];
-				const chunks: StreamChunk[] = [];
 
 				for await (const chunk of this.provider.chatStream(roundMessages, {
 					tools: toolDefs,
@@ -293,23 +277,26 @@ export class SessionManager {
 
 					if (chunk.choices[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
 					if (chunk.usage) usage = chunk.usage;
-					chunks.push(chunk);
 					await yieldEventLoop();
 				}
 
-				// 保存本轮请求/响应的完整 dump（raw chunks + 组装后的 response）
-				roundDumps.push({
-					request: { model: modelName || 'unknown', stream: true, messages: roundMessages, tools: toolDefs },
-					response: {
-						model: modelName || '',
-						reasoning_content: roundReasoning || undefined,
-						content: roundContent || undefined,
-						tool_calls: pendingToolCalls.length > 0 ? pendingToolCalls : undefined,
-						finish_reason: finishReason,
+				// 每轮独立保存：request + 组装后的 response（无 raw chunks）
+				{
+					const dir = this.storage.sessionDir(this.session!.meta.id);
+					const tn = this.session!.turns.length + 1;
+					const fn = `turn${tn}_r${round}.json`;
+					writeFile(join(dir, fn), JSON.stringify({
+						request: { model: modelName || 'unknown', stream: true, messages: roundMessages, tools: toolDefs },
+						response: {
+							model: modelName || '',
+							reasoning_content: roundReasoning || undefined,
+							content: roundContent || undefined,
+							tool_calls: pendingToolCalls.length > 0 ? pendingToolCalls : undefined,
+							finish_reason: finishReason,
 						usage,
-					},
-					chunks,
-				});
+					}
+				}), 'utf-8').catch(() => {});
+			}
 
 				// 记录本轮 API 调用的 token 用量
 				if (usage) {
@@ -491,12 +478,6 @@ export class SessionManager {
 			const turnNum = this.session.turns.length + 1;
 			if (roundUsages.length > 0) {
 				appendCacheLog(dir, this.session.meta.id, turnNum, roundUsages);
-			}
-
-			// 写入完整 API 请求/响应 dump（调试用）
-			if (roundDumps.length > 0) {
-				const dumpPath = join(dir, `turn_${turnNum}.json`);
-				writeFile(dumpPath, JSON.stringify(roundDumps, null, 2), 'utf-8').catch(() => {});
 			}
 
 			this.session.turns.push(turn);
