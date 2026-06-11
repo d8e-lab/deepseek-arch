@@ -230,7 +230,10 @@ export class SessionManager {
 		/** 每轮 API 调用的 token 用量（用于监控缓存命中率） */
 		const roundUsages: RoundUsage[] = [];
 		/** 每轮 API 请求/响应的完整 dump（调试用） */
-		const roundDumps: { request: { messages: Message[]; tools?: ToolDefinition[] }; chunks: StreamChunk[] }[] = [];
+		const roundDumps: {
+			request: { model: string; stream: boolean; messages: Message[]; tools?: ToolDefinition[] };
+			chunks: StreamChunk[];
+		}[] = [];
 
 		try {
 			// ── Agent Loop ──────────────────────────
@@ -285,7 +288,10 @@ export class SessionManager {
 				}
 
 				// 保存本轮请求/响应的完整 dump
-				roundDumps.push({ request: { messages: roundMessages, tools: toolDefs }, chunks });
+				roundDumps.push({
+					request: { model: modelName || 'unknown', stream: true, messages: roundMessages, tools: toolDefs },
+					chunks,
+				});
 
 				// 记录本轮 API 调用的 token 用量
 				if (usage) {
