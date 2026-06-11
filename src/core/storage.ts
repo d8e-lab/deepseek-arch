@@ -227,11 +227,6 @@ export class Storage {
 		const existingTurns = await this.loadTurns(sessionId);
 		const turnNumber = existingTurns.length + 1;
 
-		// 只保留最后一轮的 usage，历史轮的 usage 清空
-		for (const t of existingTurns) {
-			delete t.usage;
-		}
-
 		const turn: Record<string, unknown> = {
 			turn: turnNumber,
 			user: userMessage,

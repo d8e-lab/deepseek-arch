@@ -212,7 +212,7 @@ describe('Storage (文件系统)', () => {
   });
 
   describe('单文件存储（turns.json）', () => {
-    it('多轮对话只保留最后一轮的 usage', async () => {
+    it('保留所有轮次的 usage（用于 KV cache 监控）', async () => {
       const { sessionId } = await setupSession(store);
 
       await saveTurn(store, sessionId, 'Q1', 'A1');
@@ -221,10 +221,11 @@ describe('Storage (文件系统)', () => {
 
       const turns = await store.getTurns(sessionId);
       expect(turns).toHaveLength(3);
-      // 前两轮的 usage 应被清空
-      expect(turns[0].usage).toBeUndefined();
-      expect(turns[1].usage).toBeUndefined();
-      // 最后一轮保留 usage
+      // 所有轮次的 usage 都应保留
+      expect(turns[0].usage).toBeDefined();
+      expect(turns[0].usage!.total_tokens).toBe(150);
+      expect(turns[1].usage).toBeDefined();
+      expect(turns[1].usage!.total_tokens).toBe(150);
       expect(turns[2].usage).toBeDefined();
       expect(turns[2].usage!.total_tokens).toBe(150);
     });
