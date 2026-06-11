@@ -53,6 +53,12 @@ export interface TurnRecord {
 	interrupted?: boolean;
 	/** 本轮工具调用记录（含执行结果，agent 模式下填充） */
 	tool_calls?: ToolCallRecord[];
+	/**
+	 * 本轮完整消息序列（含 user、中间 assistant tool_calls、tool results、最终 assistant）
+	 * 用于精确回放 API 收发的消息前缀，命中 KV cache。
+	 * 不存在时回退到从 tool_calls 重建（兼容旧数据）。
+	 */
+	messages?: Message[];
 }
 
 /** 流式事件（SessionManager → ChatUI 回调） */

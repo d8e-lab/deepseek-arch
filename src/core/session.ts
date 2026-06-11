@@ -284,14 +284,16 @@ export class SessionManager {
 				}
 
 				// ── 执行 tool calls ──────────────────
-				// 添加 assistant 消息（含 tool_calls，无 content）
+				// 添加 assistant 消息（含 tool_calls, reasoning_content）
 				agentMessages.push({
 					role: 'assistant',
 					content: roundContent || '',
 					tool_calls: pendingToolCalls,
+					reasoning_content: roundReasoning || undefined,
 				});
 
-				for (const tc of pendingToolCalls) {
+				for (let i = 0; i < pendingToolCalls.length; i++) {
+					const tc = pendingToolCalls[i];
 					const tool = this.tools.find((t) => t.name === tc.function.name);
 					let args: Record<string, unknown> = {};
 					try {
@@ -371,13 +373,20 @@ export class SessionManager {
 						toolDenied: denied,
 					});
 
-					// 拒绝执行时将拒绝结果写入上下文，然后退出 agent loop
+					// 拒绝执行时：写入拒绝结果，剩余 tool 补 skip 结果，退出 agent loop
 					if (denied) {
 						agentMessages.push({
 							role: 'tool',
 							content: toolResult,
 							tool_call_id: tc.id,
 						});
+						for (let j = i + 1; j < pendingToolCalls.length; j++) {
+							agentMessages.push({
+								role: 'tool',
+								content: 'Skipped: a previous tool call was rejected by the user.',
+								tool_call_id: pendingToolCalls[j].id,
+							});
+						}
 						break;
 					}
 
@@ -390,12 +399,14 @@ export class SessionManager {
 				}
 			}
 
-			// 超过最大轮次或用户拒绝：截断
-			if (!finalContent && toolRecords.length > 0) {
-				const truncMsg = userDenied
-					? '(User denied the operation — stopping.)'
-					: '(Reached max tool rounds — stopping.)';
+			// 达到最大轮次上限：注入截断消息到 agentMessages 以保证序列完整
+			if (!userDenied && !finalContent && toolRecords.length > 0) {
+				const truncMsg = '(Reached max tool rounds — stopping.)';
 				finalContent = truncMsg;
+				agentMessages.push({
+					role: 'assistant',
+					content: truncMsg,
+				});
 				onEvent({ type: 'content_delta', text: truncMsg });
 			}
 
@@ -421,6 +432,7 @@ export class SessionManager {
 				costRmb,
 				false,
 				toolRecords.length > 0 ? toolRecords : undefined,
+				agentMessages.length > 0 ? agentMessages : undefined,
 			);
 
 			this.session.turns.push(turn);
@@ -455,6 +467,7 @@ export class SessionManager {
 						0,
 						true, // interrupted
 						toolRecords.length > 0 ? toolRecords : undefined,
+						agentMessages.length > 0 ? agentMessages : undefined,
 					);
 
 					this.session.turns.push(turn);
@@ -473,7 +486,7 @@ export class SessionManager {
 		}
 	}
 
-	/** 构建请求消息队列（含 reasoning_content 以命中 kv-cache，跳过 interrupted 轮次） */
+	/** 构建请求消息队列（跳过 interrupted 轮次，直接拼接存储的消息序列以命中 kv-cache） */
 	private buildMessages(currentContent: string): Message[] {
 		const messages: Message[] = [];
 
@@ -486,13 +499,17 @@ export class SessionManager {
 		for (const turn of this.session!.turns) {
 			if (turn.interrupted) continue;
 
-			// 用户消息
+			// 优先使用存储的完整消息序列（精确回放 API 收发的消息前缀）
+			if (turn.messages && turn.messages.length > 0) {
+				messages.push(...turn.messages);
+				continue;
+			}
+
+			// 兼容旧数据：从 tool_calls 反向重建
 			messages.push(turn.user);
 
-			// 工具调用消息（如果本 turn 有 tool_calls
 			const tcRecords = (turn as unknown as Record<string, unknown>).tool_calls as ToolCallRecord[] | undefined;
 			if (tcRecords && tcRecords.length > 0) {
-				// 重建 assistant tool_calls 消息
 				const toolCalls: ToolCall[] = tcRecords.map((tcr) => ({
 					id: tcr.id,
 					type: 'function' as const,
@@ -506,7 +523,6 @@ export class SessionManager {
 					content: '',
 					tool_calls: toolCalls,
 				});
-				// 各 tool 结果
 				for (const tcr of tcRecords) {
 					messages.push({
 						role: 'tool',
@@ -516,7 +532,6 @@ export class SessionManager {
 				}
 			}
 
-			// 助手最终回复
 			messages.push({
 				role: 'assistant',
 				content: turn.assistant.content,
