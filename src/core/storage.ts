@@ -119,7 +119,15 @@ export class Storage {
 			meta.totalCost = turns.reduce((sum, t) => sum + t.cost_rmb, 0);
 		}
 
-		return { meta, turns };
+		// 读取持久化的 system prompt（用于 resume 时恢复，命中 KV cache）
+		let systemPrompt: string | undefined;
+		try {
+			systemPrompt = await readFile(join(this.sessionDir(id), 'system-prompt.txt'), 'utf-8');
+		} catch {
+			// 旧会话可能没有此文件，忽略
+		}
+
+		return { meta, turns, systemPrompt };
 	}
 
 	/** 按标题精确匹配会话 */

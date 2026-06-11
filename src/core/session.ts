@@ -72,11 +72,15 @@ export class SessionManager {
 		return meta;
 	}
 
-	/** 恢复已有会话（从文件加载所有 turn） */
+	/** 恢复已有会话（从文件加载所有 turn，恢复 system prompt 以命中 kv-cache） */
 	async resumeSession(id: string): Promise<Session> {
 		const session = await this.storage.getSession(id);
 		if (!session) throw new Error(`会话不存在: ${id}`);
 		this.session = session;
+		// 使用持久化的 system prompt 覆盖当前构建的（保证消息前缀与缓存一致）
+		if (session.systemPrompt) {
+			this.systemPrompt = { role: 'system', content: session.systemPrompt };
+		}
 		return session;
 	}
 
