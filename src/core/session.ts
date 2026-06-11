@@ -229,6 +229,8 @@ export class SessionManager {
 		const agentMessages: Message[] = [];
 		/** 每轮 API 调用的 token 用量（用于监控缓存命中率） */
 		const roundUsages: RoundUsage[] = [];
+		/** 每轮 API 请求/响应的完整 dump（调试用） */
+		const roundDumps: { request: { messages: Message[]; tools?: ToolDefinition[] }; chunks: StreamChunk[] }[] = [];
 
 		try {
 			// ── Agent Loop ──────────────────────────
@@ -240,6 +242,7 @@ export class SessionManager {
 				let roundContent = '';
 				let roundReasoning = '';
 				const pendingToolCalls: ToolCall[] = [];
+				const chunks: StreamChunk[] = [];
 
 				for await (const chunk of this.provider.chatStream(roundMessages, {
 					tools: toolDefs,
@@ -277,8 +280,12 @@ export class SessionManager {
 					}
 
 					if (chunk.usage) usage = chunk.usage;
+					chunks.push(chunk);
 					await yieldEventLoop();
 				}
+
+				// 保存本轮请求/响应的完整 dump
+				roundDumps.push({ request: { messages: roundMessages, tools: toolDefs }, chunks });
 
 				// 记录本轮 API 调用的 token 用量
 				if (usage) {
@@ -456,9 +463,16 @@ export class SessionManager {
 			);
 
 			// 写入缓存命中率监控日志
+			const dir = this.storage.sessionDir(this.session.meta.id);
+			const turnNum = this.session.turns.length + 1;
 			if (roundUsages.length > 0) {
-				const dir = this.storage.sessionDir(this.session.meta.id);
-				appendCacheLog(dir, this.session.meta.id, this.session.turns.length + 1, roundUsages);
+				appendCacheLog(dir, this.session.meta.id, turnNum, roundUsages);
+			}
+
+			// 写入完整 API 请求/响应 dump（调试用）
+			if (roundDumps.length > 0) {
+				const dumpPath = join(dir, `turn_${turnNum}.json`);
+				writeFile(dumpPath, JSON.stringify(roundDumps, null, 2), 'utf-8').catch(() => {});
 			}
 
 			this.session.turns.push(turn);
