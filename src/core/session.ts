@@ -232,6 +232,14 @@ export class SessionManager {
 		/** 每轮 API 请求/响应的完整 dump（调试用） */
 		const roundDumps: {
 			request: { model: string; stream: boolean; messages: Message[]; tools?: ToolDefinition[] };
+			response: {
+				model: string;
+				reasoning_content?: string;
+				content?: string;
+				tool_calls?: ToolCall[];
+				finish_reason: string | null;
+				usage?: TokenUsage;
+			};
 			chunks: StreamChunk[];
 		}[] = [];
 
@@ -244,6 +252,7 @@ export class SessionManager {
 
 				let roundContent = '';
 				let roundReasoning = '';
+				let finishReason: string | null = null;
 				const pendingToolCalls: ToolCall[] = [];
 				const chunks: StreamChunk[] = [];
 
@@ -282,14 +291,23 @@ export class SessionManager {
 						}
 					}
 
+					if (chunk.choices[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
 					if (chunk.usage) usage = chunk.usage;
 					chunks.push(chunk);
 					await yieldEventLoop();
 				}
 
-				// 保存本轮请求/响应的完整 dump
+				// 保存本轮请求/响应的完整 dump（raw chunks + 组装后的 response）
 				roundDumps.push({
 					request: { model: modelName || 'unknown', stream: true, messages: roundMessages, tools: toolDefs },
+					response: {
+						model: modelName || '',
+						reasoning_content: roundReasoning || undefined,
+						content: roundContent || undefined,
+						tool_calls: pendingToolCalls.length > 0 ? pendingToolCalls : undefined,
+						finish_reason: finishReason,
+						usage,
+					},
 					chunks,
 				});
 
