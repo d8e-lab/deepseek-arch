@@ -27,10 +27,10 @@ node dist/cli/index.js --help
 - **Agent Loop**：模型可自主调用 shell 等工具，工具结果自动送回模型继续对话（最多 25 轮）
 - **Tool Calling**：barrel file 注册模式，新增工具只需一个文件 + 一行 export
 - **Shell 工具**：模型可直接执行 shell 命令（禁止 sudo，10min 超时），用户 y/N 确认后执行
-- **四色渲染**：用户绿 / Think 灰 / 模型白 / 工具调用 cyan 竖线框
+- **文件编辑**：edit_file/write_file + diff 预览 + 原子写入 + staleness 检查
 - **流式输出**：SSE 实时增量渲染，ESC/Ctrl+C 中断模型输出
 - **多轮对话**：自动持久化 turn JSON（含 `reasoning_content` 命中 kv-cache + `tool_calls` 记录）
-- **会话管理**：/title 命名、/clear 清屏、退出显示恢复命令
+- **模型切换**：`/model` 命令切换 deepseek-v4-flash / deepseek-v4-pro
 - **对话恢复**：按 ID 或标题恢复历史会话（含工具调用上下文重建）
 - **Token 记录**：保存 API 返回的 `usage`，为后续费用计算预留
 - **配置外置**：TOML 文件管理，支持文件间跳转引用
@@ -53,10 +53,9 @@ chat 命令可用快捷键：
   Enter           发送消息
   Ctrl+Enter/J    换行
   Ctrl+C          退出
-  Ctrl+L          清屏
   /exit           退出
-  /clear          清屏
-  /title <name>   命名会话
+  /model <name>   切换模型（deepseek-v4-flash | deepseek-v4-pro）
+  /model          显示可用模型列表
 ```
 
 ## 配置

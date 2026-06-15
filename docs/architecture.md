@@ -84,9 +84,9 @@ SessionManager.sendMessage(content)
 ### 流式 (sendMessageStream)
 
 ```
-用户 Enter → ChatUI.handleEnter()
+用户 Enter → TuiApp.inputCycle()
   │
-  ├─► UIState = SENDING, spinner 启动
+  ├─► AppState = SENDING
   ├─► sessionManager.sendMessageStream(content, onEvent, signal)
   │     │
   │     ├─► buildMessages(content)       → 跳过 interrupted 轮次
@@ -94,16 +94,16 @@ SessionManager.sendMessage(content)
   │     │     │
   │     │     ├─► fetch POST (stream: true) → ReadableStream reader
   │     │     ├─► SSE 逐行解析 → yield StreamChunk
-  │     │     └─► chunks → ChatUI 增量渲染 + spinner 停止
+  │     │     └─► chunks → TuiApp 流式输出到终端
   │     │
-  │     ├─► onEvent(reasoning_delta)      → 灰度追加思考文本
-  │     ├─► onEvent(content_delta)        → UIState = STREAMING
-  │     ├─► onEvent(done)                 → 持久化 turn + token 显示
+  │     ├─► onEvent(reasoning_delta)      → Think 区灰度输出
+  │     ├─► onEvent(content_delta)        → 模型回复实时输出
+  │     ├─► onEvent(done)                 → 持久化 turn
   │     ├─► onEvent(error)                → 错误处理 / 中断回显
-  │     └─► AbortController 中断          → 持久化 interrupted=true
+  │     └─► AbortController 中断          → 停止流式/工具执行
   │
   ├─► 流完成后处理输入队列
-  └─► UIState = IDLE
+  └─► AppState = IDLE
 ```
 
 ### Agent Loop (Tool Calling)
