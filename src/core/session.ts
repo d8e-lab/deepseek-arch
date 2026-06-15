@@ -96,6 +96,11 @@ export class SessionManager {
 		return this.session?.meta.id ?? null;
 	}
 
+	/** 切换默认模型 */
+	setModel(model: string): void {
+		this.provider.setModel?.(model);
+	}
+
 	/** 更新会话标题 */
 	async setTitle(title: string): Promise<void> {
 		if (!this.session) return;

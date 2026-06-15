@@ -32,4 +32,6 @@ export interface ModelProvider {
 	chat(messages: Message[], options?: ChatOptions): Promise<ChatCompletionResponse>;
 	/** 流式对话（SSE） */
 	chatStream(messages: Message[], options?: StreamChatOptions): AsyncGenerator<StreamChunk>;
+	/** 切换默认模型（可选） */
+	setModel?(model: string): void;
 }

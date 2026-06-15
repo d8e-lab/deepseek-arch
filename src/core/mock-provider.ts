@@ -44,6 +44,11 @@ export class MockProvider implements ModelProvider {
 		this.streamDelayMs = streamDelayMs;
 	}
 
+	/** 切换模型名 */
+	setModel(model: string): void {
+		this.modelName = model;
+	}
+
 	/** 提取最后一条 user 消息内容 */
 	private getLastUserContent(messages: Message[]): string {
 		for (let i = messages.length - 1; i >= 0; i--) {

@@ -89,6 +89,58 @@ export class InputPanel {
 	private _historyIndex = -1;
 	private _queue: string[] = [];
 
+	// ─── 弹窗选择 ────────────────────────────────
+
+	private _popupItems: string[] = [];
+	private _popupIndex = 0;
+	private _popupActive = false;
+
+	get isPopupActive(): boolean {
+		return this._popupActive;
+	}
+
+	get popupItems(): string[] {
+		return this._popupItems;
+	}
+
+	get popupIndex(): number {
+		return this._popupIndex;
+	}
+
+	/** 打开选择弹窗 */
+	openPopup(items: string[], initialIndex = 0): void {
+		this._popupItems = items;
+		this._popupIndex = Math.max(0, Math.min(initialIndex, items.length - 1));
+		this._popupActive = true;
+	}
+
+	/** 关闭选择弹窗 */
+	closePopup(): void {
+		this._popupActive = false;
+		this._popupItems = [];
+		this._popupIndex = 0;
+	}
+
+	/** 上下导航弹窗选项 */
+	navigatePopup(delta: number): void {
+		if (!this._popupActive || this._popupItems.length === 0) return;
+		this._popupIndex = (this._popupIndex + delta + this._popupItems.length) % this._popupItems.length;
+	}
+
+	/** 确认当前选中项，关闭弹窗并返回选中值；弹窗未激活时返回 null */
+	selectPopup(): string | null {
+		if (!this._popupActive || this._popupItems.length === 0) return null;
+		const selected = this._popupItems[this._popupIndex];
+		this.closePopup();
+		return selected;
+	}
+
+	/** 弹窗占用行数（每一项一行） */
+	calcPopupHeight(): number {
+		if (!this._popupActive) return 0;
+		return this._popupItems.length;
+	}
+
 	// ─── 文本操作 ────────────────────────────────
 
 	get text(): string {

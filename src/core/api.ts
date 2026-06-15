@@ -37,6 +37,11 @@ export class ApiClient implements ModelProvider {
 		this.defaultModel = defaultModel;
 	}
 
+	/** 切换默认模型 */
+	setModel(model: string): void {
+		this.defaultModel = model;
+	}
+
 	/**
 	 * 发送 Chat Completion 请求（非流式）
 	 *

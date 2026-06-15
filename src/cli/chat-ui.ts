@@ -66,6 +66,9 @@ interface KeyPress {
 
 const VERSION = '1.0.1';
 
+/** 可选模型列表 */
+const AVAILABLE_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
+
 // ─── ChatUI ──────────────────────────────────────────
 
 export class ChatUI {
@@ -247,6 +250,30 @@ export class ChatUI {
 	private handleEditKey(str: string, key: KeyPress): void {
 		const { name, ctrl } = key;
 
+		// 弹窗激活时：拦截上下/回车/esc，不编辑文本
+		if (this.input.isPopupActive) {
+			switch (name) {
+				case 'up':
+					this.input.navigatePopup(-1);
+					this.drawStreamUpdate();
+					return;
+				case 'down':
+					this.input.navigatePopup(1);
+					this.drawStreamUpdate();
+					return;
+				case 'return':
+					this.handlePopupSelect();
+					return;
+				case 'escape':
+					this.input.closePopup();
+					this.drawStreamUpdate();
+					return;
+				default:
+					// 其他按键忽略（保持弹窗打开）
+					return;
+			}
+		}
+
 		switch (name) {
 			case 'return':
 				this.handleEnter();
@@ -310,6 +337,23 @@ export class ChatUI {
 			return;
 		}
 
+		// /model — 切换模型
+		if (this.input.text.startsWith('/model')) {
+			const arg = this.input.text.slice(6).trim();
+			if (arg) {
+				// 直接模式: /model deepseek-v4-flash
+				this.switchModel(arg);
+			} else {
+				// 交互模式: /model → 弹出选择弹窗
+				const currentModel = this.config.get<string>('defaults.model') ?? 'deepseek-v4-pro';
+				const initialIdx = AVAILABLE_MODELS.indexOf(currentModel);
+				this.input.openPopup(AVAILABLE_MODELS, Math.max(0, initialIdx));
+				this.input.setText('/model '); // 保留前缀提示
+			}
+			this.drawStreamUpdate();
+			return;
+		}
+
 		// 如果正在流式输出，排队
 		if (!this.state.isIdle()) {
 			const content = this.input.submit();
@@ -351,6 +395,34 @@ export class ChatUI {
 
 	private interruptStream(): void {
 		this.state.abortStream();
+	}
+
+	/** 切换模型 */
+	private async switchModel(modelName: string): Promise<void> {
+		if (!AVAILABLE_MODELS.includes(modelName)) {
+			this.display.append(`[未知模型: ${modelName}，可用: ${AVAILABLE_MODELS.join(', ')}]`, 'gray');
+			return;
+		}
+
+		// 持久化到配置
+		await this.config.set('defaults.model', modelName);
+
+		// 通知 SessionManager → 更新 provider 默认模型
+		if (this.sessionManager) {
+			this.sessionManager.setModel(modelName);
+		}
+
+		this.display.append(`[模型已切换: ${modelName}]`, 'gray');
+	}
+
+	/** 弹窗选中回调 */
+	private handlePopupSelect(): void {
+		const selected = this.input.selectPopup();
+		if (selected) {
+			this.input.clear();
+			this.switchModel(selected);
+		}
+		this.drawStreamUpdate();
 	}
 
 	private processInputQueue(): void {
@@ -458,16 +530,23 @@ export class ChatUI {
 
 		this.renderInputPanel(inputHeight);
 
+		// 弹窗渲染
+		this.renderPopup();
+
 		// 队列提示
 		if (this.input.hasQueue) {
 			writeSync(1, chalk.dim(`\n⏳ 等待中 (${this.input.queueLength} 条)...`));
 		}
 
-		// 光标定位
-		const cursor = this.input.calcCursor(inputHeight, this.termWidth);
-		const cursorRow = this.termHeight - inputHeight + cursor.cursorRow;
-		writeSync(1, cursorTo(cursorRow, cursor.cursorCol));
-		writeSync(1, SHOW_CURSOR);
+		// 光标定位（弹窗激活时隐藏光标）
+		if (this.input.isPopupActive) {
+			writeSync(1, HIDE_CURSOR);
+		} else {
+			const cursor = this.input.calcCursor(inputHeight, this.termWidth);
+			const cursorRow = this.termHeight - inputHeight + cursor.cursorRow;
+			writeSync(1, cursorTo(cursorRow, cursor.cursorCol));
+			writeSync(1, SHOW_CURSOR);
+		}
 	}
 
 	/** 流式增量重绘 */
@@ -532,6 +611,25 @@ export class ChatUI {
 		}
 	}
 
+	/** 渲染弹窗选择列表 */
+	private renderPopup(): void {
+		if (!this.input.isPopupActive) return;
+
+		const items = this.input.popupItems;
+		const selectedIdx = this.input.popupIndex;
+
+		for (let i = 0; i < items.length; i++) {
+			const isSelected = i === selectedIdx;
+			const label = isSelected ? `┃ ${items[i]} ┃` : `  ${items[i]}`;
+			const padded = label + ' '.repeat(Math.max(0, this.termWidth - strDisplayWidth(label)));
+			if (isSelected) {
+				writeSync(1, chalk.bgWhite.black(padded) + '\n');
+			} else {
+				writeSync(1, chalk.dim(padded) + '\n');
+			}
+		}
+	}
+
 	// ─── 辅助渲染 ──────────────────────────────────
 
 	private renderInputPanel(inputHeight: number): void {
@@ -576,8 +674,9 @@ export class ChatUI {
 	}
 
 	private getVisibleLines(): { text: string; color: LineColor }[] {
-		// 顶部 2 行信息栏 + 1 分隔线 + 底部 1 分隔线 + 输入面板行 + 1 空行
-		const reservedLines = 5 + this.lastInputHeight;
+		// 顶部 2 行信息栏 + 1 分隔线 + 底部 1 分隔线 + 输入面板行 + 弹窗行 + 1 空行
+		const popupHeight = this.input.calcPopupHeight();
+		const reservedLines = 5 + this.lastInputHeight + popupHeight;
 		const maxLines = Math.max(1, this.termHeight - reservedLines);
 		return this.display.getVisible(maxLines);
 	}
