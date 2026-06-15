@@ -5,6 +5,7 @@
  * 子命令：
  *   chat                  启动新对话（或 --resume 恢复）
  *   resume [id]           列出或恢复已有会话
+ *   clear                 清除旧会话（保留最近 10 条）
  */
 
 import { createInterface } from 'node:readline';
@@ -109,6 +110,42 @@ program
 			await app.start();
 		} catch (err: any) {
 			console.error('Failed to start:', err?.message ?? err);
+			process.exit(1);
+		}
+	});
+
+program
+	.command('clear')
+	.description('Delete all sessions except the 10 most recent')
+	.action(async () => {
+		try {
+			await ConfigManager.getInstance().load();
+			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
+			const storage = new Storage(sessionsDir);
+			const sessions = await storage.listSessions();
+
+			if (sessions.length === 0) {
+				console.log('No sessions to clear.');
+				process.exit(0);
+			}
+
+			const keep = 10;
+			const toDelete = sessions.slice(keep);
+			if (toDelete.length === 0) {
+				console.log(`Only ${sessions.length} session(s), nothing to clear (keep ${keep} most recent).`);
+				process.exit(0);
+			}
+
+			let deleted = 0;
+			for (const s of toDelete) {
+				const ok = await storage.deleteSession(s.id);
+				if (ok) deleted++;
+			}
+
+			console.log(`Cleared ${deleted} old session(s), kept ${Math.min(sessions.length, keep)} most recent.`);
+			process.exit(0);
+		} catch (err: any) {
+			console.error('Failed:', err?.message ?? err);
 			process.exit(1);
 		}
 	});
