@@ -228,9 +228,19 @@ export class ChatUI {
 			process.exit(0);
 		}
 
-		// /model 命令：切换模型（直接模式或弹出选择）
+		// /model 命令：切换模型。在此层直接分派，不依赖 async handleEnter
 		if (name === 'return' && this.input.text.startsWith('/model')) {
-			this.handleEnter();
+			const arg = this.input.text.slice(6).trim();
+			if (arg) {
+				this.switchModel(arg);
+				this.input.clear();
+			} else {
+				const currentModel = this.config.get<string>('defaults.model') ?? 'deepseek-v4-pro';
+				const initialIdx = AVAILABLE_MODELS.indexOf(currentModel);
+				this.input.openPopup(AVAILABLE_MODELS, Math.max(0, initialIdx));
+				this.input.setText('/model ');
+			}
+			this.drawStreamUpdate();
 			return;
 		}
 
