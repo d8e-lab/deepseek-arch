@@ -50,6 +50,7 @@ export class TuiApp {
 	private config: TuiConfig;
 	private configMgr: ConfigManager | null;
 	private tools: Tool[];
+	private yolo: boolean;
 	private conversation: ConversationView;
 	private input: InputEditor;
 	private state: AppState = AppState.IDLE;
@@ -60,11 +61,12 @@ export class TuiApp {
 	/** 上次渲染后的光标所在输入行号（0-based，用于下次回到起点） */
 	private lastCursorDisplayRow = 0;
 
-	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager) {
+	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean) {
 		this.sessionMgr = sessionMgr;
 		this.config = config;
 		this.configMgr = configMgr ?? null;
 		this.tools = tools ?? [];
+		this.yolo = yolo ?? false;
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
 	}
@@ -576,7 +578,7 @@ export class TuiApp {
 					}
 				},
 				this.abortController.signal,
-				this.tools.length > 0
+				this.tools.length > 0 && !this.yolo
 					? (toolName, params) => this.requestToolConfirm(toolName, params)
 					: undefined,
 			);
