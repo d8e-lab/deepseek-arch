@@ -228,6 +228,12 @@ export class ChatUI {
 			process.exit(0);
 		}
 
+		// /model 命令：切换模型（直接模式或弹出选择）
+		if (name === 'return' && this.input.text.startsWith('/model')) {
+			this.handleEnter();
+			return;
+		}
+
 		// 流式期间：允许继续编辑输入框、排队发送、中断
 		if (!this.state.isIdle()) {
 			if (name === 'escape') {
