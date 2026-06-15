@@ -43,6 +43,7 @@
 - `git clean -fd` — 删除未跟踪文件，不可恢复
 - `git push --force` — 覆盖远端历史
 - `git branch -D` — 强删分支（未 merge）
+- `git branch -d` — 删除分支（已 merge）。禁止主动删除分支，除非用户明确要求。
 
 ## 文件修改工具设计原则
 
