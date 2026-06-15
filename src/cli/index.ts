@@ -99,13 +99,13 @@ program
 					process.exit(1);
 				}
 				await sessionMgr.resumeSession(session.meta.id);
-				const app = new TuiApp(sessionMgr, tuiConfig, loadTools());
+				const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance());
 				await app.start(session);
 				return;
 			}
 
 			// 新会话
-			const app = new TuiApp(sessionMgr, tuiConfig, loadTools());
+			const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance());
 			await app.start();
 		} catch (err: any) {
 			console.error('Failed to start:', err?.message ?? err);
@@ -137,7 +137,7 @@ program
 				const sessionMgr = await createSessionManager(tuiConfig);
 				await sessionMgr.resumeSession(session.meta.id);
 
-				const app = new TuiApp(sessionMgr, tuiConfig, loadTools());
+				const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance());
 				await app.start(session);
 				return;
 			}
@@ -192,7 +192,7 @@ program
 			const sessionMgr = await createSessionManager(tuiConfig);
 			await sessionMgr.resumeSession(session.meta.id);
 
-			const app = new TuiApp(sessionMgr, tuiConfig, loadTools());
+			const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance());
 			await app.start(session);
 		} catch (err: any) {
 			console.error('Failed:', err?.message ?? err);

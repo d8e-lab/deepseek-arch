@@ -10,6 +10,7 @@ import type { Session } from '../../types/index.js';
 import { SessionManager } from '../../core/session.js';
 import type { StreamEvent } from '../../types/index.js';
 import type { Tool } from '../../tools/types.js';
+import { ConfigManager } from '../../core/config.js';
 import { ConversationView } from './conversation.js';
 import { InputEditor } from './input-editor.js';
 import { Throttle } from '../../utils/throttle.js';
@@ -38,12 +39,16 @@ import type { TuiConfig } from './types.js';
 /** 输入框最大可见行数 */
 const MAX_INPUT_ROWS = 5;
 
+/** 可选模型列表 */
+const AVAILABLE_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
+
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
 
 export class TuiApp {
 	private sessionMgr: SessionManager;
 	private config: TuiConfig;
+	private configMgr: ConfigManager | null;
 	private tools: Tool[];
 	private conversation: ConversationView;
 	private input: InputEditor;
@@ -55,9 +60,10 @@ export class TuiApp {
 	/** 上次渲染后的光标所在输入行号（0-based，用于下次回到起点） */
 	private lastCursorDisplayRow = 0;
 
-	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[]) {
+	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager) {
 		this.sessionMgr = sessionMgr;
 		this.config = config;
+		this.configMgr = configMgr ?? null;
 		this.tools = tools ?? [];
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
@@ -198,6 +204,16 @@ export class TuiApp {
 			return;
 		}
 
+		// / 命令分派
+		if (content.startsWith('/')) {
+			const handled = await this.handleCommand(content);
+			if (handled) {
+				this.printSeparator();
+				return;
+			}
+			// 未识别的命令 → 作为普通消息发送
+		}
+
 		// 打印用户消息（绿色）
 		process.stdout.write(green('[You] ') + content + '\r\n\r\n');
 
@@ -205,6 +221,42 @@ export class TuiApp {
 		await this.sendMessageStream(content);
 
 		this.printSeparator();
+	}
+
+	// ─── 命令处理 ──────────────────────────────────
+
+	/**
+	 * 处理 / 命令。返回 true 表示已处理，回到输入循环；
+	 * 返回 false 表示未识别，作为普通消息发送。
+	 */
+	private async handleCommand(content: string): Promise<boolean> {
+		if (content.startsWith('/model')) {
+			const arg = content.slice(6).trim();
+			if (arg && AVAILABLE_MODELS.includes(arg)) {
+				return await this.switchModel(arg);
+			}
+			process.stdout.write(
+				dim(`Available models: ${AVAILABLE_MODELS.join(', ')}`) + '\r\n',
+			);
+			process.stdout.write(dim(`Usage: /model <${AVAILABLE_MODELS.join('|')}>`) + '\r\n');
+			return true;
+		}
+
+		return false;
+	}
+
+	/** 切换模型 */
+	private async switchModel(modelName: string): Promise<boolean> {
+		this.config.model = modelName;
+		this.sessionMgr.setModel(modelName);
+
+		if (this.configMgr) {
+			await this.configMgr.set('defaults.model', modelName);
+		}
+
+		process.stdout.write(green(`[Model switched: ${modelName}]`) + '\r\n');
+		this.printHeader();
+		return true;
 	}
 
 	// ─── raw mode 输入读取 ─────────────────────────
