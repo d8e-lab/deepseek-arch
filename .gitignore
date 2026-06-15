@@ -36,3 +36,4 @@ tests/
 
 # Demo test files
 demo_test/
+.agent-file-state.json

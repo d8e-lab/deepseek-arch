@@ -1,6 +1,6 @@
 {
   "name": "deepseek-arch",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "DeepSeek Terminal Agent — Linux 终端 AI 助手，支持多轮对话、Agent Loop、Tool Calling 与持久化存储",
   "type": "module",
   "main": "dist/index.js",
