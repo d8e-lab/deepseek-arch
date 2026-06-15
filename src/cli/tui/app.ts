@@ -14,6 +14,7 @@ import { ConfigManager } from '../../core/config.js';
 import { ConversationView } from './conversation.js';
 import { InputEditor } from './input-editor.js';
 import { Throttle } from '../../utils/throttle.js';
+import { execSync } from 'node:child_process';
 import {
 	getTermSize,
 	enableBracketedPaste,
@@ -25,6 +26,8 @@ import {
 	offResize,
 	GRAY_BG_START,
 	GRAY_BG_END,
+	PINK_BG_START,
+	PINK_BG_END,
 	cyan,
 	dim,
 	green,
@@ -56,6 +59,10 @@ export class TuiApp {
 	private state: AppState = AppState.IDLE;
 	private abortController: AbortController | null = null;
 	private running = false;
+	/** shell 命令模式 */
+	private shellMode = false;
+	/** 待发送的 shell 上下文（[shell_start]...[shell_end] 块） */
+	private pendingShellContext: string[] = [];
 	/** 上次渲染的可见行数（用于缩小时清理残留行） */
 	private lastVisibleInputRows = 1;
 	/** 上次渲染后的光标所在输入行号（0-based，用于下次回到起点） */
@@ -192,7 +199,7 @@ export class TuiApp {
 		process.stdout.write('\r');
 
 		this.input.clear();
-		const content = await this.readUserInput();
+		let content = await this.readUserInput();
 
 		// 清除输入区域：回到起点（无历史记录时即当前行），清到屏底
 		if (this.lastCursorDisplayRow > 0) {
@@ -218,6 +225,12 @@ export class TuiApp {
 
 		// 打印用户消息（绿色）
 		process.stdout.write(green('[You] ') + content + '\r\n\r\n');
+
+		// 拼接待发送的 shell 上下文（仅模型可见）
+		if (this.pendingShellContext.length > 0) {
+			content = this.pendingShellContext.join('\n') + '\n' + content;
+			this.pendingShellContext = [];
+		}
 
 		// 发送并流式输出
 		await this.sendMessageStream(content);
@@ -261,7 +274,70 @@ export class TuiApp {
 		return true;
 	}
 
-	// ─── raw mode 输入读取 ─────────────────────────
+	// ─── shell 命令模式 ────────────────────────────
+
+	/** 进入 shell 命令模式：切换背景色并显示提示 */
+	private enterShellMode(): void {
+		this.shellMode = true;
+		// 重新渲染输入框为粉紫色背景
+		this.drawInputArea();
+		process.stdout.write('\r');
+	}
+
+	/** 执行 shell 命令并收集输出 */
+	private executeShellCommand(cmd: string): void {
+		// 打印命令到 scrollback
+		process.stdout.write(PINK_BG_START + '!' + cmd + PINK_BG_END + '\r\n');
+
+		let stdout = '';
+		let stderr = '';
+		try {
+			stdout = execSync(cmd, {
+				cwd: process.cwd(),
+				encoding: 'utf-8',
+				timeout: 30000,
+				maxBuffer: 1024 * 1024,
+				stdio: ['pipe', 'pipe', 'pipe'],
+			});
+		} catch (err: any) {
+			stdout = err.stdout?.toString() ?? '';
+			stderr = err.stderr?.toString() ?? '';
+			if (!stdout && !stderr) {
+				stderr = err.message ?? String(err);
+			}
+		}
+
+		// 输出 stdout 到 scrollback
+		if (stdout) {
+			const lines = stdout.split('\n');
+			for (const line of lines) {
+				process.stdout.write(dim(' │ ' + line) + '\r\n');
+			}
+		}
+
+		// 输出 stderr 到 scrollback
+		if (stderr) {
+			const lines = stderr.split('\n');
+			for (const line of lines) {
+				process.stdout.write(red(' │ ' + line) + '\r\n');
+			}
+		}
+
+		// 构建隐藏上下文块
+		const parts: string[] = ['[shell_start]', '!' + cmd];
+		if (stdout.trim()) parts.push(stdout.trimEnd());
+		if (stderr.trim()) parts.push(stderr.trimEnd());
+		parts.push('[shell_end]');
+		this.pendingShellContext.push(parts.join('\n'));
+
+		// 退出 shell 模式，回到普通输入
+		this.shellMode = false;
+		this.printSeparator();
+		this.lastVisibleInputRows = 1;
+		this.lastCursorDisplayRow = 0;
+		this.drawInputArea();
+		process.stdout.write('\r');
+	}
 
 	private readUserInput(): Promise<string | null> {
 		return new Promise((resolve) => {
@@ -284,6 +360,17 @@ export class TuiApp {
 		if (data.includes('\x03')) {
 			if (this.state === AppState.STREAMING || this.state === AppState.SENDING) {
 				this.abortController?.abort();
+				return;
+			}
+			if (this.shellMode) {
+				// shell 模式下 Ctrl+C 退出 shell 模式
+				this.shellMode = false;
+				this.printSeparator();
+				this.lastVisibleInputRows = 1;
+				this.lastCursorDisplayRow = 0;
+				this.drawInputArea();
+				process.stdout.write('\r');
+				this.input.clear();
 				return;
 			}
 			this.stdinHandler = null;
@@ -358,11 +445,20 @@ export class TuiApp {
 			if (ch === '\x0d') {
 				// \r\n（Windows 换行格式的粘贴）→ 视为换行
 				if (i + 1 < data.length && data[i + 1] === '\x0a') {
+					if (this.shellMode) { i++; continue; } // shell 模式忽略粘贴换行
 					this.input.insertNewline();
 					i++; // 跳过 \n
 					continue;
 				}
 				// 独立 \r → Enter 提交
+				if (this.shellMode) {
+					// shell 模式：执行命令
+					const cmd = this.input.buildSubmitContent();
+					this.input.clear();
+					this.renderInput();
+					this.executeShellCommand(cmd);
+					return;
+				}
 				if (this.input.isEmpty()) continue;
 				const content = this.input.buildSubmitContent();
 				this.stdinHandler = null;
@@ -374,7 +470,14 @@ export class TuiApp {
 			if (ch === '\x7f' || ch === '\x08') { this.input.deleteBeforeCursor(); continue; } // Backspace
 			if (ch === '\x09') { this.input.insertChar(' '); this.input.insertChar(' '); continue; } // Tab
 
-			if (ch >= ' ') this.input.insertChar(ch);
+			if (ch >= ' ') {
+				// 空输入时输入 ! 进入 shell 命令模式
+				if (!this.shellMode && ch === '!' && this.input.isEmpty()) {
+					this.enterShellMode();
+					continue;
+				}
+				this.input.insertChar(ch);
+			}
 		}
 
 		this.renderInput();
@@ -396,9 +499,10 @@ export class TuiApp {
 
 	private drawInputArea(): void {
 		const cols = getTermSize().cols;
-		// cols-1 避免终端 auto-wrap 导致光标错位
+		const bgStart = this.shellMode ? PINK_BG_START : GRAY_BG_START;
+		const bgEnd = this.shellMode ? PINK_BG_END : GRAY_BG_END;
 		const empty = ' '.repeat(cols - 1);
-		process.stdout.write(GRAY_BG_START + empty + GRAY_BG_END);
+		process.stdout.write(bgStart + empty + bgEnd);
 	}
 
 	/** 原地刷新输入区域 */
@@ -420,13 +524,16 @@ export class TuiApp {
 		}
 		process.stdout.write('\r');
 
+		const bgStart = this.shellMode ? PINK_BG_START : GRAY_BG_START;
+		const bgEnd = this.shellMode ? PINK_BG_END : GRAY_BG_END;
+
 		// 绘制每一行
 		for (let r = 0; r < linesToDraw; r++) {
 			clearLine();
 			if (r < inputLines.length && r < MAX_INPUT_ROWS) {
 				// 软换行后的段已由 InputEditor 截断，只做右侧填充
 				const text = padToWidth(inputLines[r], availWidth);
-				process.stdout.write(GRAY_BG_START + text + GRAY_BG_END);
+				process.stdout.write(bgStart + text + bgEnd);
 			}
 			// r >= inputLines.length: 清除残留行（不用灰底）
 			if (r < linesToDraw - 1) process.stdout.write('\r\n');

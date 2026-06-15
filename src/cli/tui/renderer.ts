@@ -101,6 +101,10 @@ export function grayBg(text: string): string {
 export const GRAY_BG_START = '\x1b[48;5;238m';
 export const GRAY_BG_END = '\x1b[0m';
 
+/** 粉紫色背景（shell 命令模式输入框） */
+export const PINK_BG_START = '\x1b[48;5;133m';
+export const PINK_BG_END = '\x1b[0m';
+
 /** 前景色 */
 export function cyan(text: string): string {
 	return `\x1b[36m${text}\x1b[0m`;
