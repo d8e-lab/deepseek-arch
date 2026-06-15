@@ -110,7 +110,7 @@ export const searchContentTool: Tool = {
 	},
 	requiresConfirm: false,
 
-	async execute(params: Record<string, unknown>): Promise<ToolResult> {
+	async execute(params: Record<string, unknown>, _signal?: AbortSignal): Promise<ToolResult> {
 		const pattern = String(params.pattern ?? '').trim();
 		const inputPath = String(params.path ?? '.').trim() || '.';
 		const glob = params.glob ? String(params.glob) : null;

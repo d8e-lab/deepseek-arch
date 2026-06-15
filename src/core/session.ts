@@ -362,7 +362,7 @@ export class SessionManager {
 						toolResult = 'The user rejected this operation. Do not retry the same approach. Explain the reason for the change and suggest an alternative, or ask the user for guidance.';
 						toolError = 'denied';
 					} else if (tool) {
-						const r = await tool.execute(args);
+						const r = await tool.execute(args, signal);
 						toolResult = r.content;
 						toolError = r.error;
 					} else {

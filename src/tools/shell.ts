@@ -47,7 +47,7 @@ export const shellTool: Tool = {
 	},
 	requiresConfirm: true,
 
-	async execute(params: Record<string, unknown>): Promise<ToolResult> {
+	async execute(params: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
 		const command = String(params.command ?? '');
 		const cwdParam = params.cwd ? String(params.cwd) : undefined;
 
@@ -78,7 +78,15 @@ export const shellTool: Tool = {
 		}
 
 		// ── 执行 ──────────────────────────────────
-		return new Promise((resolveResult) => {
+		// 如果 signal 已提前 abort，直接抛出，不启动子进程
+		if (signal?.aborted) {
+			const err = new Error('The operation was aborted');
+			err.name = 'AbortError';
+			throw err;
+		}
+
+		return new Promise((resolveResult, reject) => {
+			let settled = false;
 			const child = exec(
 				command,
 				{
@@ -88,6 +96,8 @@ export const shellTool: Tool = {
 					shell: '/bin/bash',
 				},
 				(error: Error | null, stdout: string, stderr: string) => {
+					if (settled) return;
+					settled = true;
 					const killed = child.killed || (error as any)?.signal !== undefined;
 					const exitCode = (error as any)?.code ?? 0;
 
@@ -111,6 +121,24 @@ export const shellTool: Tool = {
 			);
 			// 立即关闭 stdin，防止交互式命令（如 ssh、vim、git commit 无 -m）无限阻塞
 			child.stdin?.end();
+
+			// 监听外部 AbortSignal，终止子进程并 reject
+			if (signal) {
+				const onAbort = () => {
+					child.kill('SIGTERM');
+					// 如果 SIGTERM 无效，1s 后 SIGKILL
+					setTimeout(() => {
+						if (!child.killed) child.kill('SIGKILL');
+					}, 1000);
+					if (!settled) {
+						settled = true;
+						const err = new Error('The operation was aborted');
+						err.name = 'AbortError';
+						reject(err);
+					}
+				};
+				signal.addEventListener('abort', onAbort, { once: true });
+			}
 		});
 	},
 };

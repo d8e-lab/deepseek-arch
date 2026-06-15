@@ -43,7 +43,7 @@ export const readFileTool: Tool = {
 	},
 	requiresConfirm: false,
 
-	async execute(params: Record<string, unknown>): Promise<ToolResult> {
+	async execute(params: Record<string, unknown>, _signal?: AbortSignal): Promise<ToolResult> {
 		const inputPath = String(params.path ?? '');
 		const offset = typeof params.offset === 'number' ? Math.max(1, Math.floor(params.offset)) : 1;
 		const limit = Math.min(

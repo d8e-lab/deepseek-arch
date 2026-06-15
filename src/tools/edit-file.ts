@@ -100,7 +100,7 @@ export const editFileTool: Tool = {
 		return diff;
 	},
 
-	async execute(params: Record<string, unknown>): Promise<ToolResult> {
+	async execute(params: Record<string, unknown>, _signal?: AbortSignal): Promise<ToolResult> {
 		const inputPath = String(params.path ?? '');
 		const oldStr = String(params.old_string ?? '');
 		const newStr = String(params.new_string ?? '');

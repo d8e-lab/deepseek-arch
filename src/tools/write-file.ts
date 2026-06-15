@@ -71,7 +71,7 @@ export const writeFileTool: Tool = {
 		return diff;
 	},
 
-	async execute(params: Record<string, unknown>): Promise<ToolResult> {
+	async execute(params: Record<string, unknown>, _signal?: AbortSignal): Promise<ToolResult> {
 		const inputPath = String(params.path ?? '');
 		const content = String(params.content ?? '');
 		const sessionCwd = process.env.DEEPSEEK_ARCH_SESSION_CWD ?? process.cwd();
