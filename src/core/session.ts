@@ -362,9 +362,20 @@ export class SessionManager {
 						toolResult = 'The user rejected this operation. Do not retry the same approach. Explain the reason for the change and suggest an alternative, or ask the user for guidance.';
 						toolError = 'denied';
 					} else if (tool) {
-						const r = await tool.execute(args, signal);
-						toolResult = r.content;
-						toolError = r.error;
+						try {
+							const r = await tool.execute(args, signal);
+							toolResult = r.content;
+							toolError = r.error;
+						} catch (err: unknown) {
+							if (err instanceof Error && err.name === 'AbortError') {
+								// 用户 Ctrl+C 中断工具执行，与拒绝对齐：设 userDenied，走同样的 skip+break 路径
+								toolResult = 'The user cancelled this operation during execution. Do not retry the same approach. Explain the reason and suggest an alternative, or ask the user for guidance.';
+								toolError = 'cancelled';
+								userDenied = true;
+							} else {
+								throw err;
+							}
+						}
 					} else {
 						toolResult = `Unknown tool: ${tc.function.name}`;
 						toolError = 'unknown_tool';
@@ -389,11 +400,11 @@ export class SessionManager {
 						toolName: tc.function.name,
 						toolResult,
 						error: toolError,
-						toolDenied: denied,
+						toolDenied: denied || toolError === 'cancelled',
 					});
 
-					// 拒绝执行时：写入拒绝结果，剩余 tool 补 skip 结果，退出 agent loop
-					if (denied) {
+					// 拒绝/取消时：写入结果，剩余 tool 补 skip 结果，退出 agent loop
+					if (denied || toolError === 'cancelled') {
 						agentMessages.push({
 							role: 'tool',
 							content: toolResult,
@@ -402,7 +413,7 @@ export class SessionManager {
 						for (let j = i + 1; j < pendingToolCalls.length; j++) {
 							agentMessages.push({
 								role: 'tool',
-								content: 'Skipped: a previous tool call was rejected by the user.',
+								content: 'Skipped: a previous tool call was rejected or cancelled by the user.',
 								tool_call_id: pendingToolCalls[j].id,
 							});
 						}
