@@ -351,14 +351,14 @@ export class SessionManager {
 
 					// 需要用户确认的工具：通过 onConfirm 回调确认（diff 已渲染在屏幕上）
 					let denied = false;
-					if (tool?.requiresConfirm && onConfirm) {
+					const isStalePreview = previewText?.startsWith('[STALE]');
+					if (tool?.requiresConfirm && onConfirm && !isStalePreview) {
 						const approved = await onConfirm(tc.function.name, args);
 						if (!approved) {
 							denied = true;
 							userDenied = true;
 						}
 					}
-
 					const startMs = Date.now();
 					let toolResult: string;
 					let toolError: string | undefined;

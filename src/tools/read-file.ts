@@ -11,6 +11,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { relative } from 'node:path';
 import type { Tool, ToolResult } from './types.js';
 import { checkPath, isBinaryFile } from './utils.js';
+import { getFileStateManager } from './file-state.js';
 
 /** 默认读取行数 */
 const DEFAULT_LIMIT = 200;
@@ -115,6 +116,10 @@ export const readFileTool: Tool = {
 		if (endIdx < totalLines) {
 			header += ' (truncated)';
 		}
+
+		// 记录读取状态，用于后续文件修改工具的 staleness 检查
+		const fsm = await getFileStateManager(sessionCwd);
+		await fsm.record(check.resolved, fileStat);
 
 		return {
 			content: `${header}\n${resultLines.join('\n')}\n  mtime: ${fileStat.mtime.toISOString()}`,

@@ -14,6 +14,7 @@ import { randomBytes } from 'node:crypto';
 import type { Tool, ToolResult } from './types.js';
 import { checkPath } from './utils.js';
 import { unifiedDiff } from './diff.js';
+import { getFileStateManager } from './file-state.js';
 
 /**
  * 在 content 中查找 old_string 的匹配位置。
@@ -74,6 +75,11 @@ export const editFileTool: Tool = {
 		const check = checkPath(inputPath, sessionCwd);
 		if (!check.valid) return null;
 
+		// staleness 检查：文件是否自上次 read 后被修改
+		const fsm = await getFileStateManager(sessionCwd);
+		const staleErr = await fsm.check(check.resolved);
+		if (staleErr) return staleErr;
+
 		let original: string;
 		try {
 			original = await readFile(check.resolved, 'utf-8');
@@ -119,6 +125,13 @@ export const editFileTool: Tool = {
 			return { content: '', error: check.error };
 		}
 
+		// staleness 检查：文件是否自上次 read 后被外部修改
+		const fsm = await getFileStateManager(sessionCwd);
+		const staleErr = await fsm.check(check.resolved);
+		if (staleErr) {
+			return { content: '', error: staleErr };
+		}
+
 		const relPath = relative(sessionCwd, check.resolved);
 
 		// 重新读取文件（preview 和 execute 之间文件可能已被修改）
@@ -157,6 +170,9 @@ export const editFileTool: Tool = {
 			try { await import('node:fs/promises').then((m) => m.unlink(tmpPath)); } catch { /* ignore */ }
 			return { content: '', error: `write failed: ${err?.message ?? err}` };
 		}
+
+		// 更新文件状态，避免自身写入触发下次 staleness 误报
+		await fsm.update(check.resolved);
 
 		const count = matches.length;
 		const replacementDesc = count > 1 ? `${count} occurrences` : '1 occurrence';

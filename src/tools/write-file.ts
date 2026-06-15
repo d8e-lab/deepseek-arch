@@ -14,6 +14,7 @@ import { randomBytes } from 'node:crypto';
 import type { Tool, ToolResult } from './types.js';
 import { checkPath } from './utils.js';
 import { unifiedDiff } from './diff.js';
+import { getFileStateManager } from './file-state.js';
 
 /** 判断文件是否存在 */
 async function fileExists(path: string): Promise<boolean> {
@@ -56,6 +57,11 @@ export const writeFileTool: Tool = {
 		const check = checkPath(inputPath, sessionCwd);
 		if (!check.valid) return null;
 
+		// staleness 检查：已有文件自上次 read 后被外部修改
+		const fsm = await getFileStateManager(sessionCwd);
+		const staleErr = await fsm.check(check.resolved);
+		if (staleErr) return staleErr;
+
 		const relPath = relative(sessionCwd, check.resolved);
 		const exists = await fileExists(check.resolved);
 		const oldContent = exists ? await readFile(check.resolved, 'utf-8') : '';
@@ -85,6 +91,13 @@ export const writeFileTool: Tool = {
 			return { content: '', error: check.error };
 		}
 
+		// staleness 检查
+		const fsm = await getFileStateManager(sessionCwd);
+		const staleErr = await fsm.check(check.resolved);
+		if (staleErr) {
+			return { content: '', error: staleErr };
+		}
+
 		const relPath = relative(sessionCwd, check.resolved);
 		const existed = await fileExists(check.resolved);
 
@@ -103,6 +116,9 @@ export const writeFileTool: Tool = {
 			try { await import('node:fs/promises').then((m) => m.unlink(tmpPath)); } catch { /* ignore */ }
 			return { content: '', error: `write failed: ${err?.message ?? err}` };
 		}
+
+		// 更新文件状态
+		await fsm.update(check.resolved);
 
 		const action = existed ? 'overwrote' : 'created';
 		return {
