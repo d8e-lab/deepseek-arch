@@ -381,6 +381,9 @@ export class SessionManager {
 						toolError = 'unknown_tool';
 					}
 
+				// 拼入 error 信息：确保模型能感知工具执行失败
+				const toolMessage = toolError ? `${toolResult}\nError: ${toolError}` : toolResult;
+
 					const durationMs = Date.now() - startMs;
 
 					toolRecords.push({
@@ -407,7 +410,7 @@ export class SessionManager {
 					if (denied || toolError === 'cancelled') {
 						agentMessages.push({
 							role: 'tool',
-							content: toolResult,
+							content: toolMessage,
 							tool_call_id: tc.id,
 						});
 						for (let j = i + 1; j < pendingToolCalls.length; j++) {
@@ -423,7 +426,7 @@ export class SessionManager {
 					// 将 tool 结果加入 messages
 					agentMessages.push({
 						role: 'tool',
-						content: toolResult,
+						content: toolMessage,
 						tool_call_id: tc.id,
 					});
 				}
@@ -562,9 +565,12 @@ export class SessionManager {
 					tool_calls: toolCalls,
 				});
 				for (const tcr of tcRecords) {
+					const msgContent = tcr.result || tcr.error
+						? `${tcr.result || ''}${tcr.error ? '\nError: ' + tcr.error : ''}`
+						: '';
 					messages.push({
 						role: 'tool',
-						content: tcr.result ?? tcr.error ?? '',
+						content: msgContent,
 						tool_call_id: tcr.id,
 					});
 				}
