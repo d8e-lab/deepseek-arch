@@ -76,7 +76,8 @@ program
 	.command('chat')
 	.description('Start a new conversation or resume an existing one')
 	.option('-r, --resume <id>', 'resume a session by ID or name')
-	.action(async (options: { resume?: string }) => {
+	.option('--yolo', 'skip all tool confirmations (auto-approve edit/shell)')
+	.action(async (options: { resume?: string; yolo?: boolean }) => {
 		try {
 			const tuiConfig = await createTuiConfig();
 
@@ -100,13 +101,13 @@ program
 					process.exit(1);
 				}
 				await sessionMgr.resumeSession(session.meta.id);
-				const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance());
+				const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance(), options.yolo);
 				await app.start(session);
 				return;
 			}
 
 			// 新会话
-			const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance());
+			const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance(), options.yolo);
 			await app.start();
 		} catch (err: any) {
 			console.error('Failed to start:', err?.message ?? err);
