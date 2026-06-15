@@ -279,15 +279,12 @@ export class TuiApp {
 	/** 进入 shell 命令模式：切换背景色并显示提示 */
 	private enterShellMode(): void {
 		this.shellMode = true;
-		// 重新渲染输入框为粉紫色背景
-		this.drawInputArea();
-		process.stdout.write('\r');
 	}
 
 	/** 执行 shell 命令并收集输出 */
 	private executeShellCommand(cmd: string): void {
-		// 打印命令到 scrollback
-		process.stdout.write(PINK_BG_START + '!' + cmd + PINK_BG_END + '\r\n');
+		// 打印命令到 scrollback（cmd 已包含前导 !）
+		process.stdout.write(PINK_BG_START + cmd + PINK_BG_END + '\r\n');
 
 		let stdout = '';
 		let stderr = '';
@@ -324,7 +321,7 @@ export class TuiApp {
 		}
 
 		// 构建隐藏上下文块
-		const parts: string[] = ['[shell_start]', '!' + cmd];
+		const parts: string[] = ['[shell_start]', cmd];
 		if (stdout.trim()) parts.push(stdout.trimEnd());
 		if (stderr.trim()) parts.push(stderr.trimEnd());
 		parts.push('[shell_end]');
@@ -467,12 +464,19 @@ export class TuiApp {
 			}
 
 			if (ch === '\x0a') { this.input.insertNewline(); continue; }       // Ctrl+J
-			if (ch === '\x7f' || ch === '\x08') { this.input.deleteBeforeCursor(); continue; } // Backspace
+			if (ch === '\x7f' || ch === '\x08') {
+				this.input.deleteBeforeCursor();
+				if (this.shellMode && this.input.isEmpty()) {
+					this.shellMode = false;
+				}
+				continue;
+			} // Backspace
 			if (ch === '\x09') { this.input.insertChar(' '); this.input.insertChar(' '); continue; } // Tab
 
 			if (ch >= ' ') {
-				// 空输入时输入 ! 进入 shell 命令模式
+				// 空输入时输入 ! 进入 shell 命令模式（! 保留在输入框）
 				if (!this.shellMode && ch === '!' && this.input.isEmpty()) {
+					this.input.insertChar(ch);
 					this.enterShellMode();
 					continue;
 				}
