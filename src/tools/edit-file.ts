@@ -91,7 +91,9 @@ export const editFileTool: Tool = {
 
 		// 唯一性检查
 		if (matches.length === 0) {
-			return `[ERROR] old_string not found in file`;
+			return `[ERROR] old_string not found in file. Possible causes:\n` +
+				`  - Tab/space mismatch in indentation (file uses tabs, copy exactly)\n` +
+				`  - File was modified since last read — re-read the file first`;
 		}
 		if (!replaceAll && matches.length > 1) {
 			return `[ERROR] old_string appears ${matches.length} times — use replace_all or be more specific`;
@@ -147,13 +149,15 @@ export const editFileTool: Tool = {
 		if (matches.length === 0) {
 			return {
 				content: '',
-				error: `old_string not found in ${relPath}. File may have been modified since preview — re-read the file.`,
+				error: `old_string not found in ${relPath}. Possible causes:\n` +
+					`  - Tab/space mismatch in indentation (file uses tabs, copy exactly)\n` +
+					`  - File was modified since last read — re-read the file first`,
 			};
 		}
 		if (!replaceAll && matches.length > 1) {
 			return {
 				content: '',
-				error: `old_string appears ${matches.length} times in ${relPath}. Use replace_all or provide more context to make it unique.`,
+				error: `old_string appears ${matches.length} times in ${relPath}. Use replace_all or provide more context (more surrounding lines) to make it unique.`,
 			};
 		}
 
