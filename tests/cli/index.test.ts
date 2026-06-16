@@ -37,13 +37,13 @@ describe('CLI (e2e)', () => {
   describe('--version', () => {
     it('输出包含版本号', () => {
       const { stdout, status } = run(['--version']);
-      expect(stdout.trim()).toContain('1.1.0');
+      expect(stdout.trim()).toContain('1.2.0');
       expect(status).toBe(0);
     });
 
     it('-V 等价于 --version', () => {
       const { stdout, status } = run(['-V']);
-      expect(stdout.trim()).toContain('1.1.0');
+      expect(stdout.trim()).toContain('1.2.0');
       expect(status).toBe(0);
     });
   });
