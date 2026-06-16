@@ -226,7 +226,10 @@ export class InputEditor {
 
 	handlePaste(text: string): void {
 		this.exitHistory();
-		const lineCount = text.split('\n').length;
+		// 归一化换行符：\r\n → \n，孤立 \r → \n（跨平台兼容 Linux/Windows/WSL）
+		text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+		// 去除末尾换行再数行，避免尾行空串导致行数 +1
+		const lineCount = (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n').length;
 		this.pasteContents.push(text);
 		const marker = `[paste +${lineCount} lines]`;
 		const line = this.lines[this.cursorRow];
