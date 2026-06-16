@@ -180,4 +180,105 @@ describe('InputEditor 粘贴', () => {
 		const lines = editor.getDisplayLines();
 		expect(lines).toEqual(['', '']);
 	});
+
+	// ─── 原子删除 ──────────────────────────────────
+
+	describe('原子删除粘贴标记', () => {
+		/** 辅助：添加一段 5 行粘贴并返回其原始文本 */
+		function pasteLarge(editor: InputEditor, text: string) {
+			editor.handlePaste(text);
+		}
+
+		it('Backspace 在标记内部 → 删除整个标记', () => {
+			pasteLarge(editor, '1\n2\n3\n4\n5');
+			// 标记 "[paste #1 +5 lines]" 共占若干字符，光标在末尾
+			// 移动光标到标记中间
+			editor.moveCursorLeft();
+			editor.moveCursorLeft();
+			editor.deleteBeforeCursor();
+			const lines = editor.getDisplayLines();
+			expect(lines[0]).toBe('');
+			expect(editor.buildSubmitContent()).toBe('');
+		});
+
+		it('Backspace 紧邻标记右侧 → 删除整个标记', () => {
+			editor.insertChar('x');
+			pasteLarge(editor, '1\n2\n3\n4\n5');
+			// 当前: "x[paste #1 +5 lines]"，光标在标记右侧
+			// Backspace 应该删除整个标记
+			editor.deleteBeforeCursor();
+			const lines = editor.getDisplayLines();
+			expect(lines[0]).toBe('x');
+		});
+
+		it('Delete 在标记内部 → 删除整个标记', () => {
+			pasteLarge(editor, '1\n2\n3\n4\n5');
+			editor.moveToLineStart(); // 光标到行首
+			editor.moveCursorRight(); // 进入标记
+			editor.deleteAfterCursor();
+			const lines = editor.getDisplayLines();
+			expect(lines[0]).toBe('');
+		});
+
+		it('Delete 紧邻标记左侧 → 删除整个标记', () => {
+			editor.insertChar('x');
+			pasteLarge(editor, '1\n2\n3\n4\n5');
+			// "x[paste #1 +5 lines]"
+			editor.moveToLineStart();
+			editor.moveCursorRight(); // 光标在 x 后、标记前
+			editor.deleteAfterCursor();
+			expect(editor.getDisplayLines()[0]).toBe('x');
+		});
+
+		it('跨行 Backspace：上行末尾是标记 → 删除标记不合并行', () => {
+			pasteLarge(editor, '1\n2\n3\n4\n5');
+			// 在标记后换行
+			editor.moveToLineEnd();
+			editor.insertNewline();
+			editor.insertChar('y');
+			// 当前: 行0="[paste #1 +5 lines]", 行1="y"
+			// 光标在行1开头，Backspace
+			editor.moveToLineStart();
+			editor.deleteBeforeCursor();
+			const lines = editor.getDisplayLines();
+			expect(lines[0]).toBe('');
+			expect(lines[1]).toBe('y');
+		});
+
+		it('跨行 Delete：下行开头是标记 → 删除标记不合并行', () => {
+			editor.insertChar('x');
+			editor.insertNewline();
+			pasteLarge(editor, 'a\nb\nc\nd\ne');
+			// 行0="x", 行1="[paste #1 +5 lines]"
+			// 光标在行0末尾
+			editor.moveCursor(-1, 0); // 回到行0
+			editor.moveToLineEnd();
+			editor.deleteAfterCursor();
+			const lines = editor.getDisplayLines();
+			expect(lines[0]).toBe('x');
+			expect(lines[1]).toBe('');
+		});
+
+		it('删除一个标记后 pasteContents 同步移除', () => {
+			pasteLarge(editor, '1\n2\n3\n4\n5');        // #1: 5行
+			pasteLarge(editor, 'a\nb\nc\nd\ne\nf');     // #2: 6行
+			// 删除 #1
+			editor.moveToLineStart();
+			editor.deleteAfterCursor();
+			// 只剩 #2
+			const content = editor.buildSubmitContent();
+			expect(content).toBe('a\nb\nc\nd\ne\nf');
+		});
+
+		it('普通 Backspace/Delete 不受影响', () => {
+			editor.insertChar('h');
+			editor.insertChar('i');
+			// "hi"，光标在最右
+			editor.deleteBeforeCursor();
+			expect(editor.getDisplayLines()[0]).toBe('h');
+			editor.moveToLineStart();
+			editor.deleteAfterCursor();
+			expect(editor.getDisplayLines()[0]).toBe('');
+		});
+	});
 });

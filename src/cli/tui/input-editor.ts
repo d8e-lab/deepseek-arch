@@ -81,6 +81,15 @@ export class InputEditor {
 		if (this.cursorCol === 0) {
 			// 合并到上一行
 			if (this.cursorRow === 0) return;
+			// 若上一行末尾是粘贴标记 → 删除整个标记而非合并行
+			const prevLine = this.lines[this.cursorRow - 1];
+			const marker = this.findPasteMarkerAt(prevLine, prevLine.length, 'left');
+			if (marker) {
+				this.lines[this.cursorRow - 1] = prevLine.slice(0, marker.start);
+				this.cursorCol = strDisplayWidth(prevLine.slice(0, marker.start));
+				this.pasteContents.splice(marker.order - 1, 1);
+				return;
+			}
 			const current = this.lines[this.cursorRow];
 			const prevLen = strDisplayWidth(this.lines[this.cursorRow - 1]);
 			this.lines[this.cursorRow - 1] += current;
@@ -93,10 +102,19 @@ export class InputEditor {
 
 		const line = this.lines[this.cursorRow];
 		const idx = this.displayColToIndex(line, this.cursorCol);
-		// 删除光标前一个字符（正确处理 surrogate pairs）
 		if (idx === 0) return;
+
+		// 若光标在粘贴标记内或紧邻标记右侧 → 删除整个标记
+		const marker = this.findPasteMarkerAt(line, idx, 'left');
+		if (marker) {
+			this.lines[this.cursorRow] = line.slice(0, marker.start) + line.slice(marker.end);
+			this.cursorCol -= strDisplayWidth(line.slice(marker.start, marker.end));
+			this.pasteContents.splice(marker.order - 1, 1);
+			return;
+		}
+
+		// 删除光标前一个字符（正确处理 surrogate pairs）
 		let prevIdx = idx - 1;
-		// 如果 prevIdx 是 low surrogate (0xDC00-0xDFFF)，回退到 surrogate pair 开头
 		if (prevIdx > 0 && (line.charCodeAt(prevIdx) & 0xfc00) === 0xdc00) {
 			prevIdx--;
 		}
@@ -112,9 +130,26 @@ export class InputEditor {
 		this.exitHistory();
 		const line = this.lines[this.cursorRow];
 		const idx = this.displayColToIndex(line, this.cursorCol);
+
+		// 若光标在粘贴标记内或紧邻标记左侧 → 删除整个标记
+		const marker = this.findPasteMarkerAt(line, idx, 'right');
+		if (marker) {
+			this.lines[this.cursorRow] = line.slice(0, marker.start) + line.slice(marker.end);
+			this.pasteContents.splice(marker.order - 1, 1);
+			return;
+		}
+
 		if (idx >= line.length) {
 			// 合并下一行
 			if (this.cursorRow >= this.lines.length - 1) return;
+			// 若下一行开头是粘贴标记 → 删除标记而非合并行
+			const nextLine = this.lines[this.cursorRow + 1];
+			const nextMarker = this.findPasteMarkerAt(nextLine, 0, 'right');
+			if (nextMarker) {
+				this.lines[this.cursorRow + 1] = nextLine.slice(nextMarker.end);
+				this.pasteContents.splice(nextMarker.order - 1, 1);
+				return;
+			}
 			this.lines[this.cursorRow] += this.lines[this.cursorRow + 1];
 			this.lines.splice(this.cursorRow + 1, 1);
 			return;
@@ -440,6 +475,32 @@ export class InputEditor {
 			width += cw;
 		}
 		return width;
+	}
+
+	/**
+	 * 在行内查找光标所在位置的粘贴标记。
+	 * @param side 'left' 用于 Backspace（检查 idx 是否在 (start, end] 范围内）
+	 *             'right' 用于 Delete（检查 idx 是否在 [start, end) 范围内）
+	 * @returns 标记的起止字符串下标及其出现序号（1-based），未找到返回 null
+	 */
+	private findPasteMarkerAt(
+		line: string,
+		idx: number,
+		side: 'left' | 'right',
+	): { start: number; end: number; order: number } | null {
+		const regex = /\[paste #\d+ \+(\d+) lines\]/g;
+		let match: RegExpExecArray | null;
+		let order = 0;
+		while ((match = regex.exec(line)) !== null) {
+			order++;
+			const s = match.index;
+			const e = s + match[0].length;
+			const hit = side === 'left' ? idx > s && idx <= e : idx >= s && idx < e;
+			if (hit) {
+				return { start: s, end: e, order };
+			}
+		}
+		return null;
 	}
 
 	/** 显示列位置 → 行内字符串下标 */
