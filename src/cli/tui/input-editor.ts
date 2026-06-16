@@ -29,6 +29,8 @@ export class InputEditor {
 	private savedInput: string[] | null = null;
 	/** 粘贴内容存储 */
 	private pasteContents: string[] = [];
+	/** 粘贴序号（用于多次粘贴的 #N 标识） */
+	private pasteSeq: number = 0;
 	/** 最大可见行数 */
 	readonly maxVisibleLines: number = 5;
 	/** 软换行宽度（0 = 不自动换行） */
@@ -268,8 +270,9 @@ export class InputEditor {
 		}
 
 		// ≥ 5 行：使用占位标记，提交时替换还原
+		this.pasteSeq++;
 		this.pasteContents.push(text);
-		const marker = `[paste +${lineCount} lines]`;
+		const marker = `[paste #${this.pasteSeq} +${lineCount} lines]`;
 		const line = this.lines[this.cursorRow];
 		const idx = this.displayColToIndex(line, this.cursorCol);
 		this.lines[this.cursorRow] = line.slice(0, idx) + marker + line.slice(idx);
@@ -278,10 +281,10 @@ export class InputEditor {
 
 	// ─── 提交 ──────────────────────────────────────
 
-	/** 构建最终发送内容：替换所有 [paste +N lines] 为实际粘贴文本 */
+	/** 构建最终发送内容：替换所有 [paste #N +M lines] 为实际粘贴文本 */
 	buildSubmitContent(): string {
 		let pasteIdx = 0;
-		const pasteMarkerRegex = /\[paste \+(\d+) lines\]/g;
+		const pasteMarkerRegex = /\[paste #\d+ \+(\d+) lines\]/g;
 		const parts = this.lines.map((line) => {
 			return line.replace(pasteMarkerRegex, () => {
 				return this.pasteContents[pasteIdx++] ?? '';
@@ -305,6 +308,7 @@ export class InputEditor {
 		this.historyIndex = -1;
 		this.savedInput = null;
 		this.pasteContents = [];
+		this.pasteSeq = 0;
 	}
 
 	// ─── 显示输出 ──────────────────────────────────
