@@ -286,10 +286,13 @@ export class TuiApp {
 		// 打印命令到 scrollback（cmd 已包含前导 !）
 		process.stdout.write(PINK_BG_START + cmd + PINK_BG_END + '\r\n');
 
+		// 去掉前导 ! 后执行
+		const shellCmd = cmd.startsWith('!') ? cmd.slice(1).trimStart() : cmd;
+
 		let stdout = '';
 		let stderr = '';
 		try {
-			stdout = execSync(cmd, {
+			stdout = execSync(shellCmd, {
 				cwd: process.cwd(),
 				encoding: 'utf-8',
 				timeout: 30000,
