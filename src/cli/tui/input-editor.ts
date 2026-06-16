@@ -229,7 +229,45 @@ export class InputEditor {
 		// 归一化换行符：\r\n → \n，孤立 \r → \n（跨平台兼容 Linux/Windows/WSL）
 		text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 		// 去除末尾换行再数行，避免尾行空串导致行数 +1
-		const lineCount = (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n').length;
+		const trimmed = text.endsWith('\n') ? text.slice(0, -1) : text;
+		const lineCount = trimmed.split('\n').length;
+
+		if (lineCount === 0) return;
+
+		// 少于 5 行：直接展开到输入区域，用户可见可编辑
+		if (lineCount < 5) {
+			const pasteLines = trimmed.split('\n');
+			const line = this.lines[this.cursorRow];
+			const idx = this.displayColToIndex(line, this.cursorCol);
+			const before = line.slice(0, idx);
+			const after = line.slice(idx);
+
+			// 首行：光标前文本 + 粘贴第一行
+			this.lines[this.cursorRow] = before + pasteLines[0];
+
+			// 中间行：直接插入
+			for (let i = 1; i < pasteLines.length - 1; i++) {
+				this.lines.splice(this.cursorRow + i, 0, pasteLines[i]);
+			}
+
+			// 末行：粘贴最后一行 + 光标后文本
+			if (pasteLines.length > 1) {
+				this.lines.splice(
+					this.cursorRow + pasteLines.length - 1,
+					0,
+					pasteLines[pasteLines.length - 1] + after,
+				);
+				this.cursorRow += pasteLines.length - 1;
+				this.cursorCol = strDisplayWidth(pasteLines[pasteLines.length - 1]);
+			} else {
+				this.lines[this.cursorRow] += after;
+				this.cursorCol = strDisplayWidth(before + pasteLines[0]);
+			}
+			this.clampScroll();
+			return;
+		}
+
+		// ≥ 5 行：使用占位标记，提交时替换还原
 		this.pasteContents.push(text);
 		const marker = `[paste +${lineCount} lines]`;
 		const line = this.lines[this.cursorRow];
