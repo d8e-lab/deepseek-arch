@@ -38,6 +38,8 @@ import {
 } from './renderer.js';
 import { AppState } from './types.js';
 import type { TuiConfig } from './types.js';
+import { Selector } from './selector.js';
+import type { SelectOption } from './selector.js';
 
 /** 输入框最大可见行数 */
 const MAX_INPUT_ROWS = 5;
@@ -250,11 +252,35 @@ export class TuiApp {
 			if (arg && AVAILABLE_MODELS.includes(arg)) {
 				return await this.switchModel(arg);
 			}
-			process.stdout.write(
-				dim(`Available models: ${AVAILABLE_MODELS.join(', ')}`) + '\r\n',
+
+			// 交互式选择
+			const options: SelectOption<string>[] = AVAILABLE_MODELS.map((m) => ({
+				label: m,
+				value: m,
+			}));
+			const selector = new Selector(options, 'Select a model (↑↓ navigate, Enter confirm):');
+			const selected = await selector.select(
+				() => this.stdinHandler,
+				(h) => {
+					this.stdinHandler = h;
+				},
 			);
-			process.stdout.write(dim(`Usage: /model <${AVAILABLE_MODELS.join('|')}>`) + '\r\n');
+			if (selected) {
+				return await this.switchModel(selected);
+			}
 			return true;
+		}
+
+		if (content.startsWith('/help')) {
+			return this.showHelp();
+		}
+
+		if (content.startsWith('/context')) {
+			return this.showContext();
+		}
+
+		if (content.startsWith('/yolo')) {
+			return await this.toggleYolo();
 		}
 
 		return false;
@@ -271,6 +297,100 @@ export class TuiApp {
 
 		process.stdout.write(green(`[Model switched: ${modelName}]`) + '\r\n');
 		this.printHeader();
+		return true;
+	}
+
+	/** /help — 显示可用命令列表 */
+	private showHelp(): true {
+		const cols = getTermSize().cols;
+		const w = Math.max(1, cols - 1);
+		process.stdout.write(yellow('Commands') + '\r\n');
+		process.stdout.write('─'.repeat(w) + '\r\n');
+
+		const cmds: [string, string][] = [
+			['/model [name]', 'Switch model (interactive picker if no arg)'],
+			['/help',          'Show this command list'],
+			['/context',       'Show session context & token usage'],
+			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
+			['/exit  |  Ctrl+C', 'Exit the session'],
+			['!<shell cmd>',   'Execute a shell command (output hidden from model)'],
+		];
+
+		for (const [cmd, desc] of cmds) {
+			const line = `  ${green(cmd.padEnd(24))} ${dim(desc)}`;
+			// 截断到终端宽度避免 auto-wrap
+			process.stdout.write(line + '\r\n');
+		}
+		return true;
+	}
+
+	/** /context — 显示当前会话的上下文使用情况 */
+	private showContext(): true {
+		const session = this.sessionMgr.getSession();
+		const meta = session?.meta;
+		const turns = session?.turns ?? [];
+
+		const cols = getTermSize().cols;
+		const w = Math.max(1, cols - 1);
+		process.stdout.write(yellow('Session Context') + '\r\n');
+		process.stdout.write('─'.repeat(w) + '\r\n');
+
+		// 基本信息
+		process.stdout.write(`  Provider:  ${this.config.provider}\r\n`);
+		process.stdout.write(`  Model:     ${this.config.model}\r\n`);
+		process.stdout.write(`  YOLO mode: ${this.yolo ? green('ON') : dim('OFF')}\r\n`);
+		process.stdout.write(`  Session:   ${meta?.id ?? '—'}${meta?.title ? ' "' + dim(meta.title) + '"' : ''}\r\n`);
+		process.stdout.write(`  Turns:     ${meta?.turnCount ?? turns.length}\r\n`);
+
+		// Token 汇总
+		let totalPrompt = 0;
+		let totalCompletion = 0;
+		let totalCacheHit = 0;
+		let totalCacheMiss = 0;
+		for (const t of turns) {
+			if (t.usage) {
+				totalPrompt += t.usage.prompt_tokens;
+				totalCompletion += t.usage.completion_tokens;
+			}
+			if (t.round_usage) {
+				for (const ru of t.round_usage) {
+					totalCacheHit += ru.cache_hit_tokens;
+					totalCacheMiss += ru.cache_miss_tokens;
+				}
+			}
+		}
+		const grandTotal = totalPrompt + totalCompletion;
+		process.stdout.write('  ── Token Usage ──\r\n');
+		process.stdout.write(`  Total:       ${grandTotal.toLocaleString()} tokens (${totalPrompt.toLocaleString()} in + ${totalCompletion.toLocaleString()} out)\r\n`);
+		if (totalCacheHit + totalCacheMiss > 0) {
+			const hitRate = totalCacheHit + totalCacheMiss > 0
+				? ((totalCacheHit / (totalCacheHit + totalCacheMiss)) * 100).toFixed(1)
+				: '0.0';
+			process.stdout.write(`  KV Cache:    ${totalCacheHit.toLocaleString()} hit / ${totalCacheMiss.toLocaleString()} miss (${hitRate}%)\r\n`);
+		}
+
+		// 最后一轮详情
+		const lastUsage = meta?.lastUsage;
+		if (lastUsage && lastUsage.total_tokens > 0) {
+			process.stdout.write(`  Last turn:   ${lastUsage.total_tokens} tokens (${lastUsage.prompt_tokens} in + ${lastUsage.completion_tokens} out)\r\n`);
+		}
+
+		// 累计费用
+		if (meta && meta.totalCost > 0) {
+			process.stdout.write(`  Total cost:  ¥${meta.totalCost.toFixed(4)}\r\n`);
+		}
+
+		return true;
+	}
+
+	/** /yolo — 切换 YOLO 模式 */
+	private async toggleYolo(): Promise<boolean> {
+		this.yolo = !this.yolo;
+		process.stdout.write(
+			green(`[YOLO mode: ${this.yolo ? 'ON' : 'OFF'}]`) +
+			dim(this.yolo ? '  (auto-approve tool executions)' : '  (confirm before tool execution)') +
+			'\r\n',
+		);
 		return true;
 	}
 
