@@ -107,49 +107,98 @@ export const shellTool: Tool = {
 			// 立即关闭 stdin
 			child.stdin?.end();
 
-			let stdoutBuf = '';
-			let stderrBuf = '';
-			let stdoutPartial = '';
-			let stderrPartial = '';
-
 			const emitLine = (stream: 'stdout' | 'stderr', line: string): void => {
 				if (onOutput) {
-					try { onOutput(line, stream); } catch { /* 忽略回调异常，避免影响执行流 */ }
+					try { onOutput(line, stream); } catch { /* 忽略回调异常 */ }
 				}
 			};
 
-			// stdout 流式处理：按行切割，保留最后未完成行
-			child.stdout?.on('data', (chunk: Buffer) => {
-				const text = chunk.toString('utf-8');
-				stdoutBuf += text;
-				stdoutPartial += text;
-				const lines = stdoutPartial.split('\n');
-				// 最后一段可能是不完整的行
-				stdoutPartial = lines.pop() ?? '';
-				for (const line of lines) {
-					emitLine('stdout', line);
+			/**
+			 * 处理流数据：\n 触发发出，\r 合并进度条段，超时兜底。
+			 * @param stream  stdout 或 stderr
+			 * @param text    新到达的数据块
+			 * @param fullBuf 完整缓冲区（收集所有数据）
+			 * @param pending 未完成行暂存
+			 * @param timer   超时定时器引用
+			 */
+			const processChunk = (
+				stream: 'stdout' | 'stderr',
+				text: string,
+				fullBuf: { buf: string },
+				pending: { val: string },
+				timer: { ref: ReturnType<typeof setTimeout> | null },
+			): void => {
+				fullBuf.buf += text;
+				pending.val += text;
+
+				// 按 \n 分割：完整行立即发出
+				const newlineParts = pending.val.split('\n');
+				pending.val = newlineParts.pop() ?? '';
+
+				for (const part of newlineParts) {
+					if (!part) continue;
+					// 段内可能含 \r（进度条中间态）→ 只保留最后一段
+					if (part.includes('\r')) {
+						const crParts = part.split('\r');
+						const last = crParts[crParts.length - 1];
+						if (last) emitLine(stream, last);
+					} else {
+						emitLine(stream, part);
+					}
 				}
+
+				// 重置超时：200ms 无新数据则发出当前暂存行
+				if (timer.ref) clearTimeout(timer.ref);
+				timer.ref = setTimeout(() => {
+					if (pending.val) {
+						// 可能含 \r（进度条未以 \n 结束时）→ 只保留最后一段
+						if (pending.val.includes('\r')) {
+							const crParts = pending.val.split('\r');
+							const last = crParts[crParts.length - 1];
+							if (last) emitLine(stream, last);
+						} else {
+							emitLine(stream, pending.val);
+						}
+						pending.val = '';
+					}
+					timer.ref = null;
+				}, 200);
+			};
+
+			const stdoutFull = { buf: '' };
+			const stderrFull = { buf: '' };
+			const stdoutPend = { val: '' };
+			const stderrPend = { val: '' };
+			const stdoutTmr = { ref: null as ReturnType<typeof setTimeout> | null };
+			const stderrTmr = { ref: null as ReturnType<typeof setTimeout> | null };
+
+			child.stdout?.on('data', (chunk: Buffer) => {
+				processChunk('stdout', chunk.toString('utf-8'), stdoutFull, stdoutPend, stdoutTmr);
 			});
 
-			// stderr 流式处理
 			child.stderr?.on('data', (chunk: Buffer) => {
-				const text = chunk.toString('utf-8');
-				stderrBuf += text;
-				stderrPartial += text;
-				const lines = stderrPartial.split('\n');
-				stderrPartial = lines.pop() ?? '';
-				for (const line of lines) {
-					emitLine('stderr', line);
-				}
+				processChunk('stderr', chunk.toString('utf-8'), stderrFull, stderrPend, stderrTmr);
 			});
 
 			child.on('close', (exitCode: number | null, termSignal: string | null) => {
 				if (settled) return;
 				settled = true;
 
-				// 发出剩余不完整行
-				if (stdoutPartial) emitLine('stdout', stdoutPartial);
-				if (stderrPartial) emitLine('stderr', stderrPartial);
+				// 清除定时器，发出剩余暂存行（\r 合并为最后一段）
+				if (stdoutTmr.ref) { clearTimeout(stdoutTmr.ref); stdoutTmr.ref = null; }
+				if (stderrTmr.ref) { clearTimeout(stderrTmr.ref); stderrTmr.ref = null; }
+				const flushPending = (stream: 'stdout' | 'stderr', p: string): void => {
+					if (!p) return;
+					if (p.includes('\r')) {
+						const parts = p.split('\r');
+						const last = parts[parts.length - 1];
+						if (last) emitLine(stream, last);
+					} else {
+						emitLine(stream, p);
+					}
+				};
+				flushPending('stdout', stdoutPend.val); stdoutPend.val = '';
+				flushPending('stderr', stderrPend.val); stderrPend.val = '';
 
 				const killed = termSignal !== null;
 				const code = exitCode ?? (killed ? -1 : 0);
@@ -157,8 +206,8 @@ export const shellTool: Tool = {
 				const result: ToolResult = {
 					content: [
 						`exit code: ${code}`,
-						stdoutBuf.trim() ? `stdout:\n${truncateOutput(stdoutBuf, TRUNCATE_BYTES)}` : 'stdout: (empty)',
-						stderrBuf.trim() ? `stderr:\n${truncateOutput(stderrBuf, TRUNCATE_BYTES)}` : 'stderr: (empty)',
+						stdoutFull.buf.trim() ? `stdout:\n${truncateOutput(stdoutFull.buf, TRUNCATE_BYTES)}` : 'stdout: (empty)',
+						stderrFull.buf.trim() ? `stderr:\n${truncateOutput(stderrFull.buf, TRUNCATE_BYTES)}` : 'stderr: (empty)',
 						killed ? '(killed by signal)' : '',
 					]
 						.filter(Boolean)
@@ -172,11 +221,14 @@ export const shellTool: Tool = {
 				if (settled) return;
 				settled = true;
 
+				if (stdoutTmr.ref) { clearTimeout(stdoutTmr.ref); stdoutTmr.ref = null; }
+				if (stderrTmr.ref) { clearTimeout(stderrTmr.ref); stderrTmr.ref = null; }
+
 				const result: ToolResult = {
 					content: [
 						`exit code: -1`,
 						`stdout: (empty)`,
-						stderrBuf.trim() ? `stderr:\n${truncateOutput(stderrBuf, TRUNCATE_BYTES)}` : 'stderr: (empty)',
+						stderrFull.buf.trim() ? `stderr:\n${truncateOutput(stderrFull.buf, TRUNCATE_BYTES)}` : 'stderr: (empty)',
 						err.message ? `error: ${err.message}` : '',
 					]
 						.filter(Boolean)
