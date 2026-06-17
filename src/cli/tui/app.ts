@@ -40,6 +40,7 @@ import { AppState } from './types.js';
 import type { TuiConfig } from './types.js';
 import { Selector } from './selector.js';
 import type { SelectOption } from './selector.js';
+import { MarkdownTableRenderer } from './markdown.js';
 import { isInteractiveCommand } from '../../tools/utils.js';
 
 /** 输入框最大可见行数 */
@@ -734,6 +735,9 @@ export class TuiApp {
 			pending = '';
 		};
 
+		// 表格渲染器：检测 markdown 表格块并格式化为 box-drawing
+		const mdRenderer = new MarkdownTableRenderer();
+
 		// 流式期间的数据处理：只处理 Ctrl+C
 		const prevHandler = this.stdinHandler;
 		this.stdinHandler = (data: string) => {
@@ -767,9 +771,10 @@ export class TuiApp {
 								process.stdout.write('\r\n\r\n');
 								contentStarted = true;
 							}
-							pending += event.text ?? '';
-							pendingIsReasoning = false;
-							renderThrottle.run(flush);
+							// 喂入表格渲染器，逐行写出（表格块内部行被暂存，结束时一次性渲染）
+							for (const line of mdRenderer.feed(event.text ?? '')) {
+								process.stdout.write(line + '\r\n');
+							}
 							break;
 						case 'tool_call_start': {
 							flush();
@@ -820,7 +825,10 @@ export class TuiApp {
 							break;
 						case 'done':
 							flush();
-							process.stdout.write('\r\n');
+							// 刷出表格渲染器中暂存的剩余内容
+							for (const line of mdRenderer.flush()) {
+								process.stdout.write(line + '\r\n');
+							}
 							this.printUsage(event);
 							break;
 						case 'error':

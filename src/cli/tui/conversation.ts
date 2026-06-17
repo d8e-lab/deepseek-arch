@@ -9,6 +9,7 @@
 
 import type { TurnRecord, TokenUsage } from '../../types/index.js';
 import { strDisplayWidth, cyan, dim, green, red, renderDiffLine } from './renderer.js';
+import { MarkdownTableRenderer } from './markdown.js';
 
 /** think 最大显示行数 */
 const THINK_MAX_LINES = 4;
@@ -157,10 +158,14 @@ export class ConversationView {
 				lines.push('');
 			}
 
-			// 模型回复（默认颜色）
-			const wrapped = wrapText(turn.assistant.content, termWidth);
-			for (const wline of wrapped) {
-				lines.push(wline);
+			// 模型回复（默认颜色，表格渲染）
+			const mdRenderer = new MarkdownTableRenderer();
+			mdRenderer.feed(turn.assistant.content);
+			const rendered = mdRenderer.flush();
+			for (const rline of rendered) {
+				for (const wline of wrapText(rline, termWidth)) {
+					lines.push(wline);
+				}
 			}
 
 			// 用量信息
