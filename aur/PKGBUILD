@@ -1,0 +1,43 @@
+# Maintainer: helcksun <helcksun@users.noreply.github.com>
+# Contributor: d8e <d8e@users.noreply.github.com>
+
+pkgname=deepseek-arch
+pkgver=1.2.1
+pkgrel=1
+pkgdesc='DeepSeek Terminal Agent — Linux 终端 AI 助手，支持 Agent Loop、Tool Calling、流式输出与持久化存储'
+arch=('any')
+url='https://github.com/d8e-lab/deepseek-arch'
+license=('MIT')
+depends=('nodejs>=18')
+makedepends=('npm')
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+	cd "${srcdir}/${pkgname}-${pkgver}"
+	npm ci
+}
+
+build() {
+	cd "${srcdir}/${pkgname}-${pkgver}"
+	npm run build
+}
+
+package() {
+	cd "${srcdir}/${pkgname}-${pkgver}"
+
+	# 剥离开发依赖（TypeScript、vitest 等不进入运行时）
+	npm prune --production
+
+	local moddir="${pkgdir}/usr/lib/node_modules/${pkgname}"
+	install -dm755 "${moddir}"
+
+	# 仅打包运行时必需的文件
+	cp -r dist node_modules package.json package-lock.json "${moddir}/"
+	cp -r skill "${moddir}/"
+	cp LICENSE README.md "${moddir}/"
+
+	# CLI 入口 symlink
+	install -dm755 "${pkgdir}/usr/bin"
+	ln -s "/usr/lib/node_modules/${pkgname}/dist/cli/index.js" "${pkgdir}/usr/bin/${pkgname}"
+}

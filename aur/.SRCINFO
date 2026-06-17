@@ -1,0 +1,13 @@
+pkgbase = deepseek-arch
+	pkgdesc = DeepSeek Terminal Agent — Linux 终端 AI 助手，支持 Agent Loop、Tool Calling、流式输出与持久化存储
+	pkgver = 1.2.1
+	pkgrel = 1
+	url = https://github.com/d8e-lab/deepseek-arch
+	arch = any
+	license = MIT
+	makedepends = npm
+	depends = nodejs>=18
+	source = deepseek-arch-1.2.1.tar.gz::https://github.com/d8e-lab/deepseek-arch/archive/refs/tags/v1.2.1.tar.gz
+	sha256sums = SKIP
+
+pkgname = deepseek-arch
