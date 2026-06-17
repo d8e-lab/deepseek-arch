@@ -80,14 +80,15 @@ export interface RoundUsage {
 /** 流式事件（SessionManager → ChatUI 回调） */
 export interface StreamEvent {
 	type: 'reasoning_delta' | 'content_delta' | 'done' | 'error'
-		| 'tool_call_delta' | 'tool_call_start' | 'tool_preview' | 'tool_result';
+		| 'tool_call_delta' | 'tool_call_start' | 'tool_preview' | 'tool_result'
+		| 'tool_output';
 	/** 增量文本（reasoning_delta / content_delta / tool_call_delta） */
 	text?: string;
 	/** token 用量（done 事件） */
 	usage?: TokenUsage;
 	/** 错误信息（error 事件） */
 	error?: string;
-	/** tool call ID（tool_call_delta / tool_call_start / tool_preview / tool_result） */
+	/** tool call ID（tool_call_delta / tool_call_start / tool_preview / tool_result / tool_output） */
 	toolCallId?: string;
 	/** tool 名称（tool_call_start / tool_preview） */
 	toolName?: string;
@@ -99,4 +100,7 @@ export interface StreamEvent {
 	toolResult?: string;
 	/** tool 是否被拒绝执行（tool_result） */
 	toolDenied?: boolean;
+	/** tool 实时输出行（tool_output），stream 标识 stdout/stderr */
+	outputLine?: string;
+	outputStream?: 'stdout' | 'stderr';
 }

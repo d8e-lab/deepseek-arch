@@ -41,6 +41,13 @@ export interface Tool {
 	 * 返回 null 表示无预览（session.ts 跳过预览步骤）。
 	 */
 	preview?(params: Record<string, unknown>): Promise<string | null>;
-	/** 执行工具并返回结果。signal 用于外部取消（如 Ctrl+C 中断长时间任务） */
-	execute(params: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult>;
+	/**
+	 * 执行工具并返回结果。signal 用于外部取消（如 Ctrl+C 中断长时间任务）。
+	 * onOutput 可选回调：支持实时推送执行过程中的输出行（如 shell stdout 流式渲染）。
+	 */
+	execute(
+		params: Record<string, unknown>,
+		signal?: AbortSignal,
+		onOutput?: (line: string, stream: 'stdout' | 'stderr') => void,
+	): Promise<ToolResult>;
 }
