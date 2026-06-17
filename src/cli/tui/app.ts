@@ -793,6 +793,17 @@ export class TuiApp {
 							}
 							break;
 						}
+						case 'tool_output': {
+							// 实时 shell 输出：逐行渲染
+							const line = event.outputLine ?? '';
+							const stream = event.outputStream ?? 'stdout';
+							if (stream === 'stderr') {
+								process.stdout.write(yellow(' │ ') + dim(line) + '\r\n');
+							} else {
+								process.stdout.write(cyan(' │ ') + dim(line) + '\r\n');
+							}
+							break;
+						}
 						case 'tool_result':
 							flush();
 							if (event.toolDenied) {
