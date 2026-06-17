@@ -262,7 +262,16 @@ npx esbuild src/index.ts --bundle --platform=node --outfile=dist/bundle.js
 node dist/bundle.js --version
 ```
 
-### 方式四：发布到 npm
+### 方式四：Arch Linux（本地构建）
+
+```bash
+git clone https://github.com/d8e-lab/deepseek-arch.git
+cd deepseek-arch
+./build-pkg.sh                           # 产物在 /tmp/ 下
+sudo pacman -U /tmp/deepseek-arch-*.pkg.tar.zst
+```
+
+### 方式五：发布到 npm
 
 ```bash
 npm run build
