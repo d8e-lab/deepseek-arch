@@ -368,7 +368,19 @@ export class SessionManager {
 						toolError = 'denied';
 					} else if (tool) {
 						try {
-							const r = await tool.execute(args, signal);
+							const r = await tool.execute(
+								args,
+								signal,
+								(line, stream) => {
+									onEvent({
+										type: 'tool_output',
+										toolCallId: tc.id,
+										toolName: tc.function.name,
+										outputLine: line,
+										outputStream: stream,
+									});
+								},
+							);
 							toolResult = r.content;
 							toolError = r.error;
 						} catch (err: unknown) {

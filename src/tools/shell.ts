@@ -10,7 +10,7 @@
  *   6. 返回退出码 + killed 标记
  */
 
-import { exec } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { resolve, relative } from 'node:path';
 import type { Tool, ToolResult } from './types.js';
 import { isInteractiveCommand } from './utils.js';
@@ -48,7 +48,11 @@ export const shellTool: Tool = {
 	},
 	requiresConfirm: true,
 
-	async execute(params: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+	async execute(
+		params: Record<string, unknown>,
+		signal?: AbortSignal,
+		onOutput?: (line: string, stream: 'stdout' | 'stderr') => void,
+	): Promise<ToolResult> {
 		const command = String(params.command ?? '');
 		const cwdParam = params.cwd ? String(params.cwd) : undefined;
 
@@ -94,46 +98,99 @@ export const shellTool: Tool = {
 
 		return new Promise((resolveResult, reject) => {
 			let settled = false;
-			const child = exec(
-				command,
-				{
-					cwd: workDir,
-					timeout: CMD_TIMEOUT_MS,
-					maxBuffer: 10 * 1024 * 1024, // 10MB buffer
-					shell: '/bin/bash',
-				},
-				(error: Error | null, stdout: string, stderr: string) => {
-					if (settled) return;
-					settled = true;
-					const killed = child.killed || (error as any)?.signal !== undefined;
-					const exitCode = (error as any)?.code ?? 0;
+			const child = spawn('/bin/bash', ['-c', command], {
+				cwd: workDir,
+				timeout: CMD_TIMEOUT_MS,
+				stdio: ['pipe', 'pipe', 'pipe'],
+			});
 
-					const result: ToolResult = {
-						content: [
-							`exit code: ${exitCode}`,
-							stdout.trim() ? `stdout:\n${truncateOutput(stdout, TRUNCATE_BYTES)}` : 'stdout: (empty)',
-							stderr.trim() ? `stderr:\n${truncateOutput(stderr, TRUNCATE_BYTES)}` : 'stderr: (empty)',
-							killed ? '(killed by signal)' : '',
-						]
-							.filter(Boolean)
-							.join('\n'),
-					};
-
-					if (killed && !result.content.includes('(killed')) {
-						result.content += '\n(killed by signal)';
-					}
-
-					resolveResult(result);
-				},
-			);
-			// 立即关闭 stdin，防止交互式命令（如 ssh、vim、git commit 无 -m）无限阻塞
+			// 立即关闭 stdin
 			child.stdin?.end();
+
+			let stdoutBuf = '';
+			let stderrBuf = '';
+			let stdoutPartial = '';
+			let stderrPartial = '';
+
+			const emitLine = (stream: 'stdout' | 'stderr', line: string): void => {
+				if (onOutput) {
+					try { onOutput(line, stream); } catch { /* 忽略回调异常，避免影响执行流 */ }
+				}
+			};
+
+			// stdout 流式处理：按行切割，保留最后未完成行
+			child.stdout?.on('data', (chunk: Buffer) => {
+				const text = chunk.toString('utf-8');
+				stdoutBuf += text;
+				stdoutPartial += text;
+				const lines = stdoutPartial.split('\n');
+				// 最后一段可能是不完整的行
+				stdoutPartial = lines.pop() ?? '';
+				for (const line of lines) {
+					emitLine('stdout', line);
+				}
+			});
+
+			// stderr 流式处理
+			child.stderr?.on('data', (chunk: Buffer) => {
+				const text = chunk.toString('utf-8');
+				stderrBuf += text;
+				stderrPartial += text;
+				const lines = stderrPartial.split('\n');
+				stderrPartial = lines.pop() ?? '';
+				for (const line of lines) {
+					emitLine('stderr', line);
+				}
+			});
+
+			child.on('close', (exitCode: number | null, termSignal: string | null) => {
+				if (settled) return;
+				settled = true;
+
+				// 发出剩余不完整行
+				if (stdoutPartial) emitLine('stdout', stdoutPartial);
+				if (stderrPartial) emitLine('stderr', stderrPartial);
+
+				const killed = termSignal !== null;
+				const code = exitCode ?? (killed ? -1 : 0);
+
+				const result: ToolResult = {
+					content: [
+						`exit code: ${code}`,
+						stdoutBuf.trim() ? `stdout:\n${truncateOutput(stdoutBuf, TRUNCATE_BYTES)}` : 'stdout: (empty)',
+						stderrBuf.trim() ? `stderr:\n${truncateOutput(stderrBuf, TRUNCATE_BYTES)}` : 'stderr: (empty)',
+						killed ? '(killed by signal)' : '',
+					]
+						.filter(Boolean)
+						.join('\n'),
+				};
+
+				resolveResult(result);
+			});
+
+			child.on('error', (err: Error) => {
+				if (settled) return;
+				settled = true;
+
+				const result: ToolResult = {
+					content: [
+						`exit code: -1`,
+						`stdout: (empty)`,
+						stderrBuf.trim() ? `stderr:\n${truncateOutput(stderrBuf, TRUNCATE_BYTES)}` : 'stderr: (empty)',
+						err.message ? `error: ${err.message}` : '',
+					]
+						.filter(Boolean)
+						.join('\n'),
+					error: err.message,
+				};
+
+				resolveResult(result);
+			});
 
 			// 监听外部 AbortSignal，终止子进程并 reject
 			if (signal) {
 				const onAbort = () => {
 					child.kill('SIGTERM');
-					// 如果 SIGTERM 无效，1s 后 SIGKILL
 					setTimeout(() => {
 						if (!child.killed) child.kill('SIGKILL');
 					}, 1000);
