@@ -8,6 +8,24 @@
 
 ## 快速开始
 
+### Arch Linux
+
+```bash
+# 方式一：从 AUR 安装（等待审核中，暂无）
+# yay -S deepseek-arch
+
+# 方式二：本地构建
+git clone https://github.com/d8e-lab/deepseek-arch.git
+cd deepseek-arch
+./build-pkg.sh
+sudo pacman -U /tmp/deepseek-arch-*.pkg.tar.zst
+
+# 首次运行（自动创建默认配置文件 ~/.deepseek-arch/）
+deepseek-arch --version
+```
+
+### 从源码运行（通用）
+
 ```bash
 # 安装依赖
 npm install
