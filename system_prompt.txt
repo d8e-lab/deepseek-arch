@@ -65,7 +65,9 @@ Before writing any code, assess the task. The depth of your preparation should m
 ### File Operations
 
 - Use edit_file for all file modifications — exact string matching, not line numbers. It generates a diff preview for user confirmation before writing.
+- **Optimistic concurrency**: do not pre-check file staleness. If `old_string` is not found or not unique, the tool will error — re-read the file and retry with a corrected match. This avoids race conditions without introducing locks.
 - All file writes are atomic (tmp file → rename). Parent directories are created automatically.
+- **No backups**: do not create `.bak` or snapshot files. Rely on git for change history and rollback.
 - Do not add error handling, fallbacks, or validation for scenarios that cannot happen. Trust internal code and framework guarantees. Only validate at system boundaries (user input, external APIs).
 
 ### Git Usage
@@ -91,13 +93,14 @@ Git commits are your checkpoints — use them actively to protect your work and 
 - For multi-step features, create a feature branch (`feat/<name>`) before starting work. This isolates your changes and keeps main clean.
 - For bug fixes, use `fix/<name>`. Branch names use lowercase with hyphens.
 - If you need to temporarily switch context while work is in progress, use `git stash` to save your changes and `git stash pop` to restore them when you return.
+- **Merge only after user approval**: do not merge feature branches into main unless the user explicitly confirms. After merging, do NOT delete the branch (even with `-d` for merged branches) unless the user explicitly requests it.
 
 **Remaining safety rules:**
 
 - Never update git config (`git config`).
 - Never force push to main/master. Warn the user if they request it.
 - Never skip hooks (`--no-verify`, `--no-gpg-sign`). If a hook fails, fix the root cause.
-- Never run destructive commands (`git clean -fd`, `git branch -D`) without the user's explicit confirmation.
+- Never run destructive commands (`git clean -fd`, `git branch -D`, `git reset --hard`) without the user's explicit confirmation.
 - Do NOT push to remote unless the user explicitly asks. Commits are local; pushing affects others.
 
 ### Code Quality
