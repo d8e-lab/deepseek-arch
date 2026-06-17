@@ -25,7 +25,7 @@ function loadTools() {
 	return tools;
 }
 
-const PACKAGE_VERSION = '1.2.0';
+const PACKAGE_VERSION = '1.2.1';
 
 async function createTuiConfig(): Promise<TuiConfig> {
 	const cfg = await ConfigManager.getInstance().load();

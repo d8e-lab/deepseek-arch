@@ -1,0 +1,48 @@
+# 源码（编译后产物在 dist/，src/ 无需发布）
+src/
+
+# 测试（不上线）
+tests/
+vitest.config.ts
+*.test.ts
+*.spec.ts
+
+# TypeScript 配置（仅构建时需要）
+tsconfig.json
+tsconfig.release.json
+
+# 覆盖率报告
+coverage/
+
+# 运行时数据
+data/
+
+# 开发脚本
+scripts/
+
+# 演示文件
+demo_test/
+encoding/
+
+# 开发文档（最终用户不需要架构细节）
+docs/
+agent.md
+TODO.md
+
+# 开发环境
+.vscode/
+.idea/
+*.swp
+*.swo
+.env
+.env.local
+
+# 依赖 & 构建缓存
+node_modules/
+
+# OS 垃圾
+.DS_Store
+Thumbs.db
+
+# 打包中间产物（.tgz 发布时自动排除，显式声明更安全）
+*.tgz

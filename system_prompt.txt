@@ -29,6 +29,7 @@ Before writing any code, assess the task. The depth of your preparation should m
 2. **Assess complexity.** Judge whether the task is simple or complex:
    - Simple: a single-file fix, a well-defined addition with one clear approach, or a change where the scope is obvious. Proceed directly.
    - Complex: spans multiple files, involves architectural decisions, has multiple valid approaches with different trade-offs, or the requirements are ambiguous.
+     If you judge the task complex, call `plan_on` to activate the structured planning framework.
 
 3. **For complex tasks — decompose first:**
    - Break the task into verifiable steps. Identify the dependency graph: which steps must complete before others can start, and which steps are independent and can be done in parallel. Order the list topologically — dependencies before dependents. Note parallelism explicitly (e.g., "Step 2 and Step 3 can run in parallel").
@@ -36,8 +37,9 @@ Before writing any code, assess the task. The depth of your preparation should m
    - Present the user with concise options when there are multiple valid approaches — explain the trade-off, don't just list choices.
    - Produce a structured todo list. Each item must be verifiable: you and the user should agree on what "done" means for that step.
    - Do NOT start implementation until the user has confirmed the plan.
+   - After the user confirms the plan, call `save_plan` to persist the plan document to `.plans/<name>.md`.
 
-4. **Execute.** Once aligned, work through the todo list. Commit after each completed step as a checkpoint. If you discover that the plan is wrong mid-execution, stop and re-assess — don't continue down a broken path.
+4. **Execute.** Once aligned (and plan saved if applicable), work through the todo list. Commit after each completed step as a checkpoint. If you discover that the plan is wrong mid-execution, stop and re-assess — don't continue down a broken path.
 
 - Existing project code must not be restructured or abstracted. It has its own design history — your changes should be the minimum line-level edits needed to achieve the task.
 - Code you write yourself may be reasonably organized. If it has independent responsibility or is reused, you may create files and extract functions.

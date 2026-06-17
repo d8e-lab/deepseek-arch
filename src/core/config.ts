@@ -63,6 +63,36 @@ const DEFAULT_PRICING: PricingConfig = {
 	},
 };
 
+/**
+ * 从项目根 `skill/plan.skill.md` 复制到配置目录下。
+ * 定位方式与 readDefaultSystemPrompt 一致。
+ * 文件已存在时跳过（用户可能自定义了）。
+ */
+async function copyPlanSkill(configDir: string): Promise<void> {
+	const __filename = fileURLToPath(import.meta.url);
+	const __dirname = dirname(__filename);
+	const projectRoot = resolve(__dirname, '..', '..');
+	const srcPath = resolve(projectRoot, 'skill', 'plan.skill.md');
+
+	const destDir = resolve(configDir, 'skill');
+	const destPath = resolve(destDir, 'plan.skill.md');
+
+	try {
+		await access(destPath); // 已存在 → 跳过
+		return;
+	} catch {
+		// 不存在，继续
+	}
+
+	try {
+		const content = await readFile(srcPath, 'utf-8');
+		await mkdir(destDir, { recursive: true, mode: 0o700 });
+		await writeFile(destPath, content, { mode: 0o600 });
+	} catch {
+		// skill 文件不存在于项目目录（如 npm 包剥离了非代码文件）→ 静默跳过
+	}
+}
+
 /** 硬编码兜底——system_prompt.txt 找不到时使用 */
 const FALLBACK_SYSTEM_PROMPT = `Reasoning Effort:
 Absolute maximum with no shortcuts permitted.
@@ -179,6 +209,8 @@ export class ConfigManager {
 				this.resolvePath('system-prompt.toml'),
 				defaultSystemPrompts as unknown as Record<string, unknown>,
 			);
+			// 复制 skill 文件到配置目录（首次运行）
+			await copyPlanSkill(this.configDir);
 			appConfig = DEFAULT_MAIN_CONFIG;
 		}
 

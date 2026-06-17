@@ -12,3 +12,5 @@ export { readFileTool } from './read-file.js';
 export { searchContentTool } from './search-content.js';
 export { writeFileTool } from './write-file.js';
 export { editFileTool } from './edit-file.js';
+export { planOnTool } from './plan.js';
+export { savePlanTool } from './save-plan.js';
