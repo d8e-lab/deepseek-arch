@@ -13,6 +13,7 @@
 import { exec } from 'node:child_process';
 import { resolve, relative } from 'node:path';
 import type { Tool, ToolResult } from './types.js';
+import { isInteractiveCommand } from './utils.js';
 
 /** 单侧输出截断字节数 */
 const TRUNCATE_BYTES = 8192;
@@ -58,6 +59,12 @@ export const shellTool: Tool = {
 		// ── sudo 禁止 ──────────────────────────────
 		if (/\bsudo\b/.test(command)) {
 			return { content: '', error: 'sudo is forbidden' };
+		}
+
+		// ── 交互式命令禁止 ──────────────────────────
+		const interactiveBlocked = isInteractiveCommand(command);
+		if (interactiveBlocked) {
+			return { content: '', error: interactiveBlocked };
 		}
 
 		// ── 工作目录校验 ──────────────────────────

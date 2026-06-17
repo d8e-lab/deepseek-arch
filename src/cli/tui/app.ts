@@ -40,6 +40,7 @@ import { AppState } from './types.js';
 import type { TuiConfig } from './types.js';
 import { Selector } from './selector.js';
 import type { SelectOption } from './selector.js';
+import { isInteractiveCommand } from '../../tools/utils.js';
 
 /** 输入框最大可见行数 */
 const MAX_INPUT_ROWS = 5;
@@ -408,6 +409,13 @@ export class TuiApp {
 
 		// 去掉前导 ! 后执行
 		const shellCmd = cmd.startsWith('!') ? cmd.slice(1).trimStart() : cmd;
+
+		// ── 交互式命令禁止 ──────────────────────────
+		const interactiveBlocked = isInteractiveCommand(shellCmd);
+		if (interactiveBlocked) {
+			process.stdout.write(red(`  Blocked: ${interactiveBlocked}`) + '\r\n');
+			return;
+		}
 
 		let stdout = '';
 		let stderr = '';
