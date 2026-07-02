@@ -25,6 +25,7 @@ class BrowserState {
 	private page: Page | null = null;
 	private downloadDir: string = '';
 	private closed = false;
+	private cleanupRegistered = false;
 
 	/** 获取或创建 Page 实例 */
 	async getPage(): Promise<Page> {
@@ -128,6 +129,9 @@ class BrowserState {
 
 		this.browser = await chromium.launch(launchOptions);
 
+		// 注册进程退出清理（仅一次）
+		this._registerCleanup();
+
 		const contextOptions: Record<string, unknown> = {
 			acceptDownloads: true,
 		};
@@ -144,6 +148,30 @@ class BrowserState {
 			} catch {
 				/* 下载失败静默 */
 			}
+		});
+	}
+	/** 注册进程退出时的清理回调（仅注册一次） */
+	private _registerCleanup(): void {
+		if (this.cleanupRegistered) return;
+		this.cleanupRegistered = true;
+
+		const cleanup = () => {
+			if (instance) {
+				instance.close().catch(() => {});
+			}
+		};
+
+		// 正常退出
+		process.on('exit', cleanup);
+
+		// 信号退出
+		process.on('SIGINT', () => { cleanup(); process.exit(0); });
+		process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+
+		// 未捕获异常
+		process.on('uncaughtException', (err) => {
+			cleanup();
+			throw err;
 		});
 	}
 }

@@ -19,3 +19,4 @@ export { browserSnapshotTool } from './browser-snapshot.js';
 export { browserClickTool } from './browser-click.js';
 export { browserTypeTool } from './browser-type.js';
 export { browserScrollTool } from './browser-scroll.js';
+export { browserNavigateBackTool } from './browser-navigate-back.js';
