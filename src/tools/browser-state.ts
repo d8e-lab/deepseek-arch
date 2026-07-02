@@ -1,0 +1,170 @@
+/**
+ * BrowserState — Playwright 浏览器实例管理单例
+ *
+ * 职责：
+ *   1. 懒加载启动 Chromium（headless 默认，BROWSER_HEADED=1 切换）
+ *   2. 管理单例 browser/context/page
+ *   3. 下载自动保存到会话工作目录
+ *   4. snapshot：ariaSnapshot() → 结构化文本
+ *   5. 进程退出时自动清理
+ */
+
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { resolve, join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+
+/** snapshot 输出限制（字符数） */
+const MAX_SNAPSHOT_CHARS = 8000;
+
+/** 页面导航默认超时 */
+const NAVIGATION_TIMEOUT_MS = 30_000;
+
+class BrowserState {
+	private browser: Browser | null = null;
+	private context: BrowserContext | null = null;
+	private page: Page | null = null;
+	private downloadDir: string = '';
+	private closed = false;
+
+	/** 获取或创建 Page 实例 */
+	async getPage(): Promise<Page> {
+		if (this.closed) {
+			throw new Error('Browser has been closed');
+		}
+		if (this.page && !this.page.isClosed()) {
+			return this.page;
+		}
+		await this.launch();
+		return this.page!;
+	}
+
+	/**
+	 * 构建页面 accessibility snapshot 文本
+	 * 使用 Playwright 内置的 ariaSnapshot()，输出 YAML 风格结构化文本
+	 */
+	async buildSnapshot(): Promise<string> {
+		const page = await this.getPage();
+
+		// 等待页面稳定
+		try {
+			await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+		} catch {
+			/* ignore */
+		}
+
+		const url = page.url();
+		const title = await page.title().catch(() => '');
+
+		let snapshotText = '';
+		try {
+			snapshotText = await page.ariaSnapshot();
+		} catch {
+			snapshotText = '(unable to capture page snapshot)';
+		}
+
+		if (!snapshotText || !snapshotText.trim()) {
+			snapshotText = '(empty page)';
+		}
+
+		// 截断
+		if (snapshotText.length > MAX_SNAPSHOT_CHARS) {
+			snapshotText = snapshotText.slice(0, MAX_SNAPSHOT_CHARS)
+				+ '\n... (truncated, use browser_scroll and browser_snapshot for more content)';
+		}
+
+		return `URL: ${url}\nTitle: ${title}\n\n${snapshotText}`;
+	}
+
+	/** 关闭浏览器并清理资源 */
+	async close(): Promise<void> {
+		this.closed = true;
+		if (this.page) {
+			try { await this.page.close(); } catch { /* ignore */ }
+			this.page = null;
+		}
+		if (this.context) {
+			try { await this.context.close(); } catch { /* ignore */ }
+			this.context = null;
+		}
+		if (this.browser) {
+			try { await this.browser.close(); } catch { /* ignore */ }
+			this.browser = null;
+		}
+	}
+
+	/** 获取下载目录 */
+	getDownloadDir(): string {
+		return this.downloadDir;
+	}
+
+	/** 设置下载目录（切换会话时调用） */
+	setDownloadDir(dir: string): void {
+		this.downloadDir = resolve(dir);
+	}
+
+	// ─── 私有方法 ──────────────────────────────
+
+	private async launch(): Promise<void> {
+		const headed = process.env.BROWSER_HEADED === '1';
+		const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || '';
+
+		// 确保下载目录存在
+		this.downloadDir = process.env.DEEPSEEK_ARCH_SESSION_CWD ?? process.cwd();
+		try { await mkdir(this.downloadDir, { recursive: true }); } catch { /* ignore */ }
+
+		const launchOptions: Record<string, unknown> = {
+			headless: !headed,
+			channel: 'chromium',
+			args: [
+				'--no-sandbox',
+				'--disable-setuid-sandbox',
+				'--disable-dev-shm-usage',
+			],
+		};
+
+		if (proxy) {
+			(launchOptions.args as string[]).push(`--proxy-server=${proxy}`);
+		}
+
+		this.browser = await chromium.launch(launchOptions);
+
+		const contextOptions: Record<string, unknown> = {
+			acceptDownloads: true,
+		};
+
+		this.context = await this.browser.newContext(contextOptions);
+		this.page = await this.context.newPage();
+
+		// 下载处理：保存到会话工作目录
+		this.page.on('download', async (download) => {
+			try {
+				const suggested = download.suggestedFilename();
+				const destPath = join(this.downloadDir, suggested);
+				await download.saveAs(destPath);
+			} catch {
+				/* 下载失败静默 */
+			}
+		});
+	}
+}
+
+/** 单例 */
+let instance: BrowserState | null = null;
+
+/** 获取 BrowserState 单例 */
+export function getBrowserState(): BrowserState {
+	if (!instance) {
+		instance = new BrowserState();
+	}
+	return instance;
+}
+
+/** 重置单例（测试用） */
+export async function resetBrowserState(): Promise<void> {
+	if (instance) {
+		await instance.close();
+		instance = null;
+	}
+}
+
+export { NAVIGATION_TIMEOUT_MS };

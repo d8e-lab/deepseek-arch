@@ -14,3 +14,8 @@ export { writeFileTool } from './write-file.js';
 export { editFileTool } from './edit-file.js';
 export { planOnTool } from './plan.js';
 export { savePlanTool } from './save-plan.js';
+export { browserNavigateTool } from './browser-navigate.js';
+export { browserSnapshotTool } from './browser-snapshot.js';
+export { browserClickTool } from './browser-click.js';
+export { browserTypeTool } from './browser-type.js';
+export { browserScrollTool } from './browser-scroll.js';
