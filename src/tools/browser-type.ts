@@ -2,7 +2,9 @@
  * browser_type — 在输入框中输入文本
  *
  * 通过 placeholder 或 name 定位输入框，填入指定文本。
- * 输入完成后自动获取页面快照。
+ * 输入完成后仅返回确认信息（不自动快照），适合连续填写多个字段。
+ * 填完所有字段后，用 browser_click 点击提交按钮（会自动快照），
+ * 或手动调用 browser_snapshot 查看完整表单状态。
  */
 
 import type { Tool, ToolResult } from './types.js';
@@ -13,7 +15,8 @@ export const browserTypeTool: Tool = {
 	name: 'browser_type',
 	description:
 		'在输入框中输入文本。通过 placeholder（输入框占位文字）或 name（从 browser_snapshot 中获取的标签名）定位输入框。' +
-		'可选指定 role 去歧义。输入完成后自动返回页面快照。',
+		'可选指定 role 去歧义。输入完成后仅返回确认信息，不自动快照——适合连续填写多个字段。' +
+		'填完所有字段后用 browser_click 点击提交按钮（会自动快照）。',
 	parameters: {
 		type: 'object',
 		properties: {
@@ -54,9 +57,8 @@ export const browserTypeTool: Tool = {
 		try {
 			await tryFill(page, text, placeholder, name, role);
 
-			// 自动快照
-			const snapshot = await state.buildSnapshot();
-			return { content: snapshot };
+			const target = placeholder || name || 'input';
+			return { content: `Typed "${text}" into ${target}` };
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			return { content: '', error: `Type failed: ${msg}` };
