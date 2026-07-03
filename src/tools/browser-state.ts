@@ -158,6 +158,12 @@ class BrowserState {
 		const cdpUrl = process.env.BROWSER_CDP || '';
 		if (cdpUrl) {
 			try {
+				// 确保 CDP 连接不走代理
+				const envNoProxy = process.env.NO_PROXY || process.env.no_proxy || '';
+				const cdpHost = new URL(cdpUrl).hostname;
+				if (!envNoProxy.includes(cdpHost)) {
+					process.env.NO_PROXY = [envNoProxy, cdpHost].filter(Boolean).join(',');
+				}
 				this.browser = await chromium.connectOverCDP(cdpUrl);
 				// 创建独立上下文，不干扰用户现有标签
 				this.context = await this.browser.newContext({
@@ -169,7 +175,11 @@ class BrowserState {
 				return;
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				throw new Error(`CDP connection failed (${cdpUrl}): ${msg}`);
+				throw new Error(
+					`CDP connection failed (${cdpUrl}): ${msg}\n` +
+					`Make sure Edge is running with: msedge.exe --remote-debugging-port=${new URL(cdpUrl).port || '9222'}\n` +
+					`And verify the port is reachable from WSL2: curl -s ${cdpUrl}/json/version`
+				);
 			}
 		}
 
