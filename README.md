@@ -184,6 +184,14 @@ src/
 ├── tools/
 │   ├── types.ts            # Tool 接口（name, description, parameters, execute）
 │   ├── shell.ts            # Shell 执行工具
+│   ├── browser-state.ts    # Playwright 浏览器单例管理
+│   ├── browser-navigate.ts # 浏览器导航
+│   ├── browser-snapshot.ts # 页面快照
+│   ├── browser-click.ts    # 点击元素
+│   ├── browser-type.ts     # 输入文本
+│   ├── browser-press-key.ts# 键盘按键
+│   ├── browser-scroll.ts   # 滚动页面
+│   ├── browser-navigate-back.ts # 浏览器后退
 │   └── index.ts            # Barrel file（统一注册所有工具）
 ├── types/
 │   ├── index.ts            # 类型重新导出
@@ -359,6 +367,7 @@ npm publish --access public
 | [docs/cli.md](./docs/cli.md) | CLI 设计 |
 | [docs/types.md](./docs/types.md) | 类型体系设计 |
 | [docs/file-edit-tools.md](./docs/file-edit-tools.md) | 文件修改工具设计（write/edit + diff + 确认流程） |
+| [docs/browser-tools.md](./docs/browser-tools.md) | 浏览器工具设计（工具定义 + 环境变量 + 生命周期） |
 
 ## 更新日志
 
