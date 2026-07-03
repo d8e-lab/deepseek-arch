@@ -33,9 +33,10 @@ class BrowserState {
 		if (this.closed) {
 			throw new Error('Browser has been closed');
 		}
-		if (this.page && !this.page.isClosed()) {
+		if (this.page && !this.page.isClosed() && this.browser?.isConnected()) {
 			return this.page;
 		}
+		// 页面或浏览器已死 → 重新启动
 		await this.launch();
 		return this.page!;
 	}
@@ -137,6 +138,18 @@ class BrowserState {
 	// ─── 私有方法 ──────────────────────────────
 
 	private async launch(): Promise<void> {
+		// 清理已断开的浏览器实例
+		if (this.browser && !this.browser.isConnected()) {
+			try { await this.browser.close(); } catch { /* ignore */ }
+			this.browser = null;
+			this.context = null;
+			this.page = null;
+		}
+		// 如果已有健康的浏览器/页面，跳过
+		if (this.page && !this.page.isClosed()) {
+			return;
+		}
+
 		const headed = process.env.BROWSER_HEADED === '1';
 		const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || '';
 
