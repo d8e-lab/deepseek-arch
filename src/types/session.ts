@@ -17,6 +17,8 @@ export interface SessionMeta {
 	totalCost: number;
 	/** 最后一轮对话的 token 用量（用于退出汇总，无需加载全量 turns） */
 	lastUsage?: TokenUsage;
+	/** 最后一次浏览器访问的 URL（resume 时自动恢复） */
+	lastBrowserUrl?: string;
 }
 
 /** 会话列表项（用于 resume 列表展示） */

@@ -26,6 +26,7 @@ class BrowserState {
 	private downloadDir: string = '';
 	private closed = false;
 	private cleanupRegistered = false;
+	private _lastUrl: string = '';
 
 	/** 获取或创建 Page 实例 */
 	async getPage(): Promise<Page> {
@@ -55,6 +56,11 @@ class BrowserState {
 
 		const url = page.url();
 		const title = await page.title().catch(() => '');
+
+		// 更新追踪的 URL
+		if (url && !url.startsWith('about:')) {
+			this._lastUrl = url;
+		}
 
 		let snapshotText = '';
 		try {
@@ -90,6 +96,31 @@ class BrowserState {
 		if (this.browser) {
 			try { await this.browser.close(); } catch { /* ignore */ }
 			this.browser = null;
+		}
+	}
+
+	/** 获取追踪的最后 URL */
+	getLastUrl(): string {
+		return this._lastUrl;
+	}
+
+	/** 手动设置最后 URL（session resume 后恢复使用） */
+	setLastUrl(url: string): void {
+		this._lastUrl = url;
+	}
+
+	/**
+	 * 恢复浏览器到指定 URL（resume session 时使用）
+	 * 浏览器未启动或 URL 为空时忽略
+	 */
+	async restoreUrl(url: string): Promise<void> {
+		if (!url) return;
+		try {
+			const page = await this.getPage();
+			await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+			this._lastUrl = url;
+		} catch {
+			/* 恢复失败不阻塞 */
 		}
 	}
 

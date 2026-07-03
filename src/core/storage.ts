@@ -217,6 +217,8 @@ export class Storage {
 		agentLoopMessages?: Message[],
 		/** Agent loop 每轮 API 调用的 token 用量，用于缓存命中率监控 */
 		roundUsages?: import('../types/chat.js').RoundUsage[],
+		/** 本轮最后一次浏览器访问的 URL（resume 时自动恢复） */
+		lastBrowserUrl?: string,
 	): Promise<TurnRecord> {
 		// 确保会话目录存在
 		try {
@@ -262,11 +264,15 @@ export class Storage {
 
 		// 更新元数据
 		const totalCost = existingTurns.reduce((sum, t) => sum + t.cost_rmb, 0) + costRmb;
-		await this.updateMeta(sessionId, {
+		const metaPatch: Partial<SessionMeta> = {
 			turnCount: turnNumber,
 			totalCost,
 			lastUsage: usage,
-		});
+		};
+		if (lastBrowserUrl !== undefined) {
+			metaPatch.lastBrowserUrl = lastBrowserUrl;
+		}
+		await this.updateMeta(sessionId, metaPatch);
 
 		return turn as unknown as TurnRecord;
 	}

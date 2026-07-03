@@ -83,7 +83,26 @@ export class SessionManager {
 		if (session.systemPrompt) {
 			this.systemPrompt = { role: 'system', content: session.systemPrompt };
 		}
+
+		// 恢复浏览器到上次访问的 URL（如果浏览器工具可用）
+		this._restoreBrowserUrl(session);
+
 		return session;
+	}
+
+	/**
+	 * 尝试恢复浏览器到上次访问的 URL
+	 * 浏览器工具不可用时静默跳过
+	 */
+	private async _restoreBrowserUrl(session: Session): Promise<void> {
+		if (!session.meta.lastBrowserUrl) return;
+		try {
+			const { getBrowserState } = await import('../tools/browser-state.js');
+			const state = getBrowserState();
+			await state.restoreUrl(session.meta.lastBrowserUrl);
+		} catch {
+			/* 浏览器工具不可用（未安装 playwright），静默跳过 */
+		}
 	}
 
 	/** 获取当前会话 */
@@ -140,6 +159,19 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * 尝试获取浏览器当前 URL（浏览器工具不可用时返回 undefined）
+	 */
+	private async _browserLastUrl(): Promise<string | undefined> {
+		try {
+			const { getBrowserState } = await import('../tools/browser-state.js');
+			const url = getBrowserState().getLastUrl();
+			return url || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	// ─── 消息收发 ─────────────────────────────────
 
 	/**
@@ -179,6 +211,7 @@ export class SessionManager {
 		const costRmb = 0;
 
 		// 持久化 turn JSON
+		const browserUrl = await this._browserLastUrl();
 		const turn = await this.storage.saveTurn(
 			this.session.meta.id,
 			{ role: 'user', content: userContent },
@@ -190,6 +223,11 @@ export class SessionManager {
 			},
 			usage,
 			costRmb,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			browserUrl,
 		);
 
 		// 更新内存中的会话
@@ -469,6 +507,8 @@ export class SessionManager {
 
 			const costRmb = 0; // Phase 7
 
+			const browserUrl = await this._browserLastUrl();
+
 			const turn = await this.storage.saveTurn(
 				this.session.meta.id,
 				{ role: 'user', content: userContent },
@@ -484,6 +524,7 @@ export class SessionManager {
 				toolRecords.length > 0 ? toolRecords : undefined,
 				agentMessages.length > 0 ? agentMessages : undefined,
 				roundUsages.length > 0 ? roundUsages : undefined,
+				browserUrl,
 			);
 
 			// 写入缓存命中率监控日志
@@ -511,6 +552,7 @@ export class SessionManager {
 				};
 
 				try {
+					const browserUrl = await this._browserLastUrl();
 					const turn = await this.storage.saveTurn(
 						this.session.meta.id,
 						{ role: 'user', content: userContent },
@@ -526,6 +568,7 @@ export class SessionManager {
 						toolRecords.length > 0 ? toolRecords : undefined,
 						agentMessages.length > 0 ? agentMessages : undefined,
 						roundUsages.length > 0 ? roundUsages : undefined,
+						browserUrl,
 					);
 
 					this.session.turns.push(turn);
