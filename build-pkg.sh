@@ -9,7 +9,7 @@
 set -euo pipefail
 
 PKGNAME="deepseek-arch"
-PKGVER="1.2.1"
+PKGVER="1.3.0"
 PKGDIR="$(mktemp -d)"
 trap 'rm -rf "$PKGDIR"' EXIT
 
