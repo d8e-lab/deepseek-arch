@@ -8,6 +8,21 @@
 
 核心设计约束：**纯文本模态，无视觉能力**。模型通过 Playwright 的 `ariaSnapshot()` 方法获取页面的结构化文本表示（ARIA 无障碍树），而非截图。
 
+## 安装
+
+浏览器工具需要 Chromium 浏览器：
+
+```bash
+# Arch Linux
+sudo pacman -S chromium
+
+# 源码运行（npm i 后 playwright 自动下载）
+# npx playwright install chromium  # 如需单独安装
+
+# 或不安装浏览器，连接宿主机已有的 Edge/Chrome
+# deepseek-arch chat --cdp http://127.0.0.1:9222
+```
+
 ## 设计原则
 
 ### 1. 纯文本优先

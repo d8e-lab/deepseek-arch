@@ -40,6 +40,27 @@ node dist/cli/index.js --version
 node dist/cli/index.js --help
 ```
 
+### 浏览器工具前置条件
+
+浏览器工具需要 Chromium 浏览器。根据安装方式选择：
+
+```bash
+# Arch Linux（pacman 安装）
+sudo pacman -S chromium
+
+# 源码运行（npm i 后自动下载）
+# Playwright 会自动下载内置 Chromium，无需额外操作
+
+# npm 全局安装（npm install -g）
+npx playwright install chromium
+```
+
+也可以不安装 Chromium，改用 `--cdp` 参数连接到宿主机上已有的 Edge/Chrome：
+
+```bash
+deepseek-arch chat --cdp http://127.0.0.1:9222
+```
+
 ## 功能概览
 
 - **Agent Loop**：模型可自主调用 shell 等工具，工具结果自动送回模型继续对话（最多 25 轮）
