@@ -201,7 +201,29 @@ class BrowserState {
 			(launchOptions.args as string[]).push(`--proxy-server=${proxy}`);
 		}
 
-		this.browser = await chromium.launch(launchOptions);
+		try {
+			this.browser = await chromium.launch(launchOptions);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+
+			// 判断是否是浏览器未安装的典型错误
+			const isMissingBrowser =
+				msg.includes('Executable doesn\'t exist') ||
+				msg.includes('cannot open shared object file') ||
+				msg.includes('Failed to launch browser') ||
+				msg.includes('chromium');
+
+			if (isMissingBrowser) {
+				throw new Error(
+					`Browser launch failed: Chromium is not available.\n` +
+					`  Install system Chromium:    sudo pacman -S chromium\n` +
+					`  Or download Playwright's:   npx playwright install chromium\n` +
+					`  Or connect to host Edge:    set BROWSER_CDP=http://host:9222`
+				);
+			}
+
+			throw new Error(`Browser launch failed: ${msg}`);
+		}
 
 		// 注册进程退出清理（仅一次）
 		this._registerCleanup();

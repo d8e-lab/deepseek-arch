@@ -35,3 +35,6 @@ tar -cJf "/tmp/${PKGNAME}-${PKGVER}-any.pkg.tar.zst" .
 
 echo "==> 完成: /tmp/${PKGNAME}-${PKGVER}-any.pkg.tar.zst"
 echo "    安装: sudo pacman -U /tmp/${PKGNAME}-${PKGVER}-any.pkg.tar.zst"
+echo ""
+echo "==> 浏览器工具需要 Chromium:"
+echo "    sudo pacman -S chromium"

@@ -3,13 +3,15 @@
 
 pkgname=deepseek-arch
 pkgver=1.2.1
-pkgrel=1
-pkgdesc='DeepSeek Terminal Agent — Linux 终端 AI 助手，支持 Agent Loop、Tool Calling、流式输出与持久化存储'
+pkgrel=2
+pkgdesc='DeepSeek Terminal Agent — Linux 终端 AI 助手，支持 Agent Loop、Tool Calling、流式输出、持久化存储与浏览器工具'
 arch=('any')
 url='https://github.com/d8e-lab/deepseek-arch'
 license=('MIT')
 depends=('nodejs>=18')
+optdepends=('chromium: 浏览器工具（Playwright）')
 makedepends=('npm')
+install='aur/deepseek-arch.install'
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
