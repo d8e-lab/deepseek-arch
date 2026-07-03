@@ -80,7 +80,7 @@ chat 命令可用快捷键：
   /model          显示可用模型列表
 
 chat 命令可用参数：
-  --headed        显示浏览器窗口（默认 headless）
+  --browser      显示浏览器窗口（默认 headless）
   --cdp <url>     连接宿主机浏览器（如 --cdp http://127.0.0.1:9222）
 ```
 
@@ -274,17 +274,17 @@ export const xxxTool: Tool = {
 浏览器行为通过 CLI 参数控制：
 
 ```
-deepseek-arch chat --headed                  # 显示浏览器窗口
-deepseek-arch chat --cdp http://host:9222    # 连接宿主机 Edge
-deepseek-arch resume <id> --cdp http://...   # resume 时也可用
+deepseek-arch chat --browser                  # 显示浏览器窗口
+deepseek-arch chat --cdp http://host:9222     # 连接宿主机 Edge
+deepseek-arch resume <id> --cdp http://...    # resume 时也可用
 ```
 
 对应环境变量（不传参数时回退）：
 
 | 变量 | 说明 |
 |------|------|
-| `BROWSER_HEADED=1` | 显示浏览器窗口 |
-| `BROWSER_CDP=http://...` | CDP 连接地址 |
+| `BROWSER_HEADED=1` | 显示浏览器窗口（等价于 `--browser`） |
+| `BROWSER_CDP=http://...` | CDP 连接地址（等价于 `--cdp`） |
 | `https_proxy` | 代理地址（本地启动 Chromium 时生效） |
 
 优先级：CLI 参数 > 环境变量 > 默认值（headless）。

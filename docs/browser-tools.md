@@ -202,13 +202,13 @@ sendMessageStream → agent loop (max 25 rounds)
 
 | 参数 | 说明 |
 |------|------|
-| `--headed` | 显示浏览器窗口（默认 headless） |
+| `--browser` | 显示浏览器窗口（默认 headless） |
 | `--cdp <url>` | 连接宿主机浏览器，如 `--cdp http://127.0.0.1:9222` |
 
 示例：
 
 ```bash
-deepseek-arch chat --headed
+deepseek-arch chat --browser
 deepseek-arch chat --cdp http://127.0.0.1:9222
 deepseek-arch resume <id> --cdp http://172.30.80.1:9222
 ```
@@ -217,8 +217,8 @@ deepseek-arch resume <id> --cdp http://172.30.80.1:9222
 
 | 变量 | 说明 |
 |------|------|
-| `BROWSER_HEADED=1` | 显示浏览器窗口 |
-| `BROWSER_CDP=http://...` | CDP 连接地址 |
+| `BROWSER_HEADED=1` | 显示浏览器窗口（等价于 `--browser`） |
+| `BROWSER_CDP=http://...` | CDP 连接地址（等价于 `--cdp`） |
 | `https_proxy` | 代理地址，本地启动 Chromium 时生效 |
 
 ### CDP 连接（宿主机 Edge）

@@ -78,15 +78,15 @@ program
 	.description('Start a new conversation or resume an existing one')
 	.option('-r, --resume <id>', 'resume a session by ID or name')
 	.option('--yolo', 'skip all tool confirmations (auto-approve edit/shell)')
-	.option('--headed', 'show browser window (instead of headless)')
+	.option('--browser', 'show browser window (instead of headless)')
 	.option('--cdp <url>', 'connect to host browser via CDP (e.g. http://127.0.0.1:9222)')
-	.action(async (options: { resume?: string; yolo?: boolean; headed?: boolean; cdp?: string }) => {
+	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string }) => {
 		try {
 			const tuiConfig = await createTuiConfig();
 
 			// 浏览器配置：CLI 参数优先，无则回退到环境变量
 			configureBrowser({
-				headed: options.headed ?? undefined,
+				headed: options.browser ?? undefined,
 				cdpUrl: options.cdp ?? undefined,
 			});
 
@@ -163,9 +163,9 @@ program
 program
 	.command('resume [id]')
 	.description('List all sessions or resume a specific one')
-	.option('--headed', 'show browser window (instead of headless)')
+	.option('--browser', 'show browser window (instead of headless)')
 	.option('--cdp <url>', 'connect to host browser via CDP')
-	.action(async (id?: string, options?: { headed?: boolean; cdp?: string }) => {
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
@@ -174,7 +174,7 @@ program
 			if (id) {
 				// 浏览器配置
 				configureBrowser({
-					headed: options?.headed ?? undefined,
+					headed: options?.browser ?? undefined,
 					cdpUrl: options?.cdp ?? undefined,
 				});
 				let session = await storage.getSession(id);
