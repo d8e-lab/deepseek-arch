@@ -1,6 +1,6 @@
 # 架构设计
 
-> 最后更新：2026-06-10 · v0.6.0
+> 最后更新：2026-07-03 · v1.2.1
 
 ## 概述
 
@@ -22,9 +22,17 @@ deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ES
 │     + Agent Loop)          │  │  src/tools/               │
 │  sendMessageStream → while │  │  ├── types.ts (Tool接口)  │
 │  循环处理 tool_calls        │  │  ├── shell.ts             │
-│  onConfirm 回调             │  │  └── index.ts (注册)      │
-│  src/core/session.ts       │  └───────────────────────────┘
-└──┬───────────┬──────────┬──┘
+│  onConfirm 回调             │  │  ├── browser-state.ts     │
+│  src/core/session.ts       │  │  ├── browser-navigate.ts  │
+└──┬───────────┬──────────┬──┘  │  ├── browser-snapshot.ts  │
+   │           │          │     │  ├── browser-click.ts     │
+   │           │          │     │  ├── browser-type.ts      │
+   │           │          │     │  ├── browser-scroll.ts    │
+   │           │          │     │  ├── browser-press-key.ts │
+   │           │          │     │  ├── browser-navigate-back│
+   │           │          │     │  ├── index.ts (注册)      │
+   │           │          │     │  └── (8 browser tools)    │
+   │           │          │     └───────────────────────────┘
    │           │          │
 ┌──▼──┐  ┌────▼───┐  ┌──▼──────────────────┐
 │Conf │  │Storage │  │ModelProvider (接口)   │
@@ -51,7 +59,7 @@ deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ES
 | **Types** | `src/types/` | 全部领域类型定义（含 ToolDefinition/ToolCall 等 API 类型） | ✅ |
 | **ApiClient** | `src/core/api.ts` | DeepSeek Chat Completion API，非流式 + SSE 流式，tools 传递 | ✅ |
 | **SessionManager** | `src/core/session.ts` | Facade + Agent Loop + preview→confirm→execute 流程 | ✅ |
-| **Tools** | `src/tools/` | Barrel file 注册，5 个工具（shell/read/search/write/edit） | ✅ |
+| **Tools** | `src/tools/` | Barrel file 注册，13 个工具（shell/read/search/write/edit + 8 个浏览器） | ✅ |
 | **TokenCalculator** | `src/core/token-counter.ts` | 费用计算、缓存命中率 | ❌ Phase 7 |
 
 ## 设计模式

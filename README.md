@@ -46,6 +46,10 @@ node dist/cli/index.js --help
 - **Tool Calling**：barrel file 注册模式，新增工具只需一个文件 + 一行 export
 - **Shell 工具**：模型可直接执行 shell 命令（禁止 sudo，10min 超时），用户 y/N 确认后执行
 - **文件编辑**：edit_file/write_file + diff 预览 + 原子写入 + staleness 检查
+- **浏览器工具**：模型可自主打开网页、浏览内容、点击链接、填写表单、滚动页面、按键盘键，基于 Playwright（纯文本模态，无需视觉能力）
+- **实时预览**：浏览器操作截图通过 HTTP 页面实时展示（VSCode Simple Browser 可打开）
+- **宿主机 Edge 集成**：通过 CDP 连接到 Windows 宿主机 Edge，复用登录态
+- **Session 持久化**：浏览器最后访问的 URL 跨 session 持久化，resume 时自动恢复
 - **流式输出**：SSE 实时增量渲染，ESC/Ctrl+C 中断模型输出
 - **多轮对话**：自动持久化 turn JSON（含 `reasoning_content` 命中 kv-cache + `tool_calls` 记录）
 - **模型切换**：`/model` 命令切换 deepseek-v4-flash / deepseek-v4-pro
@@ -224,6 +228,13 @@ tests/
 | 内容搜索 | `search_content` | 多关键词 OR 搜索，上下文行显示，glob 过滤 |
 | 写入文件 | `write_file` | 创建/覆盖文件，diff 预览后确认，原子写入 |
 | 精确编辑 | `edit_file` | 精确字符串替换（不用行号），唯一性检查，diff 预览后确认 |
+| 导航 | `browser_navigate` | 打开指定 URL，自动返回页面快照 |
+| 后退 | `browser_navigate_back` | 浏览器后退，自动返回页面快照 |
+| 快照 | `browser_snapshot` | 获取当前页面 aria 结构化快照（文本格式） |
+| 点击 | `browser_click` | 通过文本/role 定位并点击元素，自动返回快照 |
+| 输入 | `browser_type` | 通过 placeholder/name 定位输入框并填入文本 |
+| 按键 | `browser_press_key` | 发送键盘指令（Enter/Escape/ArrowDown/Tab 等） |
+| 滚动 | `browser_scroll` | 滚动页面（方向+像素/page），自动返回快照 |
 
 ### 新增工具
 
@@ -245,6 +256,18 @@ export const xxxTool: Tool = {
 ```
 
 **确认机制**：`requiresConfirm: true` 的工具（如 shell）执行前会弹出 `Execute? [y/N]` 确认。拒绝执行后 Agent Loop 立刻终止，控制权交还用户。
+
+### 浏览器环境变量
+
+浏览器工具的行为通过环境变量控制：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BROWSER_HEADED` | 空（headless） | 设为 `1` 弹出 Chromium 窗口（需 WSLg） |
+| `BROWSER_CDP` | 空 | CDP 地址，如 `http://172.30.80.1:9222`（连接宿主机 Edge） |
+| `https_proxy` | 空 | 代理地址，如 `http://172.30.80.1:7890`（本地启动 Chromium 时生效） |
+
+优先级：`BROWSER_CDP` > `BROWSER_HEADED` > 默认 headless。
 
 ---
 
@@ -337,8 +360,32 @@ npm publish --access public
 | [docs/types.md](./docs/types.md) | 类型体系设计 |
 | [docs/file-edit-tools.md](./docs/file-edit-tools.md) | 文件修改工具设计（write/edit + diff + 确认流程） |
 
+## 更新日志
+
+### v1.2.1 (2026-07-03) — 浏览器工具
+
+- **浏览器工具**：新增 8 个浏览器工具（browser_navigate / browser_snapshot / browser_click / browser_type / browser_press_key / browser_scroll / browser_navigate_back）
+- **纯文本模态**：基于 Playwright `ariaSnapshot()`，纯文本即可理解页面，无需视觉能力
+- **CDP 远程连接**：支持 `BROWSER_CDP` 环境变量连接到 Windows 宿主机 Edge，复用登录态
+- **会话持久化**：最后访问的 URL 自动保存，resume 时恢复浏览器到离开时的页面
+- **崩溃恢复**：用户关闭浏览器窗口后，下一工具调用自动重启 Chromium
+- **实时预览**：浏览器操作截图通过 HTTP 页面实时展示
+- **依赖**：新增 Playwright 库
+
+### v1.1.0
+
+- 工具注册改为 barrel file 模式
+- Agent Loop 流式重构
+- 内联 TUI 改造
+
+### v1.0.0
+
+- 初始发布：DeepSeek API 对话、Shell 工具、文件编辑、持久化存储
+
+---
+
 ## 版本
 
 - 作者：helcksun
-- 当前版本：v1.1.0
+- 当前版本：v1.2.1
 - 许可证：MIT
