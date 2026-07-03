@@ -78,6 +78,10 @@ chat 命令可用快捷键：
   /exit           退出
   /model <name>   切换模型（deepseek-v4-flash | deepseek-v4-pro）
   /model          显示可用模型列表
+
+chat 命令可用参数：
+  --headed        显示浏览器窗口（默认 headless）
+  --cdp <url>     连接宿主机浏览器（如 --cdp http://127.0.0.1:9222）
 ```
 
 ## 配置
@@ -265,17 +269,25 @@ export const xxxTool: Tool = {
 
 **确认机制**：`requiresConfirm: true` 的工具（如 shell）执行前会弹出 `Execute? [y/N]` 确认。拒绝执行后 Agent Loop 立刻终止，控制权交还用户。
 
-### 浏览器环境变量
+### 浏览器配置
 
-浏览器工具的行为通过环境变量控制：
+浏览器行为通过 CLI 参数控制：
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `BROWSER_HEADED` | 空（headless） | 设为 `1` 弹出 Chromium 窗口（需 WSLg） |
-| `BROWSER_CDP` | 空 | CDP 地址，如 `http://172.30.80.1:9222`（连接宿主机 Edge） |
-| `https_proxy` | 空 | 代理地址，如 `http://172.30.80.1:7890`（本地启动 Chromium 时生效） |
+```
+deepseek-arch chat --headed                  # 显示浏览器窗口
+deepseek-arch chat --cdp http://host:9222    # 连接宿主机 Edge
+deepseek-arch resume <id> --cdp http://...   # resume 时也可用
+```
 
-优先级：`BROWSER_CDP` > `BROWSER_HEADED` > 默认 headless。
+对应环境变量（不传参数时回退）：
+
+| 变量 | 说明 |
+|------|------|
+| `BROWSER_HEADED=1` | 显示浏览器窗口 |
+| `BROWSER_CDP=http://...` | CDP 连接地址 |
+| `https_proxy` | 代理地址（本地启动 Chromium 时生效） |
+
+优先级：CLI 参数 > 环境变量 > 默认值（headless）。
 
 ---
 

@@ -196,15 +196,30 @@ sendMessageStream → agent loop (max 25 rounds)
 
 ---
 
-## 环境变量
+## CLI 参数
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `BROWSER_HEADED` | 空（headless） | 设为 `1` 弹出 Chromium 窗口（需 WSLg） |
-| `BROWSER_CDP` | 空 | CDP 地址，如 `http://172.30.80.1:9222` |
-| `https_proxy` | 空 | 代理地址，本地启动 Chromium 时生效 |
+浏览器行为通过 CLI 参数控制，优先级高于环境变量：
 
-优先级：`BROWSER_CDP` > `BROWSER_HEADED` > 默认 headless。
+| 参数 | 说明 |
+|------|------|
+| `--headed` | 显示浏览器窗口（默认 headless） |
+| `--cdp <url>` | 连接宿主机浏览器，如 `--cdp http://127.0.0.1:9222` |
+
+示例：
+
+```bash
+deepseek-arch chat --headed
+deepseek-arch chat --cdp http://127.0.0.1:9222
+deepseek-arch resume <id> --cdp http://172.30.80.1:9222
+```
+
+对应环境变量（不传参数时回退）：
+
+| 变量 | 说明 |
+|------|------|
+| `BROWSER_HEADED=1` | 显示浏览器窗口 |
+| `BROWSER_CDP=http://...` | CDP 连接地址 |
+| `https_proxy` | 代理地址，本地启动 Chromium 时生效 |
 
 ### CDP 连接（宿主机 Edge）
 

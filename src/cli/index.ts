@@ -18,6 +18,7 @@ import { TuiApp } from './tui/app.js';
 import type { TuiConfig } from './tui/types.js';
 import * as toolModules from '../tools/index.js';
 import { buildSystemPromptContext } from '../core/system-info.js';
+import { configureBrowser } from '../tools/browser-state.js';
 
 /** 从 barrel file 获取所有已注册的工具 */
 function loadTools() {
@@ -77,9 +78,17 @@ program
 	.description('Start a new conversation or resume an existing one')
 	.option('-r, --resume <id>', 'resume a session by ID or name')
 	.option('--yolo', 'skip all tool confirmations (auto-approve edit/shell)')
-	.action(async (options: { resume?: string; yolo?: boolean }) => {
+	.option('--headed', 'show browser window (instead of headless)')
+	.option('--cdp <url>', 'connect to host browser via CDP (e.g. http://127.0.0.1:9222)')
+	.action(async (options: { resume?: string; yolo?: boolean; headed?: boolean; cdp?: string }) => {
 		try {
 			const tuiConfig = await createTuiConfig();
+
+			// 浏览器配置：CLI 参数优先，无则回退到环境变量
+			configureBrowser({
+				headed: options.headed ?? undefined,
+				cdpUrl: options.cdp ?? undefined,
+			});
 
 			if (!tuiConfig.apiKey) {
 				console.error('Error: api_key not configured.');
@@ -154,14 +163,20 @@ program
 program
 	.command('resume [id]')
 	.description('List all sessions or resume a specific one')
-	.action(async (id?: string) => {
+	.option('--headed', 'show browser window (instead of headless)')
+	.option('--cdp <url>', 'connect to host browser via CDP')
+	.action(async (id?: string, options?: { headed?: boolean; cdp?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
 			const storage = new Storage(sessionsDir);
 
 			if (id) {
-				// 按 ID 或名称恢复
+				// 浏览器配置
+				configureBrowser({
+					headed: options?.headed ?? undefined,
+					cdpUrl: options?.cdp ?? undefined,
+				});
 				let session = await storage.getSession(id);
 				if (!session) {
 					session = await storage.getSessionByName(id);

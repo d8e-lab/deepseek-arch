@@ -19,6 +19,20 @@ const MAX_SNAPSHOT_CHARS = 8000;
 /** 页面导航默认超时 */
 const NAVIGATION_TIMEOUT_MS = 30_000;
 
+/** 浏览器配置（可由 CLI 参数设置，优先于环境变量） */
+export interface BrowserConfig {
+	headed?: boolean;
+	cdpUrl?: string;
+}
+
+/** 存储的浏览器配置 */
+let browserConfig: BrowserConfig | null = null;
+
+/** 设置浏览器配置（在首次调用前调用） */
+export function configureBrowser(config: BrowserConfig): void {
+	browserConfig = config;
+}
+
 class BrowserState {
 	private browser: Browser | null = null;
 	private context: BrowserContext | null = null;
@@ -155,7 +169,7 @@ class BrowserState {
 		try { await mkdir(this.downloadDir, { recursive: true }); } catch { /* ignore */ }
 
 		// ── 模式 A: CDP 远程连接（如宿主机的 Edge） ─────────
-		const cdpUrl = process.env.BROWSER_CDP || '';
+		const cdpUrl = browserConfig?.cdpUrl || process.env.BROWSER_CDP || '';
 		if (cdpUrl) {
 			try {
 				// 确保 CDP 连接不走代理
@@ -184,7 +198,7 @@ class BrowserState {
 		}
 
 		// ── 模式 B: 本地启动 Chromium ───────────────────
-		const headed = process.env.BROWSER_HEADED === '1';
+		const headed = browserConfig?.headed ?? process.env.BROWSER_HEADED === '1';
 		const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || '';
 
 		const launchOptions: Record<string, unknown> = {
