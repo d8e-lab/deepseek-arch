@@ -150,12 +150,32 @@ class BrowserState {
 			return;
 		}
 
-		const headed = process.env.BROWSER_HEADED === '1';
-		const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || '';
-
 		// 确保下载目录存在
 		this.downloadDir = process.env.DEEPSEEK_ARCH_SESSION_CWD ?? process.cwd();
 		try { await mkdir(this.downloadDir, { recursive: true }); } catch { /* ignore */ }
+
+		// ── 模式 A: CDP 远程连接（如宿主机的 Edge） ─────────
+		const cdpUrl = process.env.BROWSER_CDP || '';
+		if (cdpUrl) {
+			try {
+				this.browser = await chromium.connectOverCDP(cdpUrl);
+				// 创建独立上下文，不干扰用户现有标签
+				this.context = await this.browser.newContext({
+					acceptDownloads: true,
+					viewport: { width: 1280, height: 720 },
+				});
+				this.page = await this.context.newPage();
+				this._registerCleanup();
+				return;
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				throw new Error(`CDP connection failed (${cdpUrl}): ${msg}`);
+			}
+		}
+
+		// ── 模式 B: 本地启动 Chromium ───────────────────
+		const headed = process.env.BROWSER_HEADED === '1';
+		const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || '';
 
 		const launchOptions: Record<string, unknown> = {
 			headless: !headed,
