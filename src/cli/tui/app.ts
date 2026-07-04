@@ -58,6 +58,7 @@ export class TuiApp {
 	private configMgr: ConfigManager | null;
 	private tools: Tool[];
 	private yolo: boolean;
+	private reviewModel?: string;
 	private conversation: ConversationView;
 	private input: InputEditor;
 	private state: AppState = AppState.IDLE;
@@ -78,6 +79,7 @@ export class TuiApp {
 		this.configMgr = configMgr ?? null;
 		this.tools = tools ?? [];
 		this.yolo = yolo ?? false;
+		this.reviewModel = config.reviewModel;
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
 	}
@@ -835,6 +837,22 @@ export class TuiApp {
 								}
 							}
 							break;
+						case 'review_verdict': {
+							flush();
+							const v = event.verdict ?? 'completed';
+							const r = event.reviewReason ?? '';
+							if (event.autoContinue) {
+								process.stdout.write(dim(`\r\n[审查: ${v}] ${r}\r\n`));
+								process.stdout.write(dim('[审查: 自动续期继续执行...]\r\n'));
+								// 重置 reasoning/content 追踪，使续期后的输出独立渲染
+								reasoningStarted = false;
+								contentStarted = false;
+								reasoningEndsWithNewline = true;
+							} else if (v === 'asking_user') {
+								process.stdout.write(dim(`\r\n[审查: 模型在询问用户，等待输入]\r\n`));
+							}
+							break;
+						}
 						case 'done':
 							flush();
 							// 刷出表格渲染器中暂存的剩余内容
@@ -854,6 +872,7 @@ export class TuiApp {
 				this.tools.length > 0 && !this.yolo
 					? (toolName, params) => this.requestToolConfirm(toolName, params)
 					: undefined,
+				this.yolo ? this.reviewModel : undefined,
 			);
 		} catch (err: any) {
 			if (err?.name === 'AbortError') {

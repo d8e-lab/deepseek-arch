@@ -15,6 +15,7 @@ import { Storage } from './storage.js';
 import type { ModelProvider } from './model-provider.js';
 import { yieldEventLoop } from '../utils/event-loop.js';
 import { appendCacheLog } from './cache-log.js';
+import { reviewConversation } from './reviewer.js';
 import type {
 	Message,
 	Session,
@@ -26,6 +27,7 @@ import type {
 	StreamEvent,
 	ToolDefinition,
 	RoundUsage,
+	ReviewVerdict,
 } from '../types/index.js';
 
 // Re-export for backward compatibility (chat-ui.ts imports from here)
@@ -254,6 +256,7 @@ export class SessionManager {
 		onEvent: (event: StreamEvent) => void,
 		signal?: AbortSignal,
 		onConfirm?: (toolName: string, params: Record<string, unknown>) => Promise<boolean>,
+		reviewModelName?: string,
 	): Promise<TurnRecord | null> {
 		if (!this.session) {
 			throw new Error('未创建会话——请先调用 startNewSession() 或 resumeSession()');
@@ -272,6 +275,9 @@ export class SessionManager {
 		const agentMessages: Message[] = [];
 		/** 每轮 API 调用的 token 用量（用于监控缓存命中率） */
 		const roundUsages: RoundUsage[] = [];
+		/** 审查自动续期计数（防无限循环） */
+		let autoContinueCount = 0;
+		const MAX_AUTO_CONTINUE = 3;
 
 		try {
 			// ── Agent Loop ──────────────────────────
@@ -342,6 +348,49 @@ export class SessionManager {
 						content: roundContent,
 						reasoning_content: roundReasoning || undefined,
 					});
+
+					// ── YOLO 审查：检查模型回复是否需要自动继续 ──────
+					if (reviewModelName && autoContinueCount < MAX_AUTO_CONTINUE) {
+						// 从会话历史收集最近用户输入（含当前轮）
+						const pastInputs = this.session!.turns
+							.slice(-(MAX_AUTO_CONTINUE + 1))
+							.map(t => t.user.content);
+						const recentInputs = [...pastInputs, userContent].slice(-5);
+
+						const { verdict, reason } = await reviewConversation(
+							recentInputs,
+							roundContent,
+							this.provider,
+							reviewModelName,
+						);
+
+						if (verdict === 'stalled' || verdict === 'deflecting') {
+							autoContinueCount++;
+							const prompt = verdict === 'stalled'
+								? '[auto-continue] 任务未完成，请继续执行。直接完成剩余操作，使用所需的工具，完成后给出总结。'
+								: '[auto-continue] 请直接使用工具执行所需命令来完成任务。不要将操作推给用户，你有 shell、文件编辑等工具可用。';
+
+							agentMessages.push({ role: 'user', content: prompt });
+
+							onEvent({
+								type: 'review_verdict',
+								verdict,
+								reviewReason: reason,
+								autoContinue: true,
+							});
+
+							continue; // agent loop 继续
+						}
+
+						// asking_user 或 completed：通知 UI 后正常结束
+						onEvent({
+							type: 'review_verdict',
+							verdict,
+							reviewReason: reason,
+							autoContinue: false,
+						});
+					}
+
 					break;
 				}
 
