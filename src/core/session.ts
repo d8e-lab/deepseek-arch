@@ -367,8 +367,8 @@ export class SessionManager {
 						if (verdict === 'stalled' || verdict === 'deflecting') {
 							autoContinueCount++;
 							const prompt = verdict === 'stalled'
-								? '[auto-continue] 任务未完成，请继续执行。直接完成剩余操作，使用所需的工具，完成后给出总结。'
-								: '[auto-continue] 请直接使用工具执行所需命令来完成任务。不要将操作推给用户，你有 shell、文件编辑等工具可用。';
+								? '[auto-continue] 任务未完成，请继续执行。直接完成剩余操作，使用所需的工具。如果任务已完成，请输出完成情况说明。'
+								: '[auto-continue] 请直接使用工具执行所需命令来完成任务。不要将操作推给用户，你有 shell、文件编辑等工具可用。任务完成后请输出完成情况说明。';
 
 							agentMessages.push({ role: 'user', content: prompt });
 
