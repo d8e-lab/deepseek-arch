@@ -1,40 +1,20 @@
 #!/bin/bash
-# build-pkg.sh — 本地构建 Arch Linux 包
-# 在 git 仓库根目录运行即可。
-# 依赖: base-devel, nodejs, npm
+# build-pkg.sh — 使用 makepkg 构建 Arch Linux 包（遵循 ABS 规范）
 #
-# 用法: ./build-pkg.sh
-# 产物: /tmp/deepseek-arch-*.pkg.tar.zst
+# 前置条件: base-devel, nodejs, npm
+#
+# 用法:
+#   ./build-pkg.sh            # 构建包（产物在当前目录）
+#   ./build-pkg.sh -i         # 构建并安装
+#   ./build-pkg.sh -c         # 干净构建后清理
+#
+# 推荐使用 devtools 在干净 chroot 中构建:
+#   cd aur && extra-x86_64-build
 
 set -euo pipefail
 
-PKGNAME="deepseek-arch"
-PKGVER="1.3.0"
-PKGDIR="$(mktemp -d)"
-trap 'rm -rf "$PKGDIR"' EXIT
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}/aur"
 
-echo "==> 安装依赖 & 编译..."
-npm ci
-npm run build
-npm prune --production
-
-echo "==> 打包运行时文件..."
-MODDIR="${PKGDIR}/usr/lib/node_modules/${PKGNAME}"
-install -dm755 "$MODDIR"
-
-cp -r dist node_modules package.json package-lock.json "$MODDIR/"
-cp -r skill "$MODDIR/"
-cp LICENSE README.md "$MODDIR/"
-
-install -dm755 "${PKGDIR}/usr/bin"
-ln -s "/usr/lib/node_modules/${PKGNAME}/dist/cli/index.js" "${PKGDIR}/usr/bin/${PKGNAME}"
-
-echo "==> 构建 .pkg.tar.zst..."
-cd "$PKGDIR"
-tar -cJf "/tmp/${PKGNAME}-${PKGVER}-any.pkg.tar.zst" .
-
-echo "==> 完成: /tmp/${PKGNAME}-${PKGVER}-any.pkg.tar.zst"
-echo "    安装: sudo pacman -U /tmp/${PKGNAME}-${PKGVER}-any.pkg.tar.zst"
-echo ""
-echo "==> 浏览器工具需要 Chromium:"
-echo "    sudo pacman -S chromium"
+# 传递参数给 makepkg（默认 -s 安装依赖，-f 强制重建）
+exec makepkg -sf "$@"

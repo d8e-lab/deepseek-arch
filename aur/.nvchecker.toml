@@ -1,0 +1,4 @@
+[deepseek-arch]
+source = "github"
+github = "d8e-lab/deepseek-arch"
+use_latest_release = true

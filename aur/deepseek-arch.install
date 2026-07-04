@@ -1,7 +1,11 @@
 post_install() {
 	echo ""
-	echo "==> deepseek-arch 浏览器工具需要 Chromium"
-	echo "    安装: sudo pacman -S chromium"
-	echo "    或连接宿主机 Edge: BROWSER_CDP=http://host:9222 deepseek-arch chat"
+	echo "==> Optional dependencies for full functionality:"
+	echo "    chromium:  sudo pacman -S chromium        # browser tools"
+	echo "    git:       sudo pacman -S git             # version control"
+	echo "    ripgrep:   sudo pacman -S ripgrep         # faster file search"
+	echo ""
+	echo "==> Or connect to host Edge browser via CDP:"
+	echo "    BROWSER_CDP=http://host:9222 deepseek-arch chat"
 	echo ""
 }

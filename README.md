@@ -11,14 +11,20 @@
 ### Arch Linux
 
 ```bash
-# 方式一：从 AUR 安装（等待审核中，暂无）
+# 方式一：从 AUR 安装（审核通过后可用）
 # yay -S deepseek-arch
 
-# 方式二：本地构建
+# 方式二：makepkg 本地构建
 git clone https://github.com/d8e-lab/deepseek-arch.git
-cd deepseek-arch
-./build-pkg.sh
-sudo pacman -U /tmp/deepseek-arch-*.pkg.tar.zst
+cd deepseek-arch/aur
+makepkg -si
+
+# 方式三：干净 chroot 构建（推荐，隔离系统环境）
+cd aur
+extra-x86_64-build
+
+# 可选依赖（增强功能）
+sudo pacman -S chromium git ripgrep
 
 # 首次运行（自动创建默认配置文件 ~/.deepseek-arch/）
 deepseek-arch --version
@@ -60,6 +66,14 @@ npx playwright install chromium
 ```bash
 deepseek-arch chat --cdp http://127.0.0.1:9222
 ```
+
+### 可选依赖
+
+| 包 | 用途 | 安装 |
+|---|------|------|
+| chromium | 浏览器工具（Playwright） | `sudo pacman -S chromium` |
+| git | 版本控制集成 | `sudo pacman -S git` |
+| ripgrep | 增强文件搜索 | `sudo pacman -S ripgrep` |
 
 ## 功能概览
 
@@ -347,11 +361,30 @@ node dist/bundle.js --version
 ### 方式四：Arch Linux（本地构建）
 
 ```bash
+# 直接构建安装
 git clone https://github.com/d8e-lab/deepseek-arch.git
-cd deepseek-arch
-./build-pkg.sh                           # 产物在 /tmp/ 下
-sudo pacman -U /tmp/deepseek-arch-*.pkg.tar.zst
+cd deepseek-arch/aur
+makepkg -si
+
+# 干净 chroot 构建（推荐，确保可复现）
+cd aur
+extra-x86_64-build
+
+# 或用项目脚本
+./build-pkg.sh -i
 ```
+
+**依赖一览**：
+
+| 类型 | 包 | 说明 |
+|------|----|------|
+| 运行时 | `nodejs>=18` | Node.js 运行时 |
+| 构建 | 无 | 预编译 tarball，零 `makedepends` |
+| 可选 | `chromium` | 浏览器工具 |
+| 可选 | `git` | 版本控制 |
+| 可选 | `ripgrep` | 增强搜索 |
+
+**版本跟踪**：`aur/.nvchecker.toml` 配置了 GitHub Release 自动检测，运行 `nvchecker -c aur/.nvchecker.toml` 可检查更新。
 
 ### 方式五：发布到 npm
 
@@ -366,10 +399,13 @@ npm publish --access public
 
 - [ ] 更新 `package.json` 版本号
 - [ ] 更新 `src/cli/index.ts` 中的 `VERSION` / `RELEASE_DATE` 常量
+- [ ] 更新 `aur/PKGBUILD` 中的 `pkgver` 和 `pkgrel`
 - [ ] 全量测试通过：`npm test`
-- [ ] 覆盖率达标：`npm run test:coverage`
-- [ ] `chat-ui` 测试策略已确认：见 [docs/chat-ui-testing.md](./docs/chat-ui-testing.md)
+- [ ] 生成预编译 tarball：`./scripts/build-prebuilt-tarball.sh`
+- [ ] 把输出的 sha256 填入 `aur/PKGBUILD` 的 `sha256sums`
+- [ ] 运行 `cd aur && makepkg --printsrcinfo > .SRCINFO` 更新元信息
 - [ ] `git tag vX.Y.Z` 并推送
+- [ ] 上传预编译 tarball 到 GitHub Release
 
 ---
 
@@ -429,5 +465,5 @@ npm publish --access public
 ## 版本
 
 - 作者：helcksun
-- 当前版本：v1.2.1
+- 当前版本：v1.3.0
 - 许可证：MIT
