@@ -724,6 +724,8 @@ export class TuiApp {
 
 		let reasoningStarted = false;
 		let contentStarted = false;
+		/** 追踪 reasoning 末尾是否有换行，用于 reasoning→content 过渡时决定是否加 \r\n */
+		let reasoningEndsWithNewline = true;
 
 		// 流式输出节流：累积 delta，30fps 批量写出
 		const renderThrottle = new Throttle(30);
@@ -757,7 +759,10 @@ export class TuiApp {
 								pending += '[Think] ';
 								reasoningStarted = true;
 							}
-							pending += event.text ?? '';
+							if (event.text) {
+								pending += event.text;
+								reasoningEndsWithNewline = event.text.endsWith('\n');
+							}
 							pendingIsReasoning = true;
 							renderThrottle.run(flush);
 							break;
@@ -765,6 +770,9 @@ export class TuiApp {
 							this.setState(AppState.STREAMING);
 							if (reasoningStarted && !contentStarted) {
 								flush(); // reasoning → content 过渡，写出剩余 reasoning
+								if (!reasoningEndsWithNewline) {
+									process.stdout.write('\r\n');
+								}
 								contentStarted = true;
 							}
 							if (!contentStarted && !reasoningStarted) {
@@ -778,6 +786,10 @@ export class TuiApp {
 							break;
 						case 'tool_call_start': {
 							flush();
+							// 重置 reasoning/content 追踪，使下一轮 agent loop 独立处理
+							reasoningStarted = false;
+							contentStarted = false;
+							reasoningEndsWithNewline = true;
 							const shortName = (event.toolName ?? '?').replace('execute_', '');
 							process.stdout.write(
 								cyan(`\r\n[T: ${shortName}] `) + dim(JSON.stringify(event.toolArgs ?? {})) + '\r\n',
