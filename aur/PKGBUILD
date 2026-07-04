@@ -36,7 +36,7 @@ package() {
 	cat > "${pkgdir}/usr/bin/${pkgname}" << 'EOF'
 #!/bin/sh
 export NODE_ENV=production
-exec /usr/lib/node_modules/deepseek-arch/dist/cli/index.js "$@"
+exec node /usr/lib/node_modules/deepseek-arch/dist/cli/index.js "$@"
 EOF
 	chmod 755 "${pkgdir}/usr/bin/${pkgname}"
 }
