@@ -18,7 +18,7 @@ optdepends=(
 )
 install="${pkgname}.install"
 source=("${pkgname}-${pkgver}-prebuilt.tar.gz::${url}/releases/download/v${pkgver}/${pkgname}-${pkgver}-prebuilt.tar.gz")
-sha256sums=('9da3398a16fc9c6844f9c3e4f092ce75ae7ff9486c63fb7d17f1e28e02e394fc')
+sha256sums=('3847014e968582e17bb77b0f5697b26795f8a89bd03c808570367222d2ca405a')
 
 package() {
 	cd "${srcdir}"
