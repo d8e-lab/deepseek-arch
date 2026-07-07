@@ -826,6 +826,11 @@ export class TuiApp {
 							if (event.toolDenied) {
 								process.stdout.write(red('\r\n[Denied]\r\n'));
 							} else {
+								// 显示错误信息（如果有）
+								if (event.error) {
+									process.stdout.write(red(' ✖ ') + event.error.split('\n')[0] + '\r\n');
+								}
+								// 显示工具执行结果内容
 								const lines = (event.toolResult ?? '').split('\n').slice(0, 12);
 								for (const line of lines) {
 									process.stdout.write(cyan(' │ ') + dim(line) + '\r\n');

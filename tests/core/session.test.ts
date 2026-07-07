@@ -12,6 +12,7 @@ import { Storage } from '../../src/core/storage.js';
 import type { ModelProvider } from '../../src/core/model-provider.js';
 import { SessionManager, type StreamEvent } from '../../src/core/session.js';
 import type { Message, ChatCompletionResponse, StreamChunk, TokenUsage } from '../../src/types/index.js';
+import type { Tool, ToolResult } from '../../src/tools/types.js';
 
 /** 构建标准成功响应 */
 function makeResponse(
@@ -365,6 +366,106 @@ describe('SessionManager', () => {
       // 需要给 chatStream 添加一个空的 setSystemPrompt，但不用
       const mgr = new SessionManager(storage, streamClient as any);
       await expect(mgr.sendMessageStream('test', () => {})).rejects.toThrow('未创建会话');
+    });
+
+    it('工具返回 error 时，错误信息被送回模型下一轮', async () => {
+      // 工具：总是返回错误
+      const errorTool: Tool = {
+        name: 'test_error_tool',
+        description: 'a tool that always errors',
+        parameters: { type: 'object', properties: {}, required: [] },
+        requiresConfirm: false,
+        async execute(): Promise<ToolResult> {
+          return { content: 'partial result', error: 'Something went wrong' };
+        },
+      };
+
+      // 第一轮：模型调用工具 → 工具返回错误 → 第二轮：模型看到错误并回复
+      let round = 0;
+      let capturedMessages: Message[] = [];
+
+      async function* twoRoundStream(
+        messages: Message[],
+        _options?: any,
+      ): AsyncGenerator<StreamChunk> {
+        if (round === 0) {
+          // 第一轮：返回 tool_call
+          round++;
+          yield {
+            id: 'call-1',
+            object: 'chat.completion.chunk',
+            created: 123,
+            model: 'test',
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: 'call_abc123',
+                  type: 'function',
+                  function: { name: 'test_error_tool', arguments: '{}' },
+                }],
+              },
+              finish_reason: null,
+            }],
+          };
+          yield {
+            id: 'call-1',
+            object: 'chat.completion.chunk',
+            created: 123,
+            model: 'test',
+            choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          };
+        } else {
+          // 第二轮：模型看到了工具错误回复
+          capturedMessages = messages;
+          yield {
+            id: 'call-2',
+            object: 'chat.completion.chunk',
+            created: 123,
+            model: 'test',
+            choices: [{ index: 0, delta: { content: 'I see the error, will retry.' }, finish_reason: null }],
+          };
+          yield {
+            id: 'call-2',
+            object: 'chat.completion.chunk',
+            created: 123,
+            model: 'test',
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+          };
+        }
+      }
+
+      const streamClient = { chatStream: twoRoundStream } as unknown as ModelProvider;
+      const mgr = new SessionManager(storage, streamClient, [errorTool]);
+      mgr.setSystemPrompt({ role: 'system', content: '你是一个测试助手。' });
+      await mgr.startNewSession('工具错误测试');
+
+      const events: StreamEvent[] = [];
+      const result = await mgr.sendMessageStream('请测试工具错误', (e) => events.push(e));
+
+      // 验证：turn 被保存
+      expect(result).not.toBeNull();
+      expect(result!.turn).toBe(1);
+
+      // 验证：tool_record 中包含 error
+      expect(result!.tool_calls).toHaveLength(1);
+      expect(result!.tool_calls![0].error).toBe('Something went wrong');
+      expect(result!.tool_calls![0].result).toBe('partial result');
+
+      // 验证：tool 结果事件包含 error
+      const toolResultEvents = events.filter((e) => e.type === 'tool_result');
+      expect(toolResultEvents).toHaveLength(1);
+      expect(toolResultEvents[0].error).toBe('Something went wrong');
+      expect(toolResultEvents[0].toolResult).toBe('partial result');
+
+      // 验证：第二轮 API 请求中包含工具错误信息
+      const toolMsgs = capturedMessages.filter((m) => m.role === 'tool');
+      expect(toolMsgs).toHaveLength(1);
+      expect(toolMsgs[0].content).toContain('partial result');
+      expect(toolMsgs[0].content).toContain('Error: Something went wrong');
     });
   });
 });

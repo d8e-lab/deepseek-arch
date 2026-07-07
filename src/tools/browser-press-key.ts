@@ -56,10 +56,10 @@ export const browserPressKeyTool: Tool = {
 			return { content: '', error: 'key is required' };
 		}
 
-		const state = getBrowserState();
-		const page = await state.getPage();
-
 		try {
+			const state = getBrowserState();
+			const page = await state.getPage();
+
 			if (key.includes('+')) {
 				// 组合键：如 Control+a, Control+Shift+End
 				const parts = key.split('+').map((s) => s.trim());

@@ -86,7 +86,7 @@ export interface StreamEvent {
 	text?: string;
 	/** token 用量（done 事件） */
 	usage?: TokenUsage;
-	/** 错误信息（error 事件） */
+	/** 错误信息（error 事件 / tool_result 事件的工具执行错误） */
 	error?: string;
 	/** tool call ID（tool_call_delta / tool_call_start / tool_preview / tool_result / tool_output） */
 	toolCallId?: string;

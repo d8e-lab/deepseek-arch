@@ -36,26 +36,21 @@ export const browserNavigateTool: Tool = {
 			return { content: '', error: `URL must start with http:// or https://, got: ${url}` };
 		}
 
-		const state = getBrowserState();
-		const page = await state.getPage();
-
 		try {
+			const state = getBrowserState();
+			const page = await state.getPage();
+
 			await page.goto(url, {
 				waitUntil: 'domcontentloaded',
 				timeout: NAVIGATION_TIMEOUT_MS,
 			});
-		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
-			return { content: '', error: `Navigation failed: ${msg}` };
-		}
 
-		// 自动获取快照
-		try {
+			// 自动获取快照
 			const snapshot = await state.buildSnapshot();
 			return { content: snapshot };
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
-			return { content: `Navigated to ${url}`, error: `Snapshot failed: ${msg}` };
+			return { content: '', error: `Navigation failed: ${msg}` };
 		}
 	},
 };

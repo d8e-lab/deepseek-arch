@@ -37,30 +37,30 @@ export const browserScrollTool: Tool = {
 			return { content: '', error: `Invalid direction "${direction}", must be "up" or "down"` };
 		}
 
-		const state = getBrowserState();
-		const page = await state.getPage();
-
-		let scrollAmount: number;
-		if (amountStr === 'page') {
-			scrollAmount = await page.evaluate(() => window.innerHeight);
-		} else {
-			scrollAmount = parseInt(amountStr, 10);
-			if (isNaN(scrollAmount) || scrollAmount <= 0) {
-				return { content: '', error: `Invalid amount "${amountStr}", must be "page" or a positive number` };
-			}
-		}
-
-		const delta = direction === 'down' ? scrollAmount : -scrollAmount;
-
 		try {
+			const state = getBrowserState();
+			const page = await state.getPage();
+
+			let scrollAmount: number;
+			if (amountStr === 'page') {
+				scrollAmount = await page.evaluate(() => window.innerHeight);
+			} else {
+				scrollAmount = parseInt(amountStr, 10);
+				if (isNaN(scrollAmount) || scrollAmount <= 0) {
+					return { content: '', error: `Invalid amount "${amountStr}", must be "page" or a positive number` };
+				}
+			}
+
+			const delta = direction === 'down' ? scrollAmount : -scrollAmount;
+
 			await page.evaluate((d) => { window.scrollBy(0, d); }, delta);
+
+			// 自动快照
+			const snapshot = await state.buildSnapshot();
+			return { content: snapshot };
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			return { content: '', error: `Scroll failed: ${msg}` };
 		}
-
-		// 自动快照
-		const snapshot = await state.buildSnapshot();
-		return { content: snapshot };
 	},
 };

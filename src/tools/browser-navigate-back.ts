@@ -19,23 +19,18 @@ export const browserNavigateBackTool: Tool = {
 	requiresConfirm: false,
 
 	async execute(_params: Record<string, unknown>): Promise<ToolResult> {
-		const state = getBrowserState();
-		const page = await state.getPage();
-
 		try {
+			const state = getBrowserState();
+			const page = await state.getPage();
+
 			await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 });
-		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
-			return { content: '', error: `Go back failed: ${msg}` };
-		}
 
-		// 自动快照
-		try {
+			// 自动快照
 			const snapshot = await state.buildSnapshot();
 			return { content: snapshot };
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
-			return { content: `Navigated back`, error: `Snapshot failed: ${msg}` };
+			return { content: '', error: `Go back failed: ${msg}` };
 		}
 	},
 };

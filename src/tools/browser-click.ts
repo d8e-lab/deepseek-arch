@@ -41,10 +41,9 @@ export const browserClickTool: Tool = {
 			return { content: '', error: 'text is required' };
 		}
 
-		const state = getBrowserState();
-		const page = await state.getPage();
-
 		try {
+			const state = getBrowserState();
+			const page = await state.getPage();
 			await tryClick(page, text, role);
 
 			// 等待可能的导航

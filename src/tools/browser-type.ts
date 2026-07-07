@@ -51,10 +51,9 @@ export const browserTypeTool: Tool = {
 			return { content: '', error: 'Either placeholder or name is required to locate the input' };
 		}
 
-		const state = getBrowserState();
-		const page = await state.getPage();
-
 		try {
+			const state = getBrowserState();
+			const page = await state.getPage();
 			await tryFill(page, text, placeholder, name, role);
 
 			const target = placeholder || name || 'input';
