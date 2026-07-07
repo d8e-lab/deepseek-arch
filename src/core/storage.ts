@@ -282,6 +282,45 @@ export class Storage {
 		return this.loadTurns(sessionId);
 	}
 
+	/**
+	 * 原地更新最后一条 turn。
+	 * 用于 agent loop 中每次工具执行后的增量落盘。
+	 * 如果 turns 为空则返回 null。
+	 */
+	async updateLastTurn(
+		sessionId: string,
+		patch: {
+			assistant?: Partial<Message & { id: string }>;
+			toolCalls?: import('../tools/types.js').ToolCallRecord[];
+			messages?: Message[];
+			usage?: TokenUsage;
+			roundUsages?: import('../types/chat.js').RoundUsage[];
+			interrupted?: boolean;
+			lastBrowserUrl?: string;
+		},
+	): Promise<TurnRecord | null> {
+		const turns = await this.loadTurns(sessionId);
+		if (turns.length === 0) return null;
+
+		const last = turns[turns.length - 1] as unknown as Record<string, unknown>;
+
+		if (patch.assistant) Object.assign(last.assistant as object, patch.assistant);
+		if (patch.toolCalls !== undefined) last.tool_calls = patch.toolCalls;
+		if (patch.messages !== undefined) last.messages = patch.messages;
+		if (patch.usage !== undefined) last.usage = patch.usage;
+		if (patch.roundUsages !== undefined) last.round_usage = patch.roundUsages;
+		if (patch.interrupted !== undefined) {
+			if (patch.interrupted) last.interrupted = true;
+			else delete last.interrupted;
+		}
+		if (patch.lastBrowserUrl !== undefined) {
+			await this.updateMeta(sessionId, { lastBrowserUrl: patch.lastBrowserUrl });
+		}
+
+		await this.writeJSON(this.turnsPath(sessionId), turns);
+		return turns[turns.length - 1] as TurnRecord;
+	}
+
 	/** 内部：从 turns.json 加载轮次（兼容旧的 turn-NNN.json 格式） */
 	private async loadTurns(sessionId: string): Promise<TurnRecord[]> {
 		// 优先读取 turns.json（新格式）
