@@ -1,3 +1,0 @@
-#!/bin/sh
-export NODE_ENV=production
-exec node /usr/lib/node_modules/deepseek-arch/dist/cli/index.js "$@"
