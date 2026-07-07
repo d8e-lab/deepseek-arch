@@ -255,7 +255,7 @@ describe('SessionManager', () => {
       expect(doneEvents[0].usage?.total_tokens).toBe(12);
     });
 
-    it('外部 AbortSignal 中断并保存不完整轮次', async () => {
+    it('纯文本中断不保存（无工具调用）', async () => {
       const controller = new AbortController();
 
       async function* abortedStream(
@@ -288,14 +288,13 @@ describe('SessionManager', () => {
       const events: StreamEvent[] = [];
       const result = await mgr.sendMessageStream('Q', (e) => events.push(e), controller.signal);
 
-      expect(result).not.toBeNull();
-      expect(result!.interrupted).toBe(true);
-      expect(result!.assistant.content).toBe('部分');
+      // 纯文本中断（无工具调用）：不保存轮次
+      expect(result).toBeNull();
 
-      // 验证 error 事件
+      // 验证 error 事件（无工具调用中断不保存，error 为原始 AbortError 消息）
       const errorEvent = events.find((e) => e.type === 'error');
       expect(errorEvent).toBeDefined();
-      expect(errorEvent!.error).toBe('已中断');
+      expect(errorEvent!.error).toBe('aborted');
     });
 
     it('中断轮次不向 API 发送', async () => {
@@ -336,7 +335,7 @@ describe('SessionManager', () => {
       await mgr2.resumeSession(mgr.getSessionId()!);
       await mgr2.sendMessageStream('Q2', () => {}, controller.signal);
 
-      // 第三轮：验证 Q2 的中断轮次不会被发送给 API
+      // 第三轮：Q2 因无工具调用未被保存，验证其不在 API 请求中
       let capturedMessages: Message[] = [];
       async function* captureStream(
         messages: Message[],
@@ -353,7 +352,7 @@ describe('SessionManager', () => {
       await mgr3.resumeSession(mgr.getSessionId()!);
       await mgr3.sendMessageStream('Q3', () => {});
 
-      // 应该只有 system + Q1/A1 + Q3，没有 Q2/部分回复（A3 是第三轮的回复，不在请求消息中）
+      // Q2 因无工具调用未保存，API 请求中只有 Q1/Q3
       const userMsgs = capturedMessages.filter((m) => m.role === 'user');
       const assistantMsgs = capturedMessages.filter((m) => m.role === 'assistant');
       expect(userMsgs.map((m) => m.content)).toEqual(['Q1', 'Q3']);

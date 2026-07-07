@@ -278,6 +278,9 @@ export class SessionManager {
 		/** 审查自动续期计数（防无限循环） */
 		let autoContinueCount = 0;
 		const MAX_AUTO_CONTINUE = 3;
+		/** 是否已创建进行中的 turn（用于增量落盘） */
+		let turnSaved = false;
+		const userMsg: Message = { role: 'user', content: userContent };
 
 		try {
 			// ── Agent Loop ──────────────────────────
@@ -402,6 +405,25 @@ export class SessionManager {
 					tool_calls: pendingToolCalls,
 					reasoning_content: roundReasoning || undefined,
 				});
+
+				// 首次遇到 tool call：创建进行中的 turn 落盘
+				if (!turnSaved) {
+					turnSaved = true;
+					try {
+						await this.storage.saveTurn(
+							this.session.meta.id,
+							userMsg,
+							{ id: responseId || '', role: 'assistant', content: roundContent || '', reasoning_content: roundReasoning || undefined },
+							{ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+							0,
+							true, // interrupted — 进行中
+							undefined, // toolCalls 稍后由 updateLastTurn 设置
+							[userMsg, ...agentMessages],
+							roundUsages.length > 0 ? roundUsages : undefined,
+							await this._browserLastUrl(),
+						);
+					} catch { /* 持久化失败不阻塞 */ }
+				}
 
 				for (let i = 0; i < pendingToolCalls.length; i++) {
 					const tc = pendingToolCalls[i];
@@ -534,6 +556,19 @@ export class SessionManager {
 						tool_call_id: tc.id,
 					});
 				}
+
+				// 每轮工具执行后增量落盘（在 agent loop 内）
+				if (turnSaved) {
+					try {
+						await this.storage.updateLastTurn(this.session.meta.id, {
+							toolCalls: toolRecords,
+							messages: [userMsg, ...agentMessages],
+							usage: usage ?? undefined,
+							roundUsages: roundUsages.length > 0 ? roundUsages : undefined,
+							lastBrowserUrl: await this._browserLastUrl(),
+						});
+					} catch { /* 持久化失败不阻塞 */ }
+				}
 			}
 
 			// 达到最大轮次上限：注入截断消息到 agentMessages 以保证序列完整
@@ -554,27 +589,42 @@ export class SessionManager {
 				total_tokens: 0,
 			};
 
-			const costRmb = 0; // Phase 7
-
 			const browserUrl = await this._browserLastUrl();
+			let turn: TurnRecord;
 
-			const turn = await this.storage.saveTurn(
-				this.session.meta.id,
-				{ role: 'user', content: userContent },
-				{
-					id: responseId || '',
-					role: 'assistant',
-					content: finalContent || '(no response)',
-					reasoning_content: finalReasoning || undefined,
-				},
-				finalUsage,
-				costRmb,
-				false,
-				toolRecords.length > 0 ? toolRecords : undefined,
-				agentMessages.length > 0 ? agentMessages : undefined,
-				roundUsages.length > 0 ? roundUsages : undefined,
-				browserUrl,
-			);
+			if (turnSaved) {
+				// 已有进行中的 turn：更新为完成状态
+				turn = (await this.storage.updateLastTurn(this.session.meta.id, {
+					assistant: { content: finalContent || '(no response)', reasoning_content: finalReasoning || undefined },
+					toolCalls: toolRecords.length > 0 ? toolRecords : undefined,
+					messages: agentMessages.length > 0 ? [userMsg, ...agentMessages] : undefined,
+					usage: finalUsage,
+					roundUsages: roundUsages.length > 0 ? roundUsages : undefined,
+					interrupted: false,
+					lastBrowserUrl: browserUrl,
+				}))!;
+			} else {
+				// 无工具调用：直接追加新 turn
+				const costRmb = 0;
+				turn = await this.storage.saveTurn(
+					this.session.meta.id,
+					userMsg,
+					{
+						id: responseId || '',
+						role: 'assistant',
+						content: finalContent || '(no response)',
+						reasoning_content: finalReasoning || undefined,
+					},
+					finalUsage,
+					costRmb,
+					false,
+					undefined,
+					undefined,
+					roundUsages.length > 0 ? roundUsages : undefined,
+					browserUrl,
+				);
+				this.session.turns.push(turn);
+			}
 
 			// 写入缓存命中率监控日志
 			if (roundUsages.length > 0) {
@@ -582,7 +632,15 @@ export class SessionManager {
 				appendCacheLog(dir, this.session.meta.id, this.session.turns.length + 1, roundUsages);
 			}
 
-			this.session.turns.push(turn);
+			// 更新内存中的 session 元数据（turnSaved 时 turn 已在 turns 数组中）
+			if (turnSaved) {
+				const lastIdx = this.session.turns.length - 1;
+				if (lastIdx >= 0) {
+					this.session.turns[lastIdx] = turn;
+				} else {
+					this.session.turns.push(turn);
+				}
+			}
 			this.session.meta.turnCount = this.session.turns.length;
 			this.session.meta.updated_at = turn.created_at;
 
@@ -592,8 +650,8 @@ export class SessionManager {
 			const isAbort = err instanceof Error && err.name === 'AbortError';
 			const msg = err instanceof Error ? err.message : String(err);
 
-			if (isAbort && (finalReasoning || finalContent)) {
-				// 中断：保存不完整轮次
+			// 有工具调用记录才保留中断轮次
+			if (toolRecords.length > 0) {
 				const partialUsage = usage ?? {
 					prompt_tokens: 0,
 					completion_tokens: 0,
@@ -602,29 +660,42 @@ export class SessionManager {
 
 				try {
 					const browserUrl = await this._browserLastUrl();
-					const turn = await this.storage.saveTurn(
-						this.session.meta.id,
-						{ role: 'user', content: userContent },
-						{
-							id: responseId || '',
-							role: 'assistant',
-							content: finalContent || '[已中断]',
-							reasoning_content: finalReasoning || undefined,
-						},
-						partialUsage,
-						0,
-						true, // interrupted
-						toolRecords.length > 0 ? toolRecords : undefined,
-						agentMessages.length > 0 ? agentMessages : undefined,
-						roundUsages.length > 0 ? roundUsages : undefined,
-						browserUrl,
-					);
+					let turn: TurnRecord;
 
-					this.session.turns.push(turn);
+					if (turnSaved) {
+						// 已有进行中的 turn：更新为中断状态
+						turn = (await this.storage.updateLastTurn(this.session.meta.id, {
+							assistant: { content: '[已中断]', reasoning_content: finalReasoning || undefined },
+							toolCalls: toolRecords,
+							messages: [userMsg, ...agentMessages],
+							usage: partialUsage,
+							roundUsages: roundUsages.length > 0 ? roundUsages : undefined,
+							interrupted: true,
+							lastBrowserUrl: browserUrl,
+						}))!;
+						const lastIdx = this.session.turns.length - 1;
+						if (lastIdx >= 0) this.session.turns[lastIdx] = turn;
+					} else {
+						// 工具刚返回 tool_calls 但尚未首次 saveTurn → 直接追加
+						turn = await this.storage.saveTurn(
+							this.session.meta.id,
+							userMsg,
+							{ id: responseId || '', role: 'assistant', content: '[已中断]', reasoning_content: finalReasoning || undefined },
+							partialUsage,
+							0,
+							true,
+							toolRecords,
+							[userMsg, ...agentMessages],
+							roundUsages.length > 0 ? roundUsages : undefined,
+							browserUrl,
+						);
+						this.session.turns.push(turn);
+					}
+
 					this.session.meta.turnCount = this.session.turns.length;
 					this.session.meta.updated_at = turn.created_at;
 
-					onEvent({ type: 'error', error: '已中断' });
+					onEvent({ type: 'error', error: isAbort ? '已中断' : msg });
 					return turn;
 				} catch {
 					// 持久化失败，不阻塞
@@ -636,7 +707,7 @@ export class SessionManager {
 		}
 	}
 
-	/** 构建请求消息队列（跳过 interrupted 轮次，直接拼接存储的消息序列以命中 kv-cache） */
+	/** 构建请求消息队列（中断轮次保留用户消息 + 已完成工具结果，以维持上下文连续性） */
 	private buildMessages(currentContent: string): Message[] {
 		const messages: Message[] = [];
 
@@ -645,9 +716,18 @@ export class SessionManager {
 			messages.push(this.systemPrompt);
 		}
 
-		// 2. 历史轮次（跳过中断的不完整轮次）
+		// 2. 历史轮次
 		for (const turn of this.session!.turns) {
-			if (turn.interrupted) continue;
+			if (turn.interrupted) {
+				// 中断轮次：保留用户消息 + 已完成的工具交互，但不包含截断的 assistant 最终回复
+				if (turn.messages && turn.messages.length > 0) {
+					messages.push(...turn.messages);
+				} else {
+					// 兼容旧数据：至少保留用户消息
+					messages.push(turn.user);
+				}
+				continue;
+			}
 
 			// 优先使用存储的完整消息序列（精确回放 API 收发的消息前缀）
 			if (turn.messages && turn.messages.length > 0) {
