@@ -1,6 +1,12 @@
-## Browser CDP 连接测试报告
+# Browser CDP 连接测试报告
 
-### 被测工具：`execute_command`
+状态: **已修复 (fix/windows-compat-and-interrupt)** | 创建: 2026-07-07
+
+> 修复内容：
+> - `src/tools/shell.ts`: 平台检测 → Windows 上使用 `powershell.exe -Command`
+> - `src/tools/utils.ts`: `checkPath` 路径分隔符修复 → 用 `path.isAbsolute()` 替代硬编码 `/`
+> - `src/tools/utils.ts`: 交互命令检测平台适配
+> - 详见 `.deepseek-arch/plans/windows-compat-interrupt-fix.md`
 
 ┌────────────────────┬─────────────────────────────────────────────┬──────────────────────────┐
 │ 测试               │ 命令                                        │ 结果                     │

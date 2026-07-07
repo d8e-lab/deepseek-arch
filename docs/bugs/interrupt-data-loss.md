@@ -1,6 +1,14 @@
 # 中断导致对话轮次丢失
 
-状态: **待修复** | 创建: 2026-07-07
+状态: **已修复 (fix/windows-compat-and-interrupt)** | 创建: 2026-07-07
+
+> 修复内容：
+> - 有工具调用才保存中断轮次（`toolRecords.length > 0`）
+> - 首次遇到工具调用时即创建 turn（`saveTurn`），后续每次工具执行后增量落盘（`updateLastTurn`）
+> - agent loop 正常结束时 `updateLastTurn` 去掉 `interrupted` 标记
+> - `buildMessages` 保留中断轮次的 `turn.messages`（含用户消息 + 已完成工具交互）
+> - `src/core/storage.ts` 新增 `updateLastTurn` 方法支持原地更新末条 turn
+> - 详见 `.deepseek-arch/plans/windows-compat-interrupt-fix.md`
 
 ## 问题描述
 
