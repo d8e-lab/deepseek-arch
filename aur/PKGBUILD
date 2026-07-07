@@ -8,6 +8,7 @@ pkgver=1.3.2
 pkgrel=1
 pkgdesc="Terminal AI agent with Agent Loop, Tool Calling, streaming, persistent storage and browser tools"
 arch=('any')
+options=(!strip)
 url="https://github.com/d8e-lab/deepseek-arch"
 license=('MIT')
 depends=('nodejs>=18')
