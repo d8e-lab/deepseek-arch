@@ -19,4 +19,6 @@ export interface TuiConfig {
 	baseUrl: string;
 	apiKey: string;
 	version: string;
+	/** YOLO 模式下审查模型名（默认同主模型） */
+	reviewModel?: string;
 }

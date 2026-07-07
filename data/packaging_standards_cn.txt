@@ -1,0 +1,211 @@
+Arch 打包准则
+
+32 位 – 安全 – CLR – CMake – DKMS – Eclipse – Electron – Free Pascal – GNOME – Go – Haskell – Java – 交叉编译工具 – KDE – Lisp – Meson – MinGW – 内核模块 – Node.js – Nonfree – OCaml – Perl – PHP – Python – R – Ruby – Rust – Shell – VCS – Web – Wine – 字体
+
+相关文章
+/安全
+Arch 构建系统
+创建软件包
+makepkg
+PKGBUILD
+
+翻译状态：
+本文（或部分内容）译自 Arch packaging standards，最近一次同步于 2026-01-19，若英文版本有所更改，则您可以帮助同步与翻译更改的内容。
+您可以在 ArchWiki 的对应页面找到本文翻译的原始修订历史。
+本文可能与英文原文存在出入。
+在为 Arch Linux 构建软件包时，您应该遵循以下的软件包指导原则，尤其是当打算贡献新软件包至 Arch Linux 时。同时需要阅读 PKGBUILD(5) 和 makepkg(8) man 手册。
+本页中列出的重要项将不再于其它软件包指导页中指出，这些指导页将作为以下准则的附加内容。
+提交到 Arch 用户软件仓库 (AUR) 的软件包需要额外遵守 AUR 提交准则。
+可在 /usr/share/pacman/ 目录下的 .proto 文件中查看更多 PKGBUILD 示例。
+
+打包规则[编辑 | 编辑源代码]
+永远别将软件包安装至 /usr/local/
+除非非用不可，否则绝对不要在 PKGBUILD 中自定义和使用新的变量，以避免和 makepkg 本身的变量冲突。
+在非用不可的情况下，需要给自定义变量名前加上下划线 (_)。例如：_customvariable=
+任何情况下都要避免使用 /usr/libexec/，应该使用 /usr/lib/${pkgname}/。
+包信息文件中的 packager 字段可以通过修改 /etc/makepkg.conf 文件由编译者进行自定义。使用 ~/.makepkg.conf也可以达到此目的。
+不要使用 makepkg 子程序（例如 error，msg，msg2，plain 和 warning），这些随时都可能会更改。请使用 printf 或 echo 来输出内容。
+所有安装过程中所需输出的重要的信息，都要放到 .install 文件中。比如说如果某软件包需要扩展的安装步骤才能正常运行，你可以将这些步骤的介绍包含在 .install 文件中。
+依赖包是最容易出现错误的地方。请花时间仔细核对，例如对动态可执行文件执行 ldd 或 readelf，检查脚本需要的工具，查看软件文档等。namcap 可以帮助你，它可以解析 PKGBUILD 和生成的打包文件，报告权限错误、缺少依赖、过多依赖等常见问题。
+任何运行该软件包不需要，或者该软件包的通用功能不需要的可选依赖不要加入到 depends 中。这些信息应该加入 optdepends 数组，例如：
+optdepends=('cups: printing support'
+            'sane: scanners support'
+            'libgphoto2: digital cameras support'
+            'alsa-lib: sound support'
+            'giflib: GIF images support'
+            'libjpeg: JPEG images support'
+            'libpng: PNG images support')
+
+例子取自 wine包 软件包。这些信息在安装和升级时会自动打印，所以不要将这些信息加入 .install 文件。
+在填写软件包描述（description）时，请不要使用下定义的方式描述包名称。比如说，“Nedit is a text editor for X11” 应当简写为 "A text editor for X11"。顺便注意保持描述在 80 个字符以内.
+尽量保持 PKGBUILD 文件中每行不超过100字符。
+如果可能的话，从 PKGBUILD 文件中去掉空行（没有设置变量值的行）(如 provides、replaces 等)
+通常实践建议按照 PKGBUILD 一文中的示例安排 PKGBUILD 各变量顺序。当然这不是强制性的，这里唯一强制要求的是满足正确的 Bash 语法。
+变量名可能包含空格时，请使用引号，例如 "$pkgdir" 和 "$srcdir"。
+请确保软件包的完整性，确保校验变量包含正确的数值，可以通过 updpkgsums 工具进行更新。
+软件包命名[编辑 | 编辑源代码]
+软件包应当仅包含字母或数字以及 @，.，_，+，-，不能以 - 和 . 开头，所有的字母应当保持小写。
+软件包的名称不应该包含上游的主版本号，例如如果上游软件包是 libfoo v2.3.4，不应该命名为 libfoo2。这样在上游发布新的大版本时，就可以保留软件包名和依赖可以保持不变。只有个别软件包是例外，例如图形库 GTK 和 Qt。这些软件升级后，应用程序需要花很长时间和经历才能移植完成，所以系统需要同时安装多个版本，软件包名应该包含大版本号，比如 gtk3、gtk4、qt5、qt6。如果出现大部分软件包都可以同步升级，只有个别软件没有被移植的情况，可以把老的软件包命名为 libfoo1，而新的软件包继续使用 libfoo。
+软件包版本号[编辑 | 编辑源代码]
+软件包版本号（即 pkgver）应当和作者发行版号保持一致。
+如果需要的话，版本号可以包含字母（例如 2.54BETA32）。
+版本号里不能包含连字符，只能允许字母、数字、下划线、点号。如果上游版本号中出现了连字符，需要将其替换为下划线。
+
+软件包发行号（即 pkgrel）仅和 Arch 相关. 这样用户就可以区分不同的编译版本。发布号从1开始，软件包被重新（打包）发布时 ，发行号将增加1。
+当新版本发布的时候，发行号（release）自动回到1。
+软件包发布标记和软件包版本标记遵从同样的规则。
+软件包依赖[编辑 | 编辑源代码]
+不要依赖 PKGBUILD#依赖关系 中的传递依存关系，因为依赖更新可能会导致关系中断。
+列出所有直接依赖库，可以通过 find-libdeps(1)（devtools包 的组件）来完成。
+软件包关联[编辑 | 编辑源代码]
+不要将 $pkgname 添加到 PKGBUILD#provides，软件包无法与自身冲突。
+在 PKGBUILD#provides 中列出所有外部共享库（如 'libsomething.so'），可通过 find-libprovides(1)（devtools包 的组件）来完成。
+软件源[编辑 | 编辑源代码]
+尽可能使用 HTTPS 源：压缩包使用 https://，git 源使用 git+https://
+尽可能使用 PGP 签名对源进行验证（如果上游对提交进行了签名，但没有对压缩包签名，可能需要使用 git 标签而不是源码压缩包进行构建。）
+
+本文或本章节的事实准确性存在争议。
+原因： commit# is not required in recent pacman as proper checksum is supported for git sources. See[1]. gitea package also has been updated to use below approach（在 Talk:Arch 打包准则 中讨论）
+
+使用 git 标签进行构建时，不要使用标签名，要使用 git rev-parse 获取到的对象哈希值
+_tag=1234567890123456789012345678901234567890 # git rev-parse "v$pkgver"
+source=(git+https://$url.git?signed#tag=$_tag)
+
+pkgver() {
+    cd "$pkgname"
+    git describe
+}
+
+具体案例可参考 gitea包 包。该操作的原因是，标签可以被强制推送改变指向到的提交，从而导致构建出的包产生变化。强制推送会改变标签的哈希值，从而使用标签的对象哈希值可以确保源的完整性。使用 pkgver() 函数可避免在没有更新 _tag 的情况下不小心修改掉 pkgver。关于 VCS 源格式的更多信息请参考 VCS 软件打包准则#VCS 源。
+Do not diminish the security or validity of a package (e.g. by removing a checksum check or by removing PGP signature verification), because an upstream release is broken or suddenly lacks a certain feature (e.g. PGP signature missing for a new release)
+源在 srcdir 下的名称不能相同（可能需要在下载时进行重命名，例如 "${pkgname&#125;-${pkgver}.tar.gz::https://${pkgname}.tld/download/${pkgver}.tar.gz"）
+避免对如 sourceforge 等平台的链接使用特定镜像源进行下载，因为它们有可能会变得不可用
+使用 SSH 密钥签名的 Git 对象（例如标签和提交等）可以使用 git 命令进行验证，用法为通过 gpg.ssh.allowedSignersFile 指定包含可能的签名密钥的文件。具体用例请参考 [2]。
+与上游协作[编辑 | 编辑源代码]
+It is considered best-practice to work closely with upstream wherever possible. This entails reporting problems about building and testing a package.
+
+Report problems to upstream right away.
+Upstream patches wherever possible.
+Add comments with links to relevant (upstream) bug tracker tickets in the PKGBUILD (this is particularly important, as it ensures, that other packagers can understand changes and work with a package as well).
+It is recommended to track upstream with tools such as nvchecker包, nvrsAUR or urlwatch包 to be informed about new stable releases.
+
+目录[编辑 | 编辑源代码]
+配置文件应该放置到 /etc 目录。如果有多个配置文件，可以使用子目录，以保持 /etc 简洁。例如，如果包名是 pkg，那就应使用 /etc/pkg（或者其他合适的名称，比如apache使用的就是 /etc/httpd/）。
+软件包文件应该安装在下列常用目录：
+
+/etc
+
+系统关键配置文件
+
+/usr/bin
+
+二进制文件
+
+/usr/lib
+
+库
+
+/usr/include
+
+头文件
+
+/usr/lib/pkg
+
+模块，插件等
+
+/usr/share/doc/pkg
+
+应用程序文档
+
+/usr/share/info
+
+GNU Info 系统文件
+
+/usr/share/licenses/pkg
+
+Application licenses
+
+/usr/share/man
+
+手册
+
+/usr/share/pkg
+
+程序数据
+
+/var/lib/pkg
+
+应用持久数据
+
+/etc/pkg
+
+pkg 应用的配置文件
+
+/opt/pkg
+
+大的独立程序，例如 Java
+
+软件包不应该在下面目录添加任何文件:
+/bin
+/sbin
+/dev
+/home
+/srv
+/media
+/mnt
+/proc
+/root
+/selinux
+/sys
+/tmp
+/var/tmp
+/run
+Makepkg 的任务[编辑 | 编辑源代码]
+当您使用 makepkg 构建软件包时，makepkg 会自动执行如下功能:
+
+检查软件包的依赖和构建依赖是否已安装
+从服务器中下载源文件
+校验源文件的完整性
+解压源文件
+打上必要的补丁（patch）
+构建软件并安装到 fake root
+从可执行文件中去掉符号标记
+从库文件中去掉调试标记
+压缩手册页和/或 info 页
+生成包信息文件（包含软件包的基本信息）
+压缩 fake root 成为软件包文件（*.pkg.tar.xz）
+生成的软件包文件保存在指定的目录中（默认在当前目录）
+架构[编辑 | 编辑源代码]
+如果该软件包是针对特定架构编译的，那么 arch 数组应该包含 'x86_64'，否则使用 'any' 生成架构无关的包。
+
+授权协议[编辑 | 编辑源代码]
+有两种与 Arch 软件包相关的许可证：
+
+PKGBUILD 的许可证字段[编辑 | 编辑源代码]
+PKGBUILD 中的 license 字段列出了被打包软件的上游许可证，注意这不是软件打包代码的许可证。该字段必须遵循 SPDX 许可证格式，更多信息请参考  PKGBUILD#license
+
+软件打包代码许可证[编辑 | 编辑源代码]
+软件打包代码的许可证。根据 RFC40，Arch Linux 指定了软件打包代码需以 0BSD 许可证进行授权，并参照 RFC52 使用 REUSE 来执行这一点。
+总结一下就是：
+
+在软件包源码的根目录下添加一个 LICENSE 文件，其内容与该文件完全一致，即 Arch Linux 用于软件包的 0BSD 许可证。
+在软件包源码的根目录下添加一个 REUSE.toml 文件，可以使用 pkgctl license setup 生成一个后在其上进行修改。
+确保执行 pkgctl license check 命令时不会有任何报错。
+如果有其它需要配置授权的文件，你需要为它们选择一个合理的许可证。方法通常很简单：
+
+如果文件（例如类似 launcher.sh 的启动脚本或类似 myunit.service 的 systemd 服务文件）是完全由你或其他 Arch 人员创建的，则需使用 0BSD 许可证。注意：如果你编写了该补丁，同时也将其提交到了上游，那可以其针对 Arch 将其以 0BSD 许可证分发，并在提交到上游时让他们应用自己的许可证。
+如果文件时从上游获取的（例如类似 tool.png 的图标或类似 fix.patch 的补丁），那需要应用上游的许可证。
+另请参考介绍了 pkgctl-license(1) 的这篇 Arch Linux 开发博客文章。
+
+可复现构建[编辑 | 编辑源代码]
+Arch 正努力使所有软件包具有可复现性。打包人员可通过 devtools包 的 makerepropkg 或 archlinux-repro包 的 repro 来检查包是否有可复现性：
+
+$ makerepropkg $pkgname-1-1-any.pkg.tar.zst
+
+或
+
+$ repro -f $pkgname-1-1-any.pkg.tar.zst
+
+如果在构建时需要使用时间戳，可以使用 SOURCE_DATE_EPOCH 环境变量，具体格式可参考上游文档。
+
+

@@ -26,7 +26,7 @@ function loadTools() {
 	return tools;
 }
 
-const PACKAGE_VERSION = '1.3.0';
+const PACKAGE_VERSION = '1.3.1';
 
 async function createTuiConfig(): Promise<TuiConfig> {
 	const cfg = await ConfigManager.getInstance().load();
@@ -34,6 +34,8 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	const model = cfg.get<string>('defaults.model') ?? 'deepseek-v4-pro';
 	const baseUrl = cfg.get<string>(`providers.${providerName}.base_url`) ?? 'https://api.deepseek.com';
 	const apiKey = cfg.get<string>(`providers.${providerName}.api_key`) ?? '';
+	// 审查模型：可从配置读取，默认用 flash（更便宜）
+	const reviewModel = cfg.get<string>('defaults.review_model') ?? 'deepseek-v4-flash';
 
 	return {
 		provider: providerName,
@@ -41,6 +43,7 @@ async function createTuiConfig(): Promise<TuiConfig> {
 		baseUrl,
 		apiKey,
 		version: PACKAGE_VERSION,
+		reviewModel,
 	};
 }
 
