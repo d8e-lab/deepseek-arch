@@ -160,8 +160,8 @@ export class ConversationView {
 
 			// 模型回复（默认颜色，表格渲染）
 			const mdRenderer = new MarkdownTableRenderer();
-			const rendered = mdRenderer.feed(turn.assistant.content) ?? [];
-			rendered.push(...(mdRenderer.flush() ?? []));
+			mdRenderer.feed(turn.assistant.content);
+			const rendered = mdRenderer.flush();
 			for (const rline of rendered) {
 				for (const wline of wrapText(rline, termWidth)) {
 					lines.push(wline);
