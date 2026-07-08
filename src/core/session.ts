@@ -153,6 +153,11 @@ export class SessionManager {
 		this._subagentAsync = enabled;
 	}
 
+	/** 获取子代理异步模式 */
+	getSubagentAsync(): boolean {
+		return this._subagentAsync;
+	}
+
 	/**
 	 * 运行子代理循环（供 subagent_spawn 工具调用）
 	 *
