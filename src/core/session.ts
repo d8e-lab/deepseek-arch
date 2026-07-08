@@ -34,9 +34,34 @@ import type {
 export type { StreamEvent };
 import type { Tool, ToolCallRecord } from '../tools/types.js';
 import type { ToolCall, ToolCallDelta } from '../types/api.js';
+import { getAllTools } from '../tools/index.js';
+import { runSubagentLoop } from './subagent.js';
 
 /** 单次 agent loop 最大迭代次数 */
 const MAX_AGENT_ROUNDS = 25;
+
+/** 子代理 System Prompt 追加内容（行为约束） */
+const SUBAGENT_APPEND_PROMPT = `
+## Subagent Mode
+
+You are running as a subagent delegated by a master agent. Key constraints:
+
+- Execute the assigned sub-task and return a concise result.
+- You have access to shell, file, and browser tools.
+- Do NOT ask the user questions — there is no interactive user in this context.
+- Do NOT spawn sub-subagents, use wait, or list_subagents (these tools are not available to you).
+- Do NOT use plan_on or save_plan (not available).
+- If you cannot complete the task, explain why and return what you have.
+- Keep output focused: the master agent needs your result, not a conversation.`;
+
+/** 后台子代理状态（Agent Loop 中追踪） */
+interface PendingSubagent {
+	toolCallId: string;
+	promise: Promise<string>;
+	status: 'running' | 'completed' | 'failed';
+	result?: string;
+	startMs: number;
+}
 
 export class SessionManager {
 	private storage: Storage;
@@ -44,6 +69,7 @@ export class SessionManager {
 	private session: Session | null = null;
 	private systemPrompt: Message | null = null;
 	private tools: Tool[] = [];
+	private _subagentAsync: boolean = false;
 
 	constructor(storage: Storage, provider: ModelProvider, tools?: Tool[]) {
 		this.storage = storage;
@@ -120,6 +146,24 @@ export class SessionManager {
 	/** 切换默认模型 */
 	setModel(model: string): void {
 		this.provider.setModel?.(model);
+	}
+
+	/** 设置子代理异步模式 */
+	setSubagentAsync(enabled: boolean): void {
+		this._subagentAsync = enabled;
+	}
+
+	/**
+	 * 运行子代理循环（供 subagent_spawn 工具调用）
+	 *
+	 * 子代理使用独立消息上下文、受限工具集（无 spawn/wait/list/plan），
+	 * 复用当前 provider 和 system prompt（追加子代理行为约束）。
+	 */
+	async runSubagent(task: string, signal?: AbortSignal): Promise<string> {
+		const subagentTools = getAllTools(); // 不含 subagent 管理工具
+		const basePrompt = this.systemPrompt?.content ?? '';
+		const subagentPrompt = basePrompt + SUBAGENT_APPEND_PROMPT;
+		return runSubagentLoop(task, this.provider, subagentTools, subagentPrompt, signal);
 	}
 
 	/** 更新会话标题 */
@@ -282,11 +326,161 @@ export class SessionManager {
 		let turnSaved = false;
 		const userMsg: Message = { role: 'user', content: userContent };
 
+		// ── 子代理状态追踪 ──────────────────────
+		const pendingSubagents = new Map<string, PendingSubagent>();
+		/** 模型已通过 wait 取走结果的 subagent 名称集合 */
+		const retrievedSubagents = new Set<string>();
+		/** 是否异步模式（默认非异步） */
+		const asyncMode = this._subagentAsync ?? false;
+
+		/** 拦截子代理工具调用（subagent_spawn / wait / list_subagents），返回 true 表示已处理 */
+		const interceptSubagentTool = async (
+			tc: ToolCall,
+			args: Record<string, unknown>,
+			pending: Map<string, PendingSubagent>,
+			retrieved: Set<string>,
+			async: boolean,
+			msgs: Message[],
+			records: ToolCallRecord[],
+			emit: (event: StreamEvent) => void,
+			launch: (task: string) => Promise<string>,
+			signal?: AbortSignal,
+		): Promise<boolean> => {
+			const pushResult = (result: string, error?: string, durationMs = 0) => {
+				msgs.push({ role: 'tool', content: result, tool_call_id: tc.id });
+				records.push({
+					id: tc.id, name: tc.function.name, arguments: args,
+					result, error, duration_ms: durationMs,
+				});
+				emit({
+					type: 'tool_result', toolCallId: tc.id,
+					toolName: tc.function.name, toolResult: result, error,
+				});
+			};
+
+			switch (tc.function.name) {
+				case 'subagent_spawn': {
+					const name = (args.subagent_name as string) || '';
+					const task = (args.task as string) || '';
+					if (!name || !task) {
+						pushResult('Error: both "subagent_name" and "task" are required.', 'invalid_params');
+						return true;
+					}
+					if (pending.has(name)) {
+						pushResult(`Error: subagent "${name}" already exists. Use a unique name.`, 'duplicate');
+						return true;
+					}
+
+					const startMs = Date.now();
+					const promise = launch(task).then((r) => {
+						const sub = pending.get(name);
+						if (sub) {
+							sub.status = r.startsWith('Error:') ? 'failed' : 'completed';
+							sub.result = r;
+						}
+						return r;
+					}).catch((err) => {
+						const sub = pending.get(name);
+						if (sub) {
+							sub.status = 'failed';
+							sub.result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+						}
+						return '';  // 不会到这里
+					});
+
+					pending.set(name, {
+						toolCallId: tc.id,
+						promise,
+						status: 'running',
+						startMs,
+					});
+
+					if (async) {
+						pushResult(
+							`[SPAWNED] Subagent "${name}" started. Task: ${task.slice(0, 150)}${task.length > 150 ? '...' : ''}\nUse list_subagents to check status, wait("${name}") to retrieve result.`,
+						);
+					} else {
+						// 非异步：阻塞等待
+						const result = await promise;
+						// 此时 status 已由 then/catch 更新为 completed/failed
+						pushResult(
+							`Subagent "${name}" completed.\n\n${result}`,
+							pending.get(name)?.status === 'failed' ? 'subagent_failed' : undefined,
+							Date.now() - startMs,
+						);
+					}
+					return true;
+				}
+
+				case 'wait': {
+					const name = (args.subagent_name as string) || '';
+					if (!name) {
+						pushResult('Error: "subagent_name" is required.', 'invalid_params');
+						return true;
+					}
+					const sub = pending.get(name);
+					if (!sub) {
+						pushResult(
+							`Subagent "${name}" not found. It may have already been retrieved or never existed. Use list_subagents to check.`,
+							'not_found',
+						);
+						return true;
+					}
+					if (retrieved.has(name)) {
+						pushResult(
+							`Subagent "${name}" result was already retrieved and cannot be retrieved again.`,
+							'already_retrieved',
+						);
+						return true;
+					}
+
+					const startMs = Date.now();
+					const result = await sub.promise;
+					const elapsed = Date.now() - startMs;
+
+					retrieved.add(name);
+					pushResult(
+						`Subagent "${name}" result:\n\n${result}`,
+						sub.status === 'failed' ? 'subagent_failed' : undefined,
+						elapsed,
+					);
+					return true;
+				}
+
+				case 'list_subagents': {
+					if (pending.size === 0) {
+						pushResult('No subagents in this session.');
+						return true;
+					}
+					const now = Date.now();
+					const lines: string[] = [];
+					for (const [n, sub] of pending) {
+						const elapsed = Math.round((now - sub.startMs) / 1000);
+						const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+						const retrievedStr = retrieved.has(n) ? ' [retrieved]' : '';
+
+						if (sub.status === 'running') {
+							lines.push(`- "${n}"  running (${elapsedStr})`);
+						} else if (sub.status === 'completed') {
+							lines.push(`- "${n}"  completed (${elapsedStr}) — use wait("${n}")${retrievedStr}`);
+						} else {
+							lines.push(`- "${n}"  failed (${elapsedStr}) — use wait("${n}")${retrievedStr}`);
+						}
+					}
+					pushResult(lines.join('\n'));
+					return true;
+				}
+
+				default:
+					return false;
+			}
+		};
+
 		try {
 			// ── Agent Loop ──────────────────────────
 			let userDenied = false;
 
-			for (let round = 0; round < MAX_AGENT_ROUNDS && !userDenied; round++) {
+			for (let round = 0; !userDenied; round++) {
 				const roundMessages = [...baseMessages, ...agentMessages];
 
 				let roundContent = '';
@@ -343,18 +537,38 @@ export class SessionManager {
 					});
 				}
 
-				// 本轮无 tool_calls → 自然终止
+				// 本轮无 tool_calls → 检查子代理状态
 				if (pendingToolCalls.length === 0) {
-					// 保存最终的 assistant 响应到 agentMessages（用于后续轮次重建）
 					agentMessages.push({
 						role: 'assistant',
 						content: roundContent,
 						reasoning_content: roundReasoning || undefined,
 					});
 
+					// 异步模式：存在未取走且未完成的子代理 → 提醒模型继续
+					if (asyncMode && pendingSubagents.size > 0) {
+						const hasIncomplete = [...pendingSubagents.values()].some(
+							(s) => s.status === 'running',
+						);
+						const hasUnretrieved = [...pendingSubagents.entries()].some(
+							([name, s]) =>
+								(s.status === 'completed' || s.status === 'failed') &&
+								!retrievedSubagents.has(name),
+						);
+
+						if (hasIncomplete || hasUnretrieved) {
+							// 静态提醒，不随子代理状态变化——保证 kv-cache 前缀稳定
+							agentMessages.push({
+								role: 'user',
+								content: '[system] You have pending subagents. Use list_subagents to check status, wait("<name>") to retrieve results.',
+							});
+							continue;
+						}
+						// All retrieved → normal flow (break)
+					}
+
 					// ── YOLO 审查：检查模型回复是否需要自动继续 ──────
 					if (reviewModelName && autoContinueCount < MAX_AUTO_CONTINUE) {
-						// 从会话历史收集最近用户输入（含当前轮）
 						const pastInputs = this.session!.turns
 							.slice(-(MAX_AUTO_CONTINUE + 1))
 							.map(t => t.user.content);
@@ -382,10 +596,9 @@ export class SessionManager {
 								autoContinue: true,
 							});
 
-							continue; // agent loop 继续
+							continue;
 						}
 
-						// asking_user 或 completed：通知 UI 后正常结束
 						onEvent({
 							type: 'review_verdict',
 							verdict,
@@ -442,6 +655,16 @@ export class SessionManager {
 						toolName: tc.function.name,
 						toolArgs: args,
 					});
+
+					// ── 子代理工具拦截 ──────────────────
+					const intercepted = await interceptSubagentTool(
+						tc, args, pendingSubagents, retrievedSubagents,
+						asyncMode, agentMessages, toolRecords, onEvent,
+						(task) => this.runSubagent(task, signal),
+						signal,
+					);
+					if (intercepted) continue;
+					// ───────────────────────────────────
 
 					// 生成 diff 预览（文件修改工具）
 					let previewText: string | undefined;
