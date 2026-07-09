@@ -564,9 +564,10 @@ export class SessionManager {
 
 		try {
 			// ── Agent Loop ──────────────────────────
+			const MAX_AGENT_ROUNDS = 50;
 			let userDenied = false;
 
-			for (let round = 0; !userDenied; round++) {
+			for (let round = 0; round < MAX_AGENT_ROUNDS && !userDenied; round++) {
 				// 异步模式：状态块拼到末尾 → 不修改 agentMessages，kv-cache 安全
 				const statusBlock = buildStatusBlock();
 				const roundMessages = statusBlock
@@ -724,6 +725,9 @@ export class SessionManager {
 					} catch { /* 持久化失败不阻塞 */ }
 				}
 
+				// ── 收集所有子代理 spawn（非异步模式用于并行 Promise.all）──
+				const allDeferredSpawns: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: PendingSubagent }[] = [];
+
 				for (let i = 0; i < pendingToolCalls.length; i++) {
 					const tc = pendingToolCalls[i];
 					const tool = this.tools.find((t) => t.name === tc.function.name);
@@ -748,39 +752,13 @@ export class SessionManager {
 					}
 
 					// ── 子代理工具拦截 ──────────────────
-					const deferredSpawns: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: PendingSubagent }[] = [];
 					const intercepted = await interceptSubagentTool(
 						tc, args, pendingSubagents, retrievedSubagents,
 						asyncMode, agentMessages, toolRecords, onEvent,
 						(name, task) => this.runSubagent(name, task, signal),
 						signal,
-						deferredSpawns,
+						allDeferredSpawns,
 					);
-					// 非异步模式的 deferred spawns：循环结束后并行等待
-					if (deferredSpawns.length > 0) {
-						await Promise.all(deferredSpawns.map((d) => d.sub.promise));
-						for (const d of deferredSpawns) {
-							const sub = d.sub;
-							agentMessages.push({
-								role: 'tool',
-								content: `Subagent "${d.name}" completed.\n\n${sub.result}`,
-								tool_call_id: d.tc.id,
-							});
-							toolRecords.push({
-								id: d.tc.id, name: 'subagent_spawn', arguments: d.args,
-								result: sub.result,
-								error: sub.status === 'failed' ? 'subagent_failed' : undefined,
-								duration_ms: Date.now() - sub.startMs,
-							});
-							onEvent({
-								type: 'tool_result',
-								toolCallId: d.tc.id,
-								toolName: 'subagent_spawn',
-								toolResult: sub.result,
-								error: sub.status === 'failed' ? 'subagent_failed' : undefined,
-							});
-						}
-					}
 					if (intercepted) continue;
 					// ───────────────────────────────────
 
@@ -896,6 +874,32 @@ export class SessionManager {
 						content: toolMessage,
 						tool_call_id: tc.id,
 					});
+				} // end for (pendingToolCalls)
+
+				// ── 非异步模式的 deferred spawns：收集完毕，并行等待 ──
+				if (allDeferredSpawns.length > 0) {
+					await Promise.all(allDeferredSpawns.map((d) => d.sub.promise));
+					for (const d of allDeferredSpawns) {
+						const sub = d.sub;
+						agentMessages.push({
+							role: 'tool',
+							content: `Subagent "${d.name}" completed.\n\n${sub.result}`,
+							tool_call_id: d.tc.id,
+						});
+						toolRecords.push({
+							id: d.tc.id, name: 'subagent_spawn', arguments: d.args,
+							result: sub.result,
+							error: sub.status === 'failed' ? 'subagent_failed' : undefined,
+							duration_ms: Date.now() - sub.startMs,
+						});
+						onEvent({
+							type: 'tool_result',
+							toolCallId: d.tc.id,
+							toolName: 'subagent_spawn',
+							toolResult: sub.result,
+							error: sub.status === 'failed' ? 'subagent_failed' : undefined,
+						});
+					}
 				}
 
 				// 每轮工具执行后增量落盘（在 agent loop 内）
@@ -910,6 +914,14 @@ export class SessionManager {
 						});
 					} catch { /* 持久化失败不阻塞 */ }
 				}
+			} // end agent loop
+
+			// 达到最大轮次上限：注入截断标记
+			if (!userDenied && toolRecords.length > 0) {
+				agentMessages.push({
+					role: 'user',
+					content: '(Reached max tool rounds — stopping. Please summarize what you have completed so far.)',
+				});
 			}
 
 			// ── 持久化 ──────────────────────────────
