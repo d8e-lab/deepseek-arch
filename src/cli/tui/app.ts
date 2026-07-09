@@ -294,6 +294,11 @@ export class TuiApp {
 			return await this.toggleAsync();
 		}
 
+		if (content.startsWith('/subagent')) {
+			const arg = content.slice(9).trim();
+			return this.showSubagentDetail(arg);
+		}
+
 		return false;
 	}
 
@@ -322,6 +327,7 @@ export class TuiApp {
 			['/model [name]', 'Switch model (interactive picker if no arg)'],
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
+			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
 			['/help',          'Show this command list'],
 			['/context',       'Show session context & token usage'],
 			['/exit  |  Ctrl+C', 'Exit the session'],
@@ -421,6 +427,101 @@ export class TuiApp {
 		return true;
 	}
 
+	/** /subagent [name] — 显示子代理详情 */
+	private showSubagentDetail(name?: string): true {
+		const store = this.sessionMgr.getSubagentStore();
+		const names = store.list();
+
+		if (names.length === 0) {
+			process.stdout.write(dim('No subagents in current session.\r\n'));
+			return true;
+		}
+
+		if (!name) {
+			// 无参数：列出所有子代理
+			process.stdout.write(yellow('Subagents') + '\r\n');
+			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
+			for (const n of names) {
+				const record = store.get(n);
+				if (!record) continue;
+				const icon = record.status === 'running' ? '⏳'
+					: record.status === 'completed' ? green('✓')
+					: red('✗');
+				const elapsed = record.endMs
+					? `${((record.endMs - record.startMs) / 1000).toFixed(1)}s`
+					: `${((Date.now() - record.startMs) / 1000).toFixed(1)}s`;
+				process.stdout.write(
+					`  ${icon} ${cyan(n)} ${dim(`(${record.status}, ${elapsed})`)}\r\n`,
+				);
+				process.stdout.write(dim(`     ${record.task.slice(0, 80)}${record.task.length > 80 ? '...' : ''}`) + '\r\n');
+			}
+			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
+			process.stdout.write(dim(`/subagent <name> for full detail  |  ${names.length} total`) + '\r\n');
+			return true;
+		}
+
+		// 指定名称：显示完整输出
+		const record = store.get(name);
+		if (!record) {
+			process.stdout.write(red(`Subagent "${name}" not found. Use /subagent (no args) to list.`) + '\r\n');
+			return true;
+		}
+
+		this.printSubagentRecord(record);
+		return true;
+	}
+
+	/** 打印子代理完整记录 */
+	private printSubagentRecord(record: import('../../core/subagent-store.js').SubagentRecord): void {
+		const icon = record.status === 'running' ? '⏳'
+			: record.status === 'completed' ? '✓'
+			: '✗';
+		const elapsed = record.endMs
+			? `${((record.endMs - record.startMs) / 1000).toFixed(1)}s`
+			: `${((Date.now() - record.startMs) / 1000).toFixed(1)}s`;
+
+		process.stdout.write(yellow(`\r\n═══ Subagent: ${record.name} ${icon} ${dim(elapsed)} ═══`) + '\r\n');
+		process.stdout.write(dim(`Task: ${record.task}`) + '\r\n');
+		process.stdout.write(dim('─'.repeat(60)) + '\r\n');
+
+		for (const entry of record.entries) {
+			switch (entry.type) {
+				case 'thinking':
+					// thinking 不渲染（太冗长），跳过
+					break;
+				case 'content': {
+					const lines = entry.content.split('\n');
+					for (const line of lines) {
+						process.stdout.write('  ' + line + '\r\n');
+					}
+					break;
+				}
+				case 'tool_call':
+					process.stdout.write(
+						cyan(`\r\n  [T: ${entry.toolName ?? '?'}] `) + dim(JSON.stringify(entry.toolArgs ?? {})) + '\r\n',
+					);
+					break;
+				case 'tool_result': {
+					const lines = entry.content.split('\n');
+					for (const line of lines) {
+						process.stdout.write(cyan('  │ ') + dim(line) + '\r\n');
+					}
+					if (entry.toolError) {
+						process.stdout.write(red(`  ✖ ${entry.toolError}`) + '\r\n');
+					}
+					break;
+				}
+			}
+		}
+
+		if (record.result) {
+			process.stdout.write(dim('\r\n── Final Result ──') + '\r\n');
+			process.stdout.write(record.result + '\r\n');
+		}
+
+		process.stdout.write(dim('─'.repeat(60)) + '\r\n');
+	}
+
 	// ─── shell 命令模式 ────────────────────────────
 
 	/** 进入 shell 命令模式：切换背景色并显示提示 */
@@ -510,6 +611,19 @@ export class TuiApp {
 	private pasteBuffer = '';
 
 	private handleInputData(data: string, resolve: (value: string | null) => void): void {
+		// Ctrl+T: toggle subagent detail view
+		if (data === '\x14') {
+			if (this.state === AppState.IDLE) {
+				this.showSubagentDetail();
+				this.printSeparator();
+				this.lastVisibleInputRows = 1;
+				this.lastCursorDisplayRow = 0;
+				this.drawInputArea();
+				process.stdout.write('\r');
+			}
+			return;
+		}
+
 		// Ctrl+C 优先处理（可能在 data 中的任何位置）
 		if (data.includes('\x03')) {
 			if (this.state === AppState.STREAMING || this.state === AppState.SENDING) {
@@ -881,6 +995,34 @@ export class TuiApp {
 							}
 							break;
 						}
+						case 'subagent_spawned': {
+							flush();
+							const name = event.subagentName ?? '?';
+							const task = (event.subagentTask ?? '').slice(0, 60);
+							process.stdout.write(
+								cyan(`\r\n[Sub: ${name}] `) + dim(`⏳ ${task}${(event.subagentTask ?? '').length > 60 ? '...' : ''}`) + '\r\n',
+							);
+							break;
+						}
+						case 'subagent_finished': {
+							flush();
+							const name = event.subagentName ?? '?';
+							const ok = event.subagentStatus === 'completed';
+							const icon = ok ? green('✓') : red('✗');
+							const elapsed = event.subagentElapsedMs ?? 0;
+							const elapsedStr = elapsed < 1000
+								? `${elapsed}ms`
+								: elapsed < 60000
+									? `${(elapsed / 1000).toFixed(1)}s`
+									: `${Math.floor(elapsed / 60000)}m ${Math.round((elapsed % 60000) / 1000)}s`;
+							process.stdout.write(
+								cyan(`[Sub: ${name}] `) + icon + dim(` ${elapsedStr}`) + '\r\n',
+							);
+							break;
+						}
+						case 'subagent_update':
+							// 增量更新（detail view 通过 store 自行拉取，此处不渲染）
+							break;
 						case 'done':
 							flush();
 							// 刷出表格渲染器中暂存的剩余内容
