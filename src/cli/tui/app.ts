@@ -537,6 +537,15 @@ export class TuiApp {
 					}
 					break;
 				}
+				case 'tool_output': {
+					const stream = entry.outputStream ?? 'stdout';
+					if (stream === 'stderr') {
+						process.stdout.write(yellow('  │ ') + dim(entry.content) + '\r\n');
+					} else {
+						process.stdout.write(cyan('  │ ') + dim(entry.content) + '\r\n');
+					}
+					break;
+				}
 			}
 		}
 

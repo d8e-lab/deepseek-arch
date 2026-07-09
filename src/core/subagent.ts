@@ -111,7 +111,17 @@ export async function runSubagentLoop(
 				error = 'unknown_tool';
 			} else {
 				try {
-					const r: ToolResult = await tool.execute(args, signal);
+					const r: ToolResult = await tool.execute(args, signal,
+						(line, stream) => {
+							emit({
+								type: 'tool_output',
+								content: line,
+								timestamp: Date.now(),
+								toolName: tc.function.name,
+								outputStream: stream,
+							});
+						},
+					);
 					result = r.content;
 					error = r.error;
 				} catch (err: unknown) {

@@ -10,17 +10,19 @@
 /** 子代理单轮输出条目 */
 export interface SubagentRoundEntry {
 	/** 条目类型 */
-	type: 'thinking' | 'content' | 'tool_call' | 'tool_result';
+	type: 'thinking' | 'content' | 'tool_call' | 'tool_result' | 'tool_output';
 	/** 文本内容 */
 	content: string;
 	/** 毫秒时间戳 */
 	timestamp: number;
-	/** tool name（type=tool_call/tool_result 时） */
+	/** tool name（type=tool_call/tool_result/tool_output 时） */
 	toolName?: string;
 	/** tool arguments（type=tool_call 时） */
 	toolArgs?: Record<string, unknown>;
 	/** tool result error（type=tool_result 时） */
 	toolError?: string;
+	/** 输出流（type=tool_output 时，stdout 或 stderr） */
+	outputStream?: 'stdout' | 'stderr';
 }
 
 /** 单个子代理的完整执行记录 */
