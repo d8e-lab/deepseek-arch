@@ -36,6 +36,8 @@ import type { Tool, ToolCallRecord } from '../tools/types.js';
 import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
 import { runSubagentLoop } from './subagent.js';
+import { SubagentStore } from './subagent-store.js';
+import type { SubagentRecord } from './subagent-store.js';
 
 
 /** 子代理 System Prompt 追加内容（行为约束） */
@@ -68,6 +70,7 @@ export class SessionManager {
 	private systemPrompt: Message | null = null;
 	private tools: Tool[] = [];
 	private _subagentAsync: boolean = false;
+	private subagentStore: SubagentStore = new SubagentStore();
 
 	constructor(storage: Storage, provider: ModelProvider, tools?: Tool[]) {
 		this.storage = storage;
@@ -156,17 +159,44 @@ export class SessionManager {
 		return this._subagentAsync;
 	}
 
+	/** 获取子代理输出存储（供 TUI 详情视图使用） */
+	getSubagentStore(): SubagentStore {
+		return this.subagentStore;
+	}
+
 	/**
 	 * 运行子代理循环（供 subagent_spawn 工具调用）
 	 *
 	 * 子代理使用独立消息上下文、受限工具集（无 spawn/wait/list/plan），
 	 * 复用当前 provider 和 system prompt（追加子代理行为约束）。
+	 * 通过 callbacks 将每轮输出写入 SubagentStore。
 	 */
-	async runSubagent(task: string, signal?: AbortSignal): Promise<string> {
-		const subagentTools = getAllTools(); // 不含 subagent 管理工具
+	async runSubagent(name: string, task: string, signal?: AbortSignal): Promise<string> {
+		const subagentTools = getAllTools();
 		const basePrompt = this.systemPrompt?.content ?? '';
 		const subagentPrompt = basePrompt + SUBAGENT_APPEND_PROMPT;
-		return runSubagentLoop(task, this.provider, subagentTools, subagentPrompt, signal);
+
+		this.subagentStore.start(name, task);
+
+		const result = await runSubagentLoop(task, this.provider, subagentTools, subagentPrompt, signal, {
+			onEntry: (entry) => {
+				this.subagentStore.push(name, entry);
+			},
+		});
+
+		this.subagentStore.finish(name, result, result.startsWith('Error:') || result.includes('(subagent cancelled'));
+
+		// 持久化子代理记录
+		if (this.session) {
+			const record = this.subagentStore.get(name);
+			if (record) {
+				try {
+					await this.storage.saveSubagentRecord(this.session.meta.id, record);
+				} catch { /* 持久化失败不阻塞 */ }
+			}
+		}
+
+		return result;
 	}
 
 	/** 更新会话标题 */
@@ -374,7 +404,7 @@ export class SessionManager {
 			msgs: Message[],
 			records: ToolCallRecord[],
 			emit: (event: StreamEvent) => void,
-			launch: (task: string) => Promise<string>,
+			launch: (name: string, task: string) => Promise<string>,
 			signal?: AbortSignal,
 			deferredSpawns?: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: PendingSubagent }[],
 		): Promise<boolean> => {
@@ -404,7 +434,7 @@ export class SessionManager {
 					}
 
 					const startMs = Date.now();
-					const promise = launch(task).then((r) => {
+					const promise = launch(name, task).then((r) => {
 						const sub = pending.get(name);
 						if (sub) {
 							sub.status = r.startsWith('Error:') ? 'failed' : 'completed';
@@ -428,9 +458,32 @@ export class SessionManager {
 					});
 
 					if (async) {
-						pushResult(
-							`[SPAWNED] Subagent "${name}" started. Task: ${task.slice(0, 150)}${task.length > 150 ? '...' : ''}\nUse list_subagents to check status, wait("${name}") to retrieve result.`,
-						);
+						// 异步模式：agentMessages 放简短确认，TUI 发紧凑事件
+						const summary = `[SPAWNED] Subagent "${name}" started. Task: ${task.slice(0, 150)}${task.length > 150 ? '...' : ''}`;
+						msgs.push({ role: 'tool', content: summary, tool_call_id: tc.id });
+						records.push({
+							id: tc.id, name: tc.function.name, arguments: args,
+							result: summary, duration_ms: 0,
+						});
+						emit({
+							type: 'subagent_spawned',
+							subagentName: name,
+							subagentTask: task,
+						});
+
+						// 后台监听完成时发 subagent_finished 事件
+						promise.then(() => {
+							const sub = pending.get(name);
+							if (sub) {
+								emit({
+									type: 'subagent_finished',
+									subagentName: name,
+									subagentStatus: sub.status === 'failed' ? 'failed' : 'completed',
+									subagentElapsedMs: Date.now() - startMs,
+									error: sub.status === 'failed' ? sub.result : undefined,
+								});
+							}
+						});
 					} else if (deferredSpawns) {
 						// 非异步：延迟到循环结束，与其它子代理并行 Promise.all
 						deferredSpawns.push({ name, tc, args, sub: pending.get(name)! });
@@ -695,7 +748,7 @@ export class SessionManager {
 					const intercepted = await interceptSubagentTool(
 						tc, args, pendingSubagents, retrievedSubagents,
 						asyncMode, agentMessages, toolRecords, onEvent,
-						(task) => this.runSubagent(task, signal),
+						(name, task) => this.runSubagent(name, task, signal),
 						signal,
 						deferredSpawns,
 					);

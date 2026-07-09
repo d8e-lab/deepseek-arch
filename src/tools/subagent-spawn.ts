@@ -8,7 +8,7 @@
 
 import type { Tool, ToolResult } from './types.js';
 
-export type SubagentRunner = (task: string, signal?: AbortSignal) => Promise<string>;
+export type SubagentRunner = (name: string, task: string, signal?: AbortSignal) => Promise<string>;
 
 let _runner: SubagentRunner | null = null;
 
@@ -55,7 +55,7 @@ export const subagentSpawnTool: Tool = {
 			return { content: 'Error: subagent runner not configured.', error: 'not_configured' };
 		}
 
-		const result = await _runner(task, signal);
+		const result = await _runner(name, task, signal);
 		return { content: `Subagent '${name}' result:\n\n${result}` };
 	},
 };

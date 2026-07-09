@@ -24,6 +24,7 @@ import type {
 	TurnRecord,
 	TokenUsage,
 } from '../types/index.js';
+import type { SubagentRecord } from './subagent-store.js';
 
 // ─── 文件模板 ────────────────────────────────────────
 
@@ -352,5 +353,58 @@ export class Storage {
 	async getTotalCost(sessionId: string): Promise<number> {
 		const meta = await this.readJSON<SessionMeta>(this.metaPath(sessionId));
 		return meta?.totalCost ?? 0;
+	}
+
+	// ─── Subagents ──────────────────────────────────
+
+	/** 子代理记录目录 */
+	private subagentDir(sessionId: string): string {
+		return join(this.sessionDir(sessionId), 'subagents');
+	}
+
+	/** 子代理索引文件路径 */
+	private subagentIndexPath(sessionId: string): string {
+		return join(this.subagentDir(sessionId), '_index.json');
+	}
+
+	/** 单个子代理记录文件路径 */
+	private subagentRecordPath(sessionId: string, name: string): string {
+		return join(this.subagentDir(sessionId), `${name}.json`);
+	}
+
+	/** 保存子代理执行记录 */
+	async saveSubagentRecord(sessionId: string, record: SubagentRecord): Promise<void> {
+		const dir = this.subagentDir(sessionId);
+		try { await access(dir); } catch { await mkdir(dir, { mode: 0o700 }); }
+
+		await this.writeJSON(this.subagentRecordPath(sessionId, record.name), record);
+
+		// 更新索引
+		const indexPath = this.subagentIndexPath(sessionId);
+		let index: string[] = [];
+		try {
+			const raw = await readFile(indexPath, 'utf-8');
+			index = JSON.parse(raw) as string[];
+		} catch { /* 首次创建 */ }
+
+		if (!index.includes(record.name)) {
+			index.push(record.name);
+			await writeFile(indexPath, JSON.stringify(index, null, 2) + '\n', { mode: 0o600 });
+		}
+	}
+
+	/** 加载指定子代理记录 */
+	async loadSubagentRecord(sessionId: string, name: string): Promise<SubagentRecord | null> {
+		return this.readJSON<SubagentRecord>(this.subagentRecordPath(sessionId, name));
+	}
+
+	/** 列出会话的所有子代理名 */
+	async listSubagentRecords(sessionId: string): Promise<string[]> {
+		try {
+			const raw = await readFile(this.subagentIndexPath(sessionId), 'utf-8');
+			return JSON.parse(raw) as string[];
+		} catch {
+			return [];
+		}
 	}
 }

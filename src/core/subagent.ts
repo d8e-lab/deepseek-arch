@@ -8,9 +8,16 @@
 import type { ModelProvider } from './model-provider.js';
 import type { Tool, ToolResult } from '../tools/types.js';
 import type { Message, ToolDefinition, ToolCall, ToolCallDelta } from '../types/index.js';
+import type { SubagentRoundEntry } from './subagent-store.js';
 
 /** 子代理最大轮次（安全上限，防止失控） */
 const MAX_SUBAGENT_ROUNDS = 25;
+
+/** 子代理执行回调（可选，用于实时捕获输出） */
+export interface SubagentCallbacks {
+	/** 每产生一条输出条目时调用 */
+	onEntry?: (entry: SubagentRoundEntry) => void;
+}
 
 /**
  * 运行子代理循环。
@@ -21,7 +28,12 @@ export async function runSubagentLoop(
 	tools: Tool[],
 	systemPrompt: string,
 	signal?: AbortSignal,
+	callbacks?: SubagentCallbacks,
 ): Promise<string> {
+	const emit = (entry: SubagentRoundEntry) => {
+		callbacks?.onEntry?.(entry);
+	};
+
 	const toolDefs: ToolDefinition[] = tools.map((t) => ({
 		type: 'function' as const,
 		function: {
@@ -53,7 +65,14 @@ export async function runSubagentLoop(
 			const delta = chunk.choices[0]?.delta;
 			if (!delta) continue;
 
-			if (delta.content) content += delta.content;
+			if (delta.reasoning_content) {
+				emit({ type: 'thinking', content: delta.reasoning_content, timestamp: Date.now() });
+			}
+
+			if (delta.content) {
+				content += delta.content;
+				emit({ type: 'content', content: delta.content, timestamp: Date.now() });
+			}
 
 			if (delta.tool_calls && delta.tool_calls.length > 0) {
 				accumulateToolCalls(pendingToolCalls, delta.tool_calls);
@@ -77,20 +96,40 @@ export async function runSubagentLoop(
 			let args: Record<string, unknown> = {};
 			try { args = JSON.parse(tc.function.arguments); } catch { /* ignore */ }
 
+			emit({
+				type: 'tool_call',
+				content: tc.function.name,
+				timestamp: Date.now(),
+				toolName: tc.function.name,
+				toolArgs: args,
+			});
+
 			let result: string;
+			let error: string | undefined;
 			if (!tool) {
 				result = `Unknown tool: ${tc.function.name}`;
+				error = 'unknown_tool';
 			} else {
 				try {
 					const r: ToolResult = await tool.execute(args, signal);
 					result = r.content;
+					error = r.error;
 				} catch (err: unknown) {
 					if (err instanceof Error && err.name === 'AbortError') {
 						return '(subagent cancelled by user)';
 					}
 					result = `Tool error: ${err instanceof Error ? err.message : String(err)}`;
+					error = 'tool_error';
 				}
 			}
+
+			emit({
+				type: 'tool_result',
+				content: result,
+				timestamp: Date.now(),
+				toolName: tc.function.name,
+				toolError: error,
+			});
 
 			messages.push({
 				role: 'tool',

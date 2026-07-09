@@ -85,12 +85,13 @@ export interface StreamEvent {
 	type: 'reasoning_delta' | 'content_delta' | 'done' | 'error'
 		| 'tool_call_delta' | 'tool_call_start' | 'tool_preview' | 'tool_result'
 		| 'tool_output'
-		| 'review_verdict';
+		| 'review_verdict'
+		| 'subagent_spawned' | 'subagent_finished' | 'subagent_update';
 	/** 增量文本（reasoning_delta / content_delta / tool_call_delta） */
 	text?: string;
 	/** token 用量（done 事件） */
 	usage?: TokenUsage;
-	/** 错误信息（error 事件 / tool_result 事件的工具执行错误） */
+	/** 错误信息（error 事件 / tool_result 事件的工具执行错误 / subagent_finished） */
 	error?: string;
 	/** tool call ID（tool_call_delta / tool_call_start / tool_preview / tool_result / tool_output） */
 	toolCallId?: string;
@@ -113,4 +114,12 @@ export interface StreamEvent {
 	reviewReason?: string;
 	/** 是否自动继续（review_verdict 事件：true=注入 continuation, false=等待用户） */
 	autoContinue?: boolean;
+	/** 子代理名（subagent_spawned / subagent_finished / subagent_update） */
+	subagentName?: string;
+	/** 子代理任务（subagent_spawned） */
+	subagentTask?: string;
+	/** 子代理状态（subagent_finished） */
+	subagentStatus?: 'completed' | 'failed';
+	/** 子代理耗时 ms（subagent_finished） */
+	subagentElapsedMs?: number;
 }

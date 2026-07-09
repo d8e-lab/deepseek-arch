@@ -56,7 +56,7 @@ async function createSessionManager(config: TuiConfig, asyncMode = false): Promi
 	const sessionMgr = new SessionManager(storage, apiClient, loadMasterTools());
 
 	// 注入子代理执行器（懒绑定，解决循环依赖）
-	setSubagentRunner((task, signal) => sessionMgr.runSubagent(task, signal));
+	setSubagentRunner((name, task, signal) => sessionMgr.runSubagent(name, task, signal));
 
 	// 设置子代理异步模式
 	sessionMgr.setSubagentAsync(asyncMode);
