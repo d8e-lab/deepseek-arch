@@ -2,8 +2,10 @@
  * Tools 共享工具 — 路径校验、二进制检测、交互命令拦截
  */
 
-import { resolve, relative, normalize } from 'node:path';
+import { resolve, relative, normalize, isAbsolute, basename } from 'node:path';
 import { stat, open } from 'node:fs/promises';
+
+const IS_WINDOWS = process.platform === 'win32';
 
 /** 搜索时默认跳过的目录 */
 export const SKIP_DIRS = new Set([
@@ -31,12 +33,9 @@ export function checkPath(inputPath: string, sessionCwd: string): PathCheck {
 	if (rel.startsWith('..')) {
 		return { valid: false, error: `path outside workspace: ${inputPath}` };
 	}
-	// 路径解析后如果跳出（如 /etc/passwd 通过 ../ 等价）
-	if (resolved !== sessionCwd && !resolved.startsWith(sessionCwd + '/') && resolved !== sessionCwd) {
-		// resolved 等于 sessionCwd 允许
-		if (resolved !== sessionCwd) {
-			return { valid: false, error: `path outside workspace: ${inputPath}` };
-		}
+	// 跨盘符（Windows）或非子目录路径
+	if (isAbsolute(rel)) {
+		return { valid: false, error: `path outside workspace: ${inputPath}` };
 	}
 	return { valid: true, resolved };
 }
@@ -65,52 +64,60 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
  * 无条件阻塞的交互式命令（无论参数如何，总是需要 TTY）
  * 命令名直接在此集合中即被阻塞。
  */
-const ALWAYS_INTERACTIVE = new Set([
-	'less',
-	'more',
-	'most',
-	'vim',
-	'vi',
-	'nvim',
-	'nano',
-	'emacs',
-	'ne',
-	'top',
-	'htop',
-	'btop',
-	'atop',
-	'glances',
-	'ssh',
-	'telnet',
-	'mosh',
-	'dialog',
-	'whiptail',
-	'gdb',
-	'lldb',
-	'watch',
-	'man',
-	'info',
-]);
+const ALWAYS_INTERACTIVE = IS_WINDOWS
+	? new Set([
+		'diskpart',   // Windows 磁盘管理
+		'ftp',        // 交互式 FTP 客户端
+	])
+	: new Set([
+		'less',
+		'more',
+		'most',
+		'vim',
+		'vi',
+		'nvim',
+		'nano',
+		'emacs',
+		'ne',
+		'top',
+		'htop',
+		'btop',
+		'atop',
+		'glances',
+		'ssh',
+		'telnet',
+		'mosh',
+		'dialog',
+		'whiptail',
+		'gdb',
+		'lldb',
+		'watch',
+		'man',
+		'info',
+	]);
 
 /**
  * 条件阻塞：仅当没有有效"脚本/命令参数"时视为交互式 REPL
  * key = 命令名, value = 表示"有脚本"的 flag 前缀集合
+ * Windows 上 PowerShell -Command 天然非交互，此表仅用于 Linux/macOS。
  */
-const REPL_COMMANDS: Record<string, string[]> = {
-	python: ['-c', '-m', '--'],
-	python3: ['-c', '-m', '--'],
-	node: ['-e', '-p', '--eval', '--print', '-r', '--require', '--'],
-	irb: ['-e', '-r', '--'],
-	lua: ['-e', '-l', '--'],
-	psql: ['-c', '-f', '-d', '--command', '--file', '--dbname'],
-	mysql: ['-e', '--execute'],
-	sqlite3: [], // 仅当参数含有 .db/.sqlite 文件时才视为非交互
-	'redis-cli': [], // 仅当参数非空且不以 - 开头才视为有命令
-	bash: ['-c'],
-	zsh: ['-c'],
-	fish: ['-c'],
-	sh: ['-c'],
-};
+const REPL_COMMANDS: Record<string, string[]> = IS_WINDOWS
+	? {}
+	: {
+		python: ['-c', '-m', '--'],
+		python3: ['-c', '-m', '--'],
+		node: ['-e', '-p', '--eval', '--print', '-r', '--require', '--'],
+		irb: ['-e', '-r', '--'],
+		lua: ['-e', '-l', '--'],
+		psql: ['-c', '-f', '-d', '--command', '--file', '--dbname'],
+		mysql: ['-e', '--execute'],
+		sqlite3: [], // 仅当参数含有 .db/.sqlite 文件时才视为非交互
+		'redis-cli': [], // 仅当参数非空且不以 - 开头才视为有命令
+		bash: ['-c'],
+		zsh: ['-c'],
+		fish: ['-c'],
+		sh: ['-c'],
+	};
 
 /** 检查命令名（首词）是否为无条件交互式 */
 function isAlwaysInteractive(cmdName: string): boolean {
@@ -178,12 +185,7 @@ export function isInteractiveCommand(command: string): string | null {
 		const tokens = seg.trim().split(/\s+/);
 		if (tokens.length === 0) continue;
 
-		let cmdName = tokens[0];
-		// 去掉路径前缀: /usr/bin/vim → vim
-		const slashIdx = cmdName.lastIndexOf('/');
-		if (slashIdx >= 0) {
-			cmdName = cmdName.slice(slashIdx + 1);
-		}
+		const cmdName = basename(tokens[0]);
 
 		if (isAlwaysInteractive(cmdName)) {
 			return `interactive command blocked: ${cmdName}`;

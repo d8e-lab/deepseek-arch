@@ -16,17 +16,17 @@ import { SessionManager } from '../core/session.js';
 import { Storage } from '../core/storage.js';
 import { TuiApp } from './tui/app.js';
 import type { TuiConfig } from './tui/types.js';
-import * as toolModules from '../tools/index.js';
+import { getAllTools, setSubagentRunner } from '../tools/index.js';
+import type { SubagentRunner } from '../tools/index.js';
 import { buildSystemPromptContext } from '../core/system-info.js';
 import { configureBrowser } from '../tools/browser-state.js';
 
-/** 从 barrel file 获取所有已注册的工具 */
-function loadTools() {
-	const tools = Object.values(toolModules);
-	return tools;
+/** 获取主代理工具集（含 subagent_spawn/wait/list_subagents） */
+function loadMasterTools() {
+	return getAllTools({ includeSubagent: true });
 }
 
-const PACKAGE_VERSION = '1.3.1';
+const PACKAGE_VERSION = "1.3.5";
 
 async function createTuiConfig(): Promise<TuiConfig> {
 	const cfg = await ConfigManager.getInstance().load();
@@ -47,13 +47,19 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	};
 }
 
-async function createSessionManager(config: TuiConfig): Promise<SessionManager> {
+async function createSessionManager(config: TuiConfig, asyncMode = false): Promise<SessionManager> {
 	const apiClient = new ApiClient(config.baseUrl, config.apiKey, config.model);
 	const cfg = ConfigManager.getInstance();
 	const sessionsDir = cfg.getSessionsDir();
 	const storage = new Storage(sessionsDir);
 
-	const sessionMgr = new SessionManager(storage, apiClient, loadTools());
+	const sessionMgr = new SessionManager(storage, apiClient, loadMasterTools());
+
+	// 注入子代理执行器（懒绑定，解决循环依赖）
+	setSubagentRunner((task, signal) => sessionMgr.runSubagent(task, signal));
+
+	// 设置子代理异步模式
+	sessionMgr.setSubagentAsync(asyncMode);
 
 	// 设置 system prompt
 	const defaultPrompt = cfg.get<string>('defaults.system_prompt') ?? 'default';
@@ -83,8 +89,10 @@ program
 	.option('--yolo', 'skip all tool confirmations (auto-approve edit/shell)')
 	.option('--browser', 'show browser window (instead of headless)')
 	.option('--cdp <url>', 'connect to host browser via CDP (e.g. http://127.0.0.1:9222)')
-	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string }) => {
+	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
+	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean }) => {
 		try {
+			const asyncMode = options.async ?? false;
 			const tuiConfig = await createTuiConfig();
 
 			// 浏览器配置：CLI 参数优先，无则回退到环境变量
@@ -99,7 +107,7 @@ program
 				process.exit(1);
 			}
 
-			const sessionMgr = await createSessionManager(tuiConfig);
+			const sessionMgr = await createSessionManager(tuiConfig, asyncMode);
 
 			if (options.resume) {
 				// 按 ID 或名称查找会话
@@ -113,13 +121,13 @@ program
 					process.exit(1);
 				}
 				await sessionMgr.resumeSession(session.meta.id);
-				const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance(), options.yolo);
+				const app = new TuiApp(sessionMgr, tuiConfig, loadMasterTools(), ConfigManager.getInstance(), options.yolo);
 				await app.start(session);
 				return;
 			}
 
 			// 新会话
-			const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance(), options.yolo);
+			const app = new TuiApp(sessionMgr, tuiConfig, loadMasterTools(), ConfigManager.getInstance(), options.yolo);
 			await app.start();
 		} catch (err: any) {
 			console.error('Failed to start:', err?.message ?? err);
@@ -168,7 +176,8 @@ program
 	.description('List all sessions or resume a specific one')
 	.option('--browser', 'show browser window (instead of headless)')
 	.option('--cdp <url>', 'connect to host browser via CDP')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string }) => {
+	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; async?: boolean }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
@@ -190,10 +199,11 @@ program
 				}
 
 				const tuiConfig = await createTuiConfig();
-				const sessionMgr = await createSessionManager(tuiConfig);
+				const asyncMode = options?.async ?? false;
+				const sessionMgr = await createSessionManager(tuiConfig, asyncMode);
 				await sessionMgr.resumeSession(session.meta.id);
 
-				const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance());
+				const app = new TuiApp(sessionMgr, tuiConfig, loadMasterTools(), ConfigManager.getInstance());
 				await app.start(session);
 				return;
 			}
@@ -248,7 +258,7 @@ program
 			const sessionMgr = await createSessionManager(tuiConfig);
 			await sessionMgr.resumeSession(session.meta.id);
 
-			const app = new TuiApp(sessionMgr, tuiConfig, loadTools(), ConfigManager.getInstance());
+			const app = new TuiApp(sessionMgr, tuiConfig, loadMasterTools(), ConfigManager.getInstance());
 			await app.start(session);
 		} catch (err: any) {
 			console.error('Failed:', err?.message ?? err);

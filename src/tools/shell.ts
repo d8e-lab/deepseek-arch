@@ -1,5 +1,9 @@
 /**
- * ShellTool — 执行 shell 命令
+ * ShellTool — 执行 shell / PowerShell 命令
+ *
+ * 平台适配：
+ *   - Linux/macOS: /bin/bash -c
+ *   - Windows:      powershell.exe -Command (fallback cmd.exe /c)
  *
  * 安全约束：
  *   1. 禁止 sudo
@@ -20,7 +24,17 @@ const TRUNCATE_BYTES = 8192;
 /** 命令超时 (10 分钟) */
 const CMD_TIMEOUT_MS = 10 * 60 * 1000;
 
-/** 截断字节串：保留最后 N 字节，前缀 “... (truncated)” */
+const IS_WINDOWS = process.platform === 'win32';
+
+/** 获取平台对应的 shell 解释器 */
+function getShellBin(): { bin: string; arg: string } {
+	if (IS_WINDOWS) {
+		return { bin: 'powershell.exe', arg: '-Command' };
+	}
+	return { bin: '/bin/bash', arg: '-c' };
+}
+
+/** 截断字节串：保留最后 N 字节，前缀 "... (truncated)" */
 function truncateOutput(raw: string, maxBytes: number): string {
 	const buf = Buffer.from(raw, 'utf-8');
 	if (buf.length <= maxBytes) return raw;
@@ -30,14 +44,17 @@ function truncateOutput(raw: string, maxBytes: number): string {
 
 export const shellTool: Tool = {
 	name: 'execute_command',
-	description:
-		'执行 shell 命令。文件操作有专属工具（read_file/edit_file/write_file/search_content），仅在无专属工具覆盖时才用本工具。典型适用场景：git、npm/pip、测试运行、构建脚本、权限修改等系统操作。禁止 sudo。默认工作目录为会话目录。',
+	description: IS_WINDOWS
+		? '执行 PowerShell 命令。文件操作有专属工具（read_file/edit_file/write_file/search_content），仅在无专属工具覆盖时才用本工具。典型适用场景：git、npm/pip、测试运行、构建脚本、权限修改等系统操作。注意：命令在 PowerShell 中执行，请使用 PowerShell 语法（如 Get-ChildItem 而非 ls，Select-String 而非 grep，Get-Content 而非 cat）。默认工作目录为会话目录。'
+		: '执行 shell 命令。文件操作有专属工具（read_file/edit_file/write_file/search_content），仅在无专属工具覆盖时才用本工具。典型适用场景：git、npm/pip、测试运行、构建脚本、权限修改等系统操作。禁止 sudo。默认工作目录为会话目录。',
 	parameters: {
 		type: 'object',
 		properties: {
 			command: {
 				type: 'string',
-				description: '要执行的 shell 命令（非交互式）',
+				description: IS_WINDOWS
+					? '要执行的 PowerShell 命令（非交互式）'
+					: '要执行的 shell 命令（非交互式）',
 			},
 			cwd: {
 				type: 'string',
@@ -61,7 +78,7 @@ export const shellTool: Tool = {
 		}
 
 		// ── sudo 禁止 ──────────────────────────────
-		if (/\bsudo\b/.test(command)) {
+		if (!IS_WINDOWS && /\bsudo\b/.test(command)) {
 			return { content: '', error: 'sudo is forbidden' };
 		}
 
@@ -96,9 +113,11 @@ export const shellTool: Tool = {
 			throw err;
 		}
 
+		const { bin, arg } = getShellBin();
+
 		return new Promise((resolveResult, reject) => {
 			let settled = false;
-			const child = spawn('/bin/bash', ['-c', command], {
+			const child = spawn(bin, [arg, command], {
 				cwd: workDir,
 				timeout: CMD_TIMEOUT_MS,
 				stdio: ['pipe', 'pipe', 'pipe'],
@@ -239,13 +258,18 @@ export const shellTool: Tool = {
 				resolveResult(result);
 			});
 
-			// 监听外部 AbortSignal，终止子进程并 reject
+			// 监听外部 AbortSignal，终止子进程
+			// Windows 不支持 POSIX 信号，使用无参 child.kill()
 			if (signal) {
 				const onAbort = () => {
-					child.kill('SIGTERM');
-					setTimeout(() => {
-						if (!child.killed) child.kill('SIGKILL');
-					}, 1000);
+					if (IS_WINDOWS) {
+						child.kill();
+					} else {
+						child.kill('SIGTERM');
+						setTimeout(() => {
+							if (!child.killed) child.kill('SIGKILL');
+						}, 1000);
+					}
 					if (!settled) {
 						settled = true;
 						const err = new Error('The operation was aborted');

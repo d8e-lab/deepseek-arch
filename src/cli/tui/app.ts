@@ -59,6 +59,8 @@ export class TuiApp {
 	private tools: Tool[];
 	private yolo: boolean;
 	private reviewModel?: string;
+	/** 子代理异步模式 */
+	private asyncMode = false;
 	private conversation: ConversationView;
 	private input: InputEditor;
 	private state: AppState = AppState.IDLE;
@@ -80,6 +82,7 @@ export class TuiApp {
 		this.tools = tools ?? [];
 		this.yolo = yolo ?? false;
 		this.reviewModel = config.reviewModel;
+		this.asyncMode = sessionMgr.getSubagentAsync();
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
 	}
@@ -287,6 +290,10 @@ export class TuiApp {
 			return await this.toggleYolo();
 		}
 
+		if (content.startsWith('/async')) {
+			return await this.toggleAsync();
+		}
+
 		return false;
 	}
 
@@ -313,9 +320,10 @@ export class TuiApp {
 
 		const cmds: [string, string][] = [
 			['/model [name]', 'Switch model (interactive picker if no arg)'],
+			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
+			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
 			['/help',          'Show this command list'],
 			['/context',       'Show session context & token usage'],
-			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
 			['/exit  |  Ctrl+C', 'Exit the session'],
 			['!<shell cmd>',   'Execute a shell command (output hidden from model)'],
 		];
@@ -343,6 +351,7 @@ export class TuiApp {
 		process.stdout.write(`  Provider:  ${this.config.provider}\r\n`);
 		process.stdout.write(`  Model:     ${this.config.model}\r\n`);
 		process.stdout.write(`  YOLO mode: ${this.yolo ? green('ON') : dim('OFF')}\r\n`);
+		process.stdout.write(`  Subagent:  ${this.asyncMode ? green('async') : dim('sync')}\r\n`);
 		process.stdout.write(`  Session:   ${meta?.id ?? '—'}${meta?.title ? ' "' + dim(meta.title) + '"' : ''}\r\n`);
 		process.stdout.write(`  Turns:     ${meta?.turnCount ?? turns.length}\r\n`);
 
@@ -393,6 +402,20 @@ export class TuiApp {
 		process.stdout.write(
 			green(`[YOLO mode: ${this.yolo ? 'ON' : 'OFF'}]`) +
 			dim(this.yolo ? '  (auto-approve tool executions)' : '  (confirm before tool execution)') +
+			'\r\n',
+		);
+		return true;
+	}
+
+	/** /async — 切换子代理异步模式 */
+	private async toggleAsync(): Promise<boolean> {
+		this.asyncMode = !this.asyncMode;
+		this.sessionMgr.setSubagentAsync(this.asyncMode);
+		process.stdout.write(
+			green(`[Subagent async: ${this.asyncMode ? 'ON' : 'OFF'}]`) +
+			dim(this.asyncMode
+				? '  (subagent_spawn returns [SPAWNED], use wait/list_subagents)'
+				: '  (subagent_spawn blocks until complete)') +
 			'\r\n',
 		);
 		return true;
