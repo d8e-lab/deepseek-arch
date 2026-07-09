@@ -735,13 +735,18 @@ export class SessionManager {
 						// JSON 解析失败，args 留空
 					}
 
-					// 通知 TUI：工具开始执行
-					onEvent({
-						type: 'tool_call_start',
-						toolCallId: tc.id,
-						toolName: tc.function.name,
-						toolArgs: args,
-					});
+					// 通知 TUI：工具开始执行（异步模式下子代理工具有紧凑事件，跳过避免冗余）
+					const isSubagentTool = tc.function.name === 'subagent_spawn'
+						|| tc.function.name === 'wait'
+						|| tc.function.name === 'list_subagents';
+					if (!(isSubagentTool && asyncMode)) {
+						onEvent({
+							type: 'tool_call_start',
+							toolCallId: tc.id,
+							toolName: tc.function.name,
+							toolArgs: args,
+						});
+					}
 
 					// ── 子代理工具拦截 ──────────────────
 					const deferredSpawns: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: PendingSubagent }[] = [];

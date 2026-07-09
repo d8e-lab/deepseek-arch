@@ -428,9 +428,35 @@ export class TuiApp {
 	}
 
 	/** /subagent [name] — 显示子代理详情 */
-	private showSubagentDetail(name?: string): true {
+	private async showSubagentDetail(name?: string): Promise<true> {
 		const store = this.sessionMgr.getSubagentStore();
-		const names = store.list();
+		let names = store.list();
+
+		// 如果内存中没有，尝试从存储加载历史记录
+		if (names.length === 0) {
+			const sessionId = this.sessionMgr.getSessionId();
+			if (sessionId && this.configMgr) {
+				try {
+					const { Storage } = await import('../../core/storage.js');
+					const sessionsDir = this.configMgr.getSessionsDir();
+					if (sessionsDir) {
+						const storage = new Storage(sessionsDir);
+						names = await storage.listSubagentRecords(sessionId);
+						// 加载到内存 store 以便后续 get()
+						for (const n of names) {
+							const record = await storage.loadSubagentRecord(sessionId, n);
+							if (record) {
+								store.start(n, record.task);
+								for (const entry of record.entries) {
+									store.push(n, entry);
+								}
+								store.finish(n, record.result ?? '', record.status === 'failed');
+							}
+						}
+					}
+				} catch { /* 存储不可用，忽略 */ }
+			}
+		}
 
 		if (names.length === 0) {
 			process.stdout.write(dim('No subagents in current session.\r\n'));
