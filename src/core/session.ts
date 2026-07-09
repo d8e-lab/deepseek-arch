@@ -37,7 +37,6 @@ import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
 import { runSubagentLoop } from './subagent.js';
 import { SubagentStore } from './subagent-store.js';
-import type { SubagentRecord } from './subagent-store.js';
 
 
 /** 子代理 System Prompt 追加内容（行为约束） */
