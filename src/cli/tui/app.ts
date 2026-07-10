@@ -1164,10 +1164,9 @@ export class TuiApp {
 						}
 						case 'subagent_finished': {
 							flush();
-							// 重置 reasoning 追踪（内容已 flush），
-							// 保持 contentStarted 不让流式重起产生多余空行
-							reasoningStarted = false;
-							if (!contentStarted) contentStarted = true;
+							// 不重置 reasoning/content 追踪 —— 内容已 flush，
+							// 让后续流式内容自然延续，不加多余标签或空行
+							// 重置 reasoningEndsWithNewline 使 reasoning→content 过渡正常
 							reasoningEndsWithNewline = true;
 							const name = event.subagentName ?? '?';
 							const ok = event.subagentStatus === 'completed';

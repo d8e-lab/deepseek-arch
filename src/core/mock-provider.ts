@@ -26,6 +26,46 @@ function generateReply(input: string): string {
 	return `你说了: "${input}"。这是 MockProvider 的默认回复。`;
 }
 
+/** 检查是否需要模拟 tool_calls */
+function getMockToolCalls(
+	lastUserContent: string,
+): { name: string; args: Record<string, unknown>; id: string }[] | null {
+	if (lastUserContent.includes('#spawn')) {
+		const nameMatch = lastUserContent.match(/#spawn:(\w+)/);
+		const subName = nameMatch ? nameMatch[1] : 'mock-sub';
+		const taskMatch = lastUserContent.match(/#task:(.+?)(?:\s|$)/);
+		const task = taskMatch ? taskMatch[1] : 'Mock subagent task';
+		return [{
+			name: 'subagent_spawn',
+			args: { subagent_name: subName, task },
+			id: 'call_mock_spawn_001',
+		}];
+	}
+	if (lastUserContent.includes('#wait')) {
+		const nameMatch = lastUserContent.match(/#wait:(\w+)/);
+		const subName = nameMatch ? nameMatch[1] : 'mock-sub';
+		return [{
+			name: 'wait',
+			args: { subagent_name: subName },
+			id: 'call_mock_wait_001',
+		}];
+	}
+	if (lastUserContent.includes('#list')) {
+		return [{
+			name: 'list_subagents',
+			args: {},
+			id: 'call_mock_list_001',
+		}];
+	}
+	if (lastUserContent.includes('#multispawn')) {
+		return [
+			{ name: 'subagent_spawn', args: { subagent_name: 'sub-a', task: 'Task A' }, id: 'call_multi_001' },
+			{ name: 'subagent_spawn', args: { subagent_name: 'sub-b', task: 'Task B' }, id: 'call_multi_002' },
+		];
+	}
+	return null;
+}
+
 /** 标准 mock usage（对每次调用都一样，便于断言） */
 const STANDARD_USAGE: TokenUsage = {
 	prompt_tokens: 10,
@@ -80,6 +120,33 @@ export class MockProvider implements ModelProvider {
 			throw new Error('Internal Server Error');
 		}
 
+		// tool_calls 模拟
+		const mockTools = getMockToolCalls(content);
+		if (mockTools && mockTools.length > 0) {
+			return {
+				id: 'mock-cmpl-tc-001',
+				object: 'chat.completion',
+				created: Math.floor(Date.now() / 1000),
+				model: options?.model ?? this.modelName,
+				choices: [
+					{
+						index: 0,
+						message: {
+							role: 'assistant',
+							content: '',
+							tool_calls: mockTools.map((t, i) => ({
+								id: t.id,
+								type: 'function' as const,
+								function: { name: t.name, arguments: JSON.stringify(t.args) },
+							})),
+						},
+						finish_reason: 'tool_calls',
+					},
+				],
+				usage: { ...STANDARD_USAGE },
+			};
+		}
+
 		const reply = generateReply(content);
 
 		return {
@@ -93,7 +160,7 @@ export class MockProvider implements ModelProvider {
 					message: {
 						role: 'assistant',
 						content: reply,
-						reasoning_content: content.includes('#nothink') ? undefined : `[模拟思考] 用户说了 "${content}"`.repeat(20),
+						reasoning_content: content.includes('#nothink') ? undefined : `[模拟思考] 用户说了 "${content}"`,
 					},
 					finish_reason: 'stop',
 				},
@@ -125,6 +192,67 @@ export class MockProvider implements ModelProvider {
 		}
 		if (content.includes('#error-429')) {
 			throw new ApiError(429, 'Rate limit exceeded');
+		}
+
+		// tool_calls 模拟（流式）
+		const mockTools = getMockToolCalls(content);
+		if (mockTools && mockTools.length > 0) {
+			for (let ti = 0; ti < mockTools.length; ti++) {
+				const t = mockTools[ti];
+				const argsStr = JSON.stringify(t.args);
+				// 先发工具名
+				yield {
+					id: 'mock-chunk-tc',
+					object: 'chat.completion.chunk',
+					created: Math.floor(Date.now() / 1000),
+					model: options?.model ?? this.modelName,
+					choices: [{
+						index: 0,
+						delta: {
+							tool_calls: [{
+								index: ti,
+								id: t.id,
+								function: { name: t.name, arguments: '' },
+							}],
+						},
+						finish_reason: null,
+					}],
+				};
+				// 再逐个字符发参数
+				for (const ch of argsStr) {
+					yield {
+						id: 'mock-chunk-tc',
+						object: 'chat.completion.chunk',
+						created: Math.floor(Date.now() / 1000),
+						model: options?.model ?? this.modelName,
+						choices: [{
+							index: 0,
+							delta: {
+								tool_calls: [{
+									index: ti,
+									function: { arguments: ch },
+								}],
+							},
+							finish_reason: null,
+						}],
+					};
+					await this.delay();
+				}
+			}
+			// 最后一个 chunk 标记 finish_reason
+			yield {
+				id: 'mock-chunk-tc',
+				object: 'chat.completion.chunk',
+				created: Math.floor(Date.now() / 1000),
+				model: options?.model ?? this.modelName,
+				choices: [{
+					index: 0,
+					delta: {},
+					finish_reason: 'tool_calls',
+				}],
+				usage: { ...STANDARD_USAGE },
+			};
+			return;
 		}
 
 		const reply = generateReply(content);
