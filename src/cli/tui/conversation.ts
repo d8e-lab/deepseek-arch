@@ -8,7 +8,7 @@
  */
 
 import type { TurnRecord, TokenUsage } from '../../types/index.js';
-import { strDisplayWidth, cyan, dim, green, red, renderDiffLine } from './renderer.js';
+import { strDisplayWidth, cyan, dim, green, red, renderDiffLine, stripAnsi } from './renderer.js';
 import { MarkdownTableRenderer } from './markdown.js';
 
 /** think 最大显示行数 */
@@ -189,5 +189,13 @@ export class ConversationView {
 	 */
 	getLineCount(turns: TurnRecord[], termWidth: number): number {
 		return this.render(turns, termWidth).length;
+	}
+
+	/**
+	 * 渲染对话历史为纯文本（剥离 ANSI 颜色码）
+	 * 供 tui_capture / tui_render_preview 工具使用，让模型看到结构化渲染结果
+	 */
+	renderToText(turns: TurnRecord[], termWidth: number): string[] {
+		return this.render(turns, termWidth).map(line => stripAnsi(line));
 	}
 }

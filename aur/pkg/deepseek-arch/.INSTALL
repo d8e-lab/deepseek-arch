@@ -1,0 +1,11 @@
+post_install() {
+	echo ""
+	echo "==> Optional dependencies for full functionality:"
+	echo "    chromium:  sudo pacman -S chromium        # browser tools"
+	echo "    git:       sudo pacman -S git             # version control"
+	echo "    ripgrep:   sudo pacman -S ripgrep         # faster file search"
+	echo ""
+	echo "==> Or connect to host Edge browser via CDP:"
+	echo "    BROWSER_CDP=http://host:9222 deepseek-arch chat"
+	echo ""
+}

@@ -180,6 +180,16 @@ export function charDisplayWidth(ch: string): number {
 	return isWideChar(code) ? 2 : 1;
 }
 
+/** ANSI 转义序列正则（匹配所有 CSI/SGR 序列，含 private sequences） */
+const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
+
+/**
+ * 剥离 ANSI 转义序列，返回纯文本
+ */
+export function stripAnsi(text: string): string {
+	return text.replace(ANSI_RE, '');
+}
+
 /** 计算字符串显示宽度 */
 export function strDisplayWidth(str: string): number {
 	let width = 0;
