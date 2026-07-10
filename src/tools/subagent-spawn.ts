@@ -22,9 +22,18 @@ export const subagentSpawnTool: Tool = {
 		'Spawn a subagent to independently execute a sub-task. ' +
 		'The subagent has shell, file (read/write/edit/search), and browser tools. ' +
 		'It CANNOT spawn sub-subagents or use plan/save_plan. ' +
-		'Use this to parallelize independent work: spawn multiple subagents in one round. ' +
+		'Use this to PARALLELIZE independent work: spawn MULTIPLE subagents in ONE round. ' +
 		'Each subagent needs a unique subagent_name for later tracking (via wait/list_subagents). ' +
-		'Be specific about the task and expected output format — the subagent works independently.',
+		'Be specific about the task and expected output format — the subagent works independently.\n\n' +
+		'WHEN TO USE:\n' +
+		'- Research/analysis: read files, search code, investigate issues, return findings\n' +
+		'- Independent module work: changes limited to one module without cross-dependencies\n' +
+		'- Test writing: write tests separately from implementation\n' +
+		'- Code review: let a subagent review code and find bugs\n' +
+		'- File operations: multi-file edits that don\'t depend on each other\n\n' +
+		'WORKFLOW: Spawn multiple subagents in one round → continue your own work → ' +
+		'use list_subagents to check progress → use wait to retrieve results.\n' +
+		'Efficient parallel execution is encouraged — do NOT serialize independent work.',
 	parameters: {
 		type: 'object',
 		properties: {
@@ -32,13 +41,17 @@ export const subagentSpawnTool: Tool = {
 				type: 'string',
 				description:
 					'Unique name for this subagent. Used to reference it in wait/list_subagents. ' +
-					'Must be unique among all currently running or unretrieved subagents.',
+					'Must be unique among all currently running or unretrieved subagents. ' +
+					'Use descriptive names like "research_pkgbuild", "check_deps", "write_tests".',
 			},
 			task: {
 				type: 'string',
 				description:
 					'Detailed task description including expected output format and any constraints. ' +
-					'The subagent cannot ask questions — give it everything it needs.',
+					'The subagent cannot ask questions — give it everything it needs. ' +
+					'Be explicit about: what to do, what files to read/modify, what to return, and any constraints. ' +
+					'Example: "Read src/core/session.ts lines 200-400, extract all subagent-related functions, ' +
+					'and write a summary of their signatures and purposes."',
 			},
 		},
 		required: ['subagent_name', 'task'],

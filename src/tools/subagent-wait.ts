@@ -15,7 +15,13 @@ export const waitTool: Tool = {
 		'If the subagent is still running, this blocks until it finishes. ' +
 		'If the subagent has already completed but the result hasn\'t been retrieved yet, returns immediately. ' +
 		'Use list_subagents to check which subagents are running/completed before calling wait. ' +
-		'Each subagent result can only be retrieved once.',
+		'Each subagent result can only be retrieved once.\n\n' +
+		'TYPICAL WORKFLOW:\n' +
+		'1. Spawn multiple subagents in one round (parallel)\n' +
+		'2. Continue your own main-line work while they run\n' +
+		'3. Call list_subagents to see who\'s done\n' +
+		'4. Call wait("name") for each completed subagent to get results\n' +
+		'5. Newly spawned subagents can be waited for after they finish',
 	parameters: {
 		type: 'object',
 		properties: {
