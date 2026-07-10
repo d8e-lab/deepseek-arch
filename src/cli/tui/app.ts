@@ -70,6 +70,8 @@ export class TuiApp {
 	private shellMode = false;
 	/** 自我交互模式（可启动子 TUI 实例） */
 	private selfInteraction = false;
+	/** subagent 详情视图是否激活（Ctrl+T 切换用） */
+	private subagentViewActive = false;
 	/** 待发送的 shell 上下文（[shell_start]...[shell_end] 块） */
 	private pendingShellContext: string[] = [];
 	/** 上次渲染的可见行数（用于缩小时清理残留行） */
@@ -323,6 +325,7 @@ export class TuiApp {
 	private async inputCycle(): Promise<void> {
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
+		this.subagentViewActive = false; // 新输入循环开始时重置 subagent 视图开关
 
 		// 画输入区域
 		this.drawInputArea();
@@ -417,6 +420,17 @@ export class TuiApp {
 
 		if (content.startsWith('/subagent')) {
 			const arg = content.slice(9).trim();
+			if (!arg) {
+				this.subagentViewActive = true;
+				return this.showSubagentDetail();
+			}
+			if (arg === 'hide' || arg === 'dismiss' || arg === 'back') {
+				// 收起 subagent 视图，聚焦主对话
+				this.subagentViewActive = false;
+				this.printMainConversationResume();
+				return true;
+			}
+			this.subagentViewActive = true;
 			return this.showSubagentDetail(arg);
 		}
 
@@ -448,7 +462,8 @@ export class TuiApp {
 			['/model [name]', 'Switch model (interactive picker if no arg)'],
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
-			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
+			['/subagent [name]','Show subagent details (Ctrl+T toggles list)'],
+			['/subagent hide',  'Collapse subagent view, focus main conversation'],
 			['/help',          'Show this command list'],
 			['/context',       'Show session context & token usage'],
 			['/exit  |  Ctrl+C', 'Exit the session'],
@@ -636,6 +651,29 @@ export class TuiApp {
 		}
 
 		process.stdout.write(dim('─'.repeat(60)) + '\r\n');
+
+		// 查看完毕后自动回显主对话的最新一轮，帮助用户重新聚焦主线
+		this.printMainConversationResume();
+	}
+
+	/** 打印主对话最新一轮的摘要，用于 subagent 详情查看后快速定位主线 */
+	private printMainConversationResume(): void {
+		const session = this.sessionMgr.getSession();
+		const turns = session?.turns ?? [];
+		if (turns.length === 0) return;
+
+		const lastTurn = turns[turns.length - 1];
+		const cols = getTermSize().cols;
+
+		process.stdout.write(green('▸ Main Conversation') + '\r\n');
+		process.stdout.write(green('  [You] ') + lastTurn.user.content.split('\n')[0].slice(0, cols - 20) + '\r\n');
+		if (lastTurn.assistant.content) {
+			const firstLine = lastTurn.assistant.content.split('\n')[0].slice(0, cols - 20);
+			if (firstLine) {
+				process.stdout.write('  ' + firstLine + '\r\n');
+			}
+		}
+		process.stdout.write(dim('─'.repeat(Math.min(cols - 1, 60))) + '\r\n');
 	}
 
 	// ─── shell 命令模式 ────────────────────────────
@@ -730,7 +768,15 @@ export class TuiApp {
 		// Ctrl+T: toggle subagent detail view
 		if (data === '\x14') {
 			if (this.state === AppState.IDLE) {
-				this.showSubagentDetail();
+				if (this.subagentViewActive) {
+					// 已激活 → 收起，回显主对话
+					this.subagentViewActive = false;
+					this.printMainConversationResume();
+				} else {
+					// 未激活 → 显示 subagent 列表
+					this.subagentViewActive = true;
+					this.showSubagentDetail();
+				}
 				this.printSeparator();
 				this.lastVisibleInputRows = 1;
 				this.lastCursorDisplayRow = 0;
