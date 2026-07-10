@@ -56,7 +56,7 @@ Workflow for debugging:
 4. Make code changes based on observations
 5. Repeat 1-3 to verify fixes`;
 
-const PACKAGE_VERSION = "1.3.5";
+const PACKAGE_VERSION = "1.3.6";
 
 async function createTuiConfig(): Promise<TuiConfig> {
 	const cfg = await ConfigManager.getInstance().load();
