@@ -372,7 +372,7 @@ function analyzeDimPerLine(raw: string): boolean[] {
 	const rawLines = raw.split(/\r?\n/);
 	return rawLines.map(line => {
 		// 检查行内是否有任何 \x1b[2m 序列
-		return /\\x1b\[2m/.test(line) || line.includes('\x1b[2m');
+		return line.includes('\x1b[2m');
 	});
 }
 
@@ -380,3 +380,14 @@ function analyzeDimPerLine(raw: string): boolean[] {
 
 /** 全局唯一的 TUI Session 管理器实例 */
 export const sessionManager = new TuiSessionManagerImpl();
+
+// 进程退出时清理所有子会话
+function cleanupAll() {
+	const allSessions = sessionManager.list();
+	for (const s of allSessions) {
+		try { sessionManager.stop(s.sessionId); } catch { /* ignore */ }
+	}
+}
+process.on('exit', cleanupAll);
+process.on('SIGTERM', () => { cleanupAll(); process.exit(0); });
+process.on('SIGINT', () => { cleanupAll(); process.exit(0); });
