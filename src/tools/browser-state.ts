@@ -198,12 +198,15 @@ class BrowserState {
 		}
 
 		// ── 模式 B: 本地启动 Chromium ───────────────────
+		// Windows: msedge, Linux/macOS: chromium
+		const channel = process.platform === 'win32' ? 'msedge' : 'chromium';
+
 		const headed = browserConfig?.headed ?? process.env.BROWSER_HEADED === '1';
 		const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || '';
 
 		const launchOptions: Record<string, unknown> = {
 			headless: !headed,
-			channel: 'chromium',
+			channel,
 			args: [
 				'--no-sandbox',
 				'--disable-setuid-sandbox',
