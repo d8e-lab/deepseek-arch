@@ -603,7 +603,7 @@ export class TuiApp {
 				process.stdout.write(dim(`     ${record.task.slice(0, 80)}${record.task.length > 80 ? '...' : ''}`) + '\r\n');
 			}
 			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
-			process.stdout.write(dim(`/subagent <name> for full detail  |  ${names.length} total`) + '\r\n');
+			process.stdout.write(dim(`/subagent <name> for details  |  ${names.length} total`) + '\r\n');
 			return true;
 		}
 
@@ -618,7 +618,7 @@ export class TuiApp {
 		return true;
 	}
 
-	/** 打印子代理完整记录 */
+	/** 打印子代理摘要（仅状态+结果，不展示内部 thinking/content/tool 明细） */
 	private printSubagentRecord(record: import('../../core/subagent-store.js').SubagentRecord): void {
 		const icon = record.status === 'running' ? '⏳'
 			: record.status === 'completed' ? '✓'
@@ -629,50 +629,10 @@ export class TuiApp {
 
 		process.stdout.write(yellow(`\r\n═══ Subagent: ${record.name} ${icon} ${dim(elapsed)} ═══`) + '\r\n');
 		process.stdout.write(dim(`Task: ${record.task}`) + '\r\n');
-		process.stdout.write(dim('─'.repeat(60)) + '\r\n');
 
-		for (const entry of record.entries) {
-			switch (entry.type) {
-				case 'thinking':
-					// thinking 不渲染（太冗长），跳过
-					break;
-				case 'content': {
-					const lines = entry.content.split('\n');
-					for (const line of lines) {
-						process.stdout.write('  ' + line + '\r\n');
-					}
-					break;
-				}
-				case 'tool_call':
-					process.stdout.write(
-						cyan(`\r\n  [T: ${entry.toolName ?? '?'}] `) + dim(JSON.stringify(entry.toolArgs ?? {})) + '\r\n',
-					);
-					break;
-				case 'tool_result': {
-					const lines = entry.content.split('\n');
-					for (const line of lines) {
-						process.stdout.write(cyan('  │ ') + dim(line) + '\r\n');
-					}
-					if (entry.toolError) {
-						process.stdout.write(red(`  ✖ ${entry.toolError}`) + '\r\n');
-					}
-					break;
-				}
-				case 'tool_output': {
-					const stream = entry.outputStream ?? 'stdout';
-					if (stream === 'stderr') {
-						process.stdout.write(yellow('  │ ') + dim(entry.content) + '\r\n');
-					} else {
-						process.stdout.write(cyan('  │ ') + dim(entry.content) + '\r\n');
-					}
-					break;
-				}
-			}
-		}
-
+		// 只显示最终结果，不展示内部 thinking/content/tool_call/tool_result 明细
 		if (record.result) {
-			process.stdout.write(dim('\r\n── Final Result ──') + '\r\n');
-			process.stdout.write(record.result + '\r\n');
+			process.stdout.write(dim(`Result: `) + record.result + '\r\n');
 		}
 
 		process.stdout.write(dim('─'.repeat(60)) + '\r\n');
