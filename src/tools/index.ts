@@ -121,7 +121,9 @@ export interface GetToolsOptions {
 }
 
 export function getAllTools(opts?: GetToolsOptions): Tool[] {
-	const tools = opts?.includeSubagent ? [...SUBAGENT_TOOLS] : [...ALL_TOOLS];
+	// includeSubagent=true → 全量工具集（主代理使用，含 plan/subagent_spawn 等）
+	// includeSubagent=false/undefined → 子代理工具集（不含 spawn/wait/list/plan）
+	const tools = opts?.includeSubagent ? [...ALL_TOOLS] : [...SUBAGENT_TOOLS];
 	if (opts?.selfInteraction) {
 		tools.push(...SELF_INTERACTION_TOOLS);
 	}
