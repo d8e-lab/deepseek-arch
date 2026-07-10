@@ -33,6 +33,11 @@ export { listSubagentsTool } from './subagent-list.js';
 export { tuiCaptureTool, setCaptureFn } from './tui-capture.js';
 export type { CaptureFn } from './tui-capture.js';
 export { tuiRenderPreviewTool } from './tui-render-preview.js';
+export { tuiSessionStartTool } from './tui-session-start.js';
+export { tuiSessionSendTool } from './tui-session-send.js';
+export { tuiSessionReadTool } from './tui-session-read.js';
+export { tuiSessionCaptureTool } from './tui-session-capture.js';
+export { tuiSessionStopTool, tuiSessionListTool } from './tui-session-stop.js';
 
 // ─── 具名 import（供 getAllTools 使用）─────────────
 
@@ -55,6 +60,11 @@ import { waitTool } from './subagent-wait.js';
 import { listSubagentsTool } from './subagent-list.js';
 import { tuiCaptureTool } from './tui-capture.js';
 import { tuiRenderPreviewTool } from './tui-render-preview.js';
+import { tuiSessionStartTool } from './tui-session-start.js';
+import { tuiSessionSendTool } from './tui-session-send.js';
+import { tuiSessionReadTool } from './tui-session-read.js';
+import { tuiSessionCaptureTool } from './tui-session-capture.js';
+import { tuiSessionStopTool, tuiSessionListTool } from './tui-session-stop.js';
 
 /** 所有工具（含 spawn/wait/list/plan），主代理使用 */
 const ALL_TOOLS: Tool[] = [
@@ -79,6 +89,16 @@ const ALL_TOOLS: Tool[] = [
 	tuiRenderPreviewTool,
 ];
 
+/** 自我交互工具集（仅在 --self-interaction 时启用） */
+const SELF_INTERACTION_TOOLS: Tool[] = [
+	tuiSessionStartTool,
+	tuiSessionSendTool,
+	tuiSessionReadTool,
+	tuiSessionCaptureTool,
+	tuiSessionStopTool,
+	tuiSessionListTool,
+];
+
 /** 子代理工具集（不含 spawn/wait/list/plan/save_plan） */
 const SUBAGENT_TOOLS: Tool[] = [
 	shellTool,
@@ -95,6 +115,15 @@ const SUBAGENT_TOOLS: Tool[] = [
 	browserPressKeyTool,
 ];
 
-export function getAllTools(opts?: { includeSubagent?: boolean }): Tool[] {
-	return opts?.includeSubagent ? [...ALL_TOOLS] : [...SUBAGENT_TOOLS];
+export interface GetToolsOptions {
+	includeSubagent?: boolean;
+	selfInteraction?: boolean;
+}
+
+export function getAllTools(opts?: GetToolsOptions): Tool[] {
+	const tools = opts?.includeSubagent ? [...SUBAGENT_TOOLS] : [...ALL_TOOLS];
+	if (opts?.selfInteraction) {
+		tools.push(...SELF_INTERACTION_TOOLS);
+	}
+	return tools;
 }

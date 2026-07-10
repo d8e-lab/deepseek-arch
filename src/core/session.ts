@@ -82,6 +82,11 @@ export class SessionManager {
 		this.systemPrompt = prompt;
 	}
 
+	/** 获取当前 system prompt */
+	getSystemPrompt(): Message | null {
+		return this.systemPrompt;
+	}
+
 	// ─── 会话生命周期 ──────────────────────────────
 
 	/** 创建新会话并持久化 meta.json，同时保存 system prompt 供调试检查 */

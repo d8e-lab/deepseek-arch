@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline';
 import { Command } from 'commander';
 import { ConfigManager, DEFAULT_CONFIG_DIR } from '../core/config.js';
 import { ApiClient } from '../core/api.js';
+import { MockProvider } from '../core/mock-provider.js';
 import { SessionManager } from '../core/session.js';
 import { Storage } from '../core/storage.js';
 import { TuiApp } from './tui/app.js';
@@ -23,14 +24,37 @@ import { buildSystemPromptContext } from '../core/system-info.js';
 import { configureBrowser } from '../tools/browser-state.js';
 
 /** 获取主代理工具集（含 subagent_spawn/wait/list_subagents） */
-function loadMasterTools(debug = false) {
-	const tools = getAllTools({ includeSubagent: true });
+function loadMasterTools(debug = false, selfInteraction = false) {
+	const tools = getAllTools({
+		includeSubagent: true,
+		selfInteraction,
+	});
 	if (!debug) {
 		// 非 debug 模式不暴露 TUI 调试工具
 		return tools.filter(t => t.name !== 'tui_capture' && t.name !== 'tui_render_preview');
 	}
 	return tools;
 }
+
+/** 自我交互模式系统提示追加内容 */
+const SELF_INTERACTION_PROMPT = `
+## Self-Interaction Mode
+
+You have the ability to spawn child TUI sessions for testing and debugging. Use these tools:
+
+- **tui_session_start** — Start a child deepseek-arch chat instance in a PTY (300×200 terminal)
+- **tui_session_send** — Type text / press keys into the child session
+- **tui_session_read** — Read the child session's output buffer
+- **tui_session_capture** — Get a structured TUI rendering report from the child
+- **tui_session_stop** — Terminate a child session
+- **tui_session_list** — List all active child sessions
+
+Workflow for debugging:
+1. tui_session_start — launch a child instance
+2. tui_session_send — send a test message to the child
+3. tui_session_capture — check the child's TUI rendering
+4. Make code changes based on observations
+5. Repeat 1-3 to verify fixes`;
 
 const PACKAGE_VERSION = "1.3.5";
 
@@ -53,13 +77,15 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	};
 }
 
-async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false): Promise<SessionManager> {
-	const apiClient = new ApiClient(config.baseUrl, config.apiKey, config.model);
+async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false, mock = false): Promise<SessionManager> {
+	const provider = mock
+		? new MockProvider('mock-chat', 50)
+		: new ApiClient(config.baseUrl, config.apiKey, config.model);
 	const cfg = ConfigManager.getInstance();
 	const sessionsDir = cfg.getSessionsDir();
 	const storage = new Storage(sessionsDir);
 
-	const sessionMgr = new SessionManager(storage, apiClient, tools);
+	const sessionMgr = new SessionManager(storage, provider, tools);
 
 	// 注入子代理执行器（懒绑定，解决循环依赖）
 	setSubagentRunner((name, task, signal) => sessionMgr.runSubagent(name, task, signal));
@@ -97,10 +123,17 @@ program
 	.option('--cdp <url>', 'connect to host browser via CDP (e.g. http://127.0.0.1:9222)')
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
-	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean }) => {
+	.option('--mock', 'use MockProvider (no API calls, deterministic output)')
+	.option('--self-interaction', 'enable self-interaction mode (spawn child TUI sessions for testing)')
+	.action(async (options: {
+		resume?: string; yolo?: boolean; browser?: boolean; cdp?: string;
+		async?: boolean; debug?: boolean; mock?: boolean; selfInteraction?: boolean;
+	}) => {
 		try {
 			const asyncMode = options.async ?? false;
 			const debug = options.debug ?? false;
+			const mock = options.mock ?? false;
+			const selfInteraction = options.selfInteraction ?? false;
 			const tuiConfig = await createTuiConfig();
 
 			// 浏览器配置：CLI 参数优先，无则回退到环境变量
@@ -109,16 +142,23 @@ program
 				cdpUrl: options.cdp ?? undefined,
 			});
 
-			if (!tuiConfig.apiKey) {
+			if (!tuiConfig.apiKey && !mock && !selfInteraction) {
 				console.error('Error: api_key not configured.');
 				console.error(`Set it in ${DEFAULT_CONFIG_DIR}/providers.toml or set DEEPSEEK_API_KEY env var.`);
 				process.exit(1);
 			}
 
-			// 主代理工具集（debug 模式才含 tui_capture / tui_render_preview）
-			const tools = loadMasterTools(debug);
+			// 主代理工具集
+			const tools = loadMasterTools(debug, selfInteraction);
 
-			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode);
+			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, mock);
+
+			// self-interaction 模式追加系统提示
+			if (selfInteraction) {
+				const currentSys = sessionMgr.getSystemPrompt();
+				const content = (currentSys?.content ?? '') + '\n' + SELF_INTERACTION_PROMPT;
+				sessionMgr.setSystemPrompt({ role: 'system', content });
+			}
 
 			if (options.resume) {
 				// 按 ID 或名称查找会话
@@ -145,6 +185,7 @@ program
 			if (debug) {
 				setCaptureFn(() => app.captureScreen());
 			}
+			app.setSelfInteraction(selfInteraction);
 			await app.start();
 		} catch (err: any) {
 			console.error('Failed to start:', err?.message ?? err);

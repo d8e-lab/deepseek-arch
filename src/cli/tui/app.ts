@@ -68,6 +68,8 @@ export class TuiApp {
 	private running = false;
 	/** shell 命令模式 */
 	private shellMode = false;
+	/** 自我交互模式（可启动子 TUI 实例） */
+	private selfInteraction = false;
 	/** 待发送的 shell 上下文（[shell_start]...[shell_end] 块） */
 	private pendingShellContext: string[] = [];
 	/** 上次渲染的可见行数（用于缩小时清理残留行） */
@@ -85,6 +87,11 @@ export class TuiApp {
 		this.asyncMode = sessionMgr.getSubagentAsync();
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
+	}
+
+	/** 设置自我交互模式（在 start() 之前调用） */
+	setSelfInteraction(enabled: boolean): void {
+		this.selfInteraction = enabled;
 	}
 
 	// ─── 生命周期 ──────────────────────────────────
@@ -121,8 +128,12 @@ export class TuiApp {
 		const turnCount = session?.meta.turnCount ?? 0;
 		const lastUsage = session?.meta.lastUsage;
 
+		const modeTags: string[] = [];
+		if (this.selfInteraction) modeTags.push('SELF-INTERACTION');
+		const modeStr = modeTags.length > 0 ? `  |  [${modeTags.join(', ')}]` : '';
+
 		process.stdout.write(
-			`deepseek-arch v${this.config.version}  |  Provider: ${this.config.provider}  |  Model: ${this.config.model}\r\n`,
+			`deepseek-arch v${this.config.version}  |  Provider: ${this.config.provider}  |  Model: ${this.config.model}${modeStr}\r\n`,
 		);
 
 		let infoStr = `Session: ${sessionId.slice(0, 8)}...  |  Turns: ${turnCount}`;
