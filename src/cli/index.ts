@@ -26,7 +26,7 @@ function loadMasterTools() {
 	return getAllTools({ includeSubagent: true });
 }
 
-const PACKAGE_VERSION = "1.3.5";
+const PACKAGE_VERSION = "1.3.6";
 
 async function createTuiConfig(): Promise<TuiConfig> {
 	const cfg = await ConfigManager.getInstance().load();
