@@ -30,6 +30,9 @@ export { subagentSpawnTool, setSubagentRunner } from './subagent-spawn.js';
 export type { SubagentRunner } from './subagent-spawn.js';
 export { waitTool } from './subagent-wait.js';
 export { listSubagentsTool } from './subagent-list.js';
+export { tuiCaptureTool, setCaptureFn } from './tui-capture.js';
+export type { CaptureFn } from './tui-capture.js';
+export { tuiRenderPreviewTool } from './tui-render-preview.js';
 
 // ─── 具名 import（供 getAllTools 使用）─────────────
 
@@ -50,6 +53,8 @@ import { browserPressKeyTool } from './browser-press-key.js';
 import { subagentSpawnTool } from './subagent-spawn.js';
 import { waitTool } from './subagent-wait.js';
 import { listSubagentsTool } from './subagent-list.js';
+import { tuiCaptureTool } from './tui-capture.js';
+import { tuiRenderPreviewTool } from './tui-render-preview.js';
 
 /** 所有工具（含 spawn/wait/list/plan），主代理使用 */
 const ALL_TOOLS: Tool[] = [
@@ -70,6 +75,8 @@ const ALL_TOOLS: Tool[] = [
 	subagentSpawnTool,
 	waitTool,
 	listSubagentsTool,
+	tuiCaptureTool,
+	tuiRenderPreviewTool,
 ];
 
 /** 子代理工具集（不含 spawn/wait/list/plan/save_plan） */

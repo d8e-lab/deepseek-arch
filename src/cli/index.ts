@@ -16,7 +16,7 @@ import { SessionManager } from '../core/session.js';
 import { Storage } from '../core/storage.js';
 import { TuiApp } from './tui/app.js';
 import type { TuiConfig } from './tui/types.js';
-import { getAllTools, setSubagentRunner } from '../tools/index.js';
+import { getAllTools, setSubagentRunner, setCaptureFn } from '../tools/index.js';
 import type { SubagentRunner } from '../tools/index.js';
 import { buildSystemPromptContext } from '../core/system-info.js';
 import { configureBrowser } from '../tools/browser-state.js';
@@ -122,12 +122,14 @@ program
 				}
 				await sessionMgr.resumeSession(session.meta.id);
 				const app = new TuiApp(sessionMgr, tuiConfig, loadMasterTools(), ConfigManager.getInstance(), options.yolo);
+				setCaptureFn(() => app.captureScreen());
 				await app.start(session);
 				return;
 			}
 
 			// 新会话
 			const app = new TuiApp(sessionMgr, tuiConfig, loadMasterTools(), ConfigManager.getInstance(), options.yolo);
+			setCaptureFn(() => app.captureScreen());
 			await app.start();
 		} catch (err: any) {
 			console.error('Failed to start:', err?.message ?? err);
