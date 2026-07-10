@@ -54,7 +54,17 @@ export async function runSubagentLoop(
 		if (signal?.aborted) return '(subagent cancelled by user)';
 
 		let content = '';
+		let contentFlushBuffer = '';
 		const pendingToolCalls: ToolCall[] = [];
+		const FLUSH_INTERVAL = 300; // ms
+		let lastFlush = Date.now();
+
+		const flushContent = (ts: number) => {
+			if (contentFlushBuffer) {
+				emit({ type: 'content', content: contentFlushBuffer, timestamp: ts });
+				contentFlushBuffer = '';
+			}
+		};
 
 		const toolOptions = toolDefs.length > 0 ? { tools: toolDefs } : {};
 
@@ -66,18 +76,29 @@ export async function runSubagentLoop(
 			if (!delta) continue;
 
 			if (delta.reasoning_content) {
+				flushContent(Date.now());
 				emit({ type: 'thinking', content: delta.reasoning_content, timestamp: Date.now() });
 			}
 
 			if (delta.content) {
 				content += delta.content;
-				emit({ type: 'content', content: delta.content, timestamp: Date.now() });
+				contentFlushBuffer += delta.content;
+				// 定期冲刷缓冲，避免逐字输出
+				const now = Date.now();
+				if (now - lastFlush > FLUSH_INTERVAL || delta.content.includes('\n')) {
+					flushContent(now);
+					lastFlush = now;
+				}
 			}
 
 			if (delta.tool_calls && delta.tool_calls.length > 0) {
+				flushContent(Date.now());
 				accumulateToolCalls(pendingToolCalls, delta.tool_calls);
 			}
 		}
+
+		// 冲刷剩余内容
+		flushContent(Date.now());
 
 		if (content) finalContent = content;
 

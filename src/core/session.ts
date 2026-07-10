@@ -641,22 +641,11 @@ export class SessionManager {
 						reasoning_content: roundReasoning || undefined,
 					});
 
-					// 异步模式：存在未取走且未完成的子代理 → 提醒模型继续
+					// 异步模式：不调 API 轮询子代理状态。
+					// 直接结束 agent loop，子代理在后台继续运行，
+					// 用户可通过 /subagent 查看或 wait 获取结果。
 					if (asyncMode && pendingSubagents.size > 0) {
-						const hasIncomplete = [...pendingSubagents.values()].some(
-							(s) => s.status === 'running',
-						);
-						const hasUnretrieved = [...pendingSubagents.entries()].some(
-							([name, s]) =>
-								(s.status === 'completed' || s.status === 'failed') &&
-								!retrievedSubagents.has(name),
-						);
-
-						if (hasIncomplete || hasUnretrieved) {
-							// 状态块已显示子代理状态（注入在 roundMessages 末尾），无需额外提醒
-							continue;
-						}
-						// All retrieved → normal flow (break)
+						break;
 					}
 
 					// ── YOLO 审查：检查模型回复是否需要自动继续 ──────
