@@ -1,6 +1,6 @@
 pkgbase = deepseek-arch
 	pkgdesc = Terminal AI agent with Agent Loop, Tool Calling, streaming, persistent storage and browser tools
-	pkgver = 1.3.5
+	pkgver = 1.3.6
 	pkgrel = 1
 	url = https://github.com/d8e-lab/deepseek-arch
 	install = deepseek-arch.install
@@ -12,6 +12,6 @@ pkgbase = deepseek-arch
 	optdepends = ripgrep: enhanced file search
 	options = !strip
 	source = deepseek-arch-1.3.5-prebuilt.tar.gz::https://github.com/d8e-lab/deepseek-arch/releases/download/v1.3.5/deepseek-arch-1.3.5-prebuilt.tar.gz
-	sha256sums = 788e91798a74a3c104d32e488abe94f1730b01ad241c4cf6cd3a16903bb25bd1
+	sha256sums = 2da5d7ec90915457c188748b4ee629575c602cb8326b27766c28910856522841
 
 pkgname = deepseek-arch
