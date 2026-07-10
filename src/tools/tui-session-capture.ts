@@ -97,11 +97,63 @@ export const tuiSessionCaptureTool: Tool = {
 		// 先等一会让任何进行中的渲染完成
 		await new Promise(resolve => setTimeout(resolve, 300));
 
-		const cap = sessionManager.captureScreen(sessionId);
-		if (!cap) {
-			return { content: `Error: session "${sessionId}" returned no data.` };
+		// 从 buffer 直接解析，不依赖 captureScreen 的 ANSI dim 分析
+		// 因为 usage/dim 等行也有 dim 标记会干扰 think/content 区分
+		const raw = sessionManager.readBuffer(sessionId) ?? '';
+		if (!raw) {
+			return { content: `Error: session "${sessionId}" has no data yet.` };
 		}
 
-		return { content: formatCapture(cap) };
+		const stripped = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r\n?/g, '\n');
+		const lines = stripped.split('\n');
+
+		// 结构解析：找 [You]、[Think]、[T:、usage 标记
+		const sections: string[] = [];
+		let currentSection = '';
+		let sectionType = '';
+
+		for (const line of lines) {
+			const t = line.trimStart();
+			if (t.startsWith('[You]')) {
+				if (currentSection) sections.push(currentSection);
+				currentSection = '### User\n' + t.replace('[You] ', '');
+				sectionType = 'user';
+			} else if (t.startsWith('[Think]')) {
+				if (currentSection) sections.push(currentSection);
+				currentSection = '### Think\n' + t.replace('[Think] ', '');
+				sectionType = 'think';
+			} else if (t.startsWith('[T:')) {
+				if (currentSection && sectionType !== 'tool') {
+					sections.push(currentSection);
+				}
+				currentSection = (sectionType === 'tool' ? currentSection + '\n' : '### Tool\n') + t;
+				sectionType = 'tool';
+			} else if (line.includes('---') && (line.includes('in') || line.includes('out'))) {
+				if (currentSection) sections.push(currentSection);
+				currentSection = '### Usage\n' + line.replace(/^-+\s*/, '').replace(/\s*-+$/, '').trim();
+				sectionType = 'usage';
+			} else if (line.trim() && !line.startsWith('─') && !line.startsWith('deepseek-arch v') && !line.startsWith('Session:')) {
+				// 非标签内容：追加到当前 section
+				if (sectionType && currentSection) {
+					const content = line.trim();
+					if (content) currentSection += '\n' + content;
+				}
+			}
+		}
+		if (currentSection) sections.push(currentSection);
+
+		const headerLine = lines.find(l => l.startsWith('deepseek-arch v')) ?? '';
+
+		return {
+			content: [
+				'=== TUI Session Capture ===',
+				`Terminal: 300×200  Buffer: ${raw.length} bytes`,
+				headerLine ? `Header: ${headerLine}` : '',
+				'',
+				...sections,
+				'',
+				'=== End ===',
+			].join('\n'),
+		};
 	},
 };

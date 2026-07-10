@@ -25,8 +25,6 @@ interface ManagedSession {
 	proc: pty.IPty;
 	buffer: string;
 	maxBufferSize: number;
-	/** 缓冲区中最后一个完整刷新的起始位置 */
-	lastFullRenderPos: number;
 }
 
 // ─── 管理器 ─────────────────────────────────────────
@@ -74,7 +72,6 @@ class TuiSessionManagerImpl {
 			proc,
 			buffer: '',
 			maxBufferSize,
-			lastFullRenderPos: 0,
 		};
 
 		proc.onData((data: string) => {
@@ -84,13 +81,6 @@ class TuiSessionManagerImpl {
 			if (session.buffer.length > session.maxBufferSize) {
 				const excess = session.buffer.length - session.maxBufferSize;
 				session.buffer = session.buffer.slice(excess);
-				// 调整 lastFullRenderPos
-				session.lastFullRenderPos = Math.max(0, session.lastFullRenderPos - excess);
-			}
-			// 检测 fullDraw 标记（全屏重绘后更新的 lastFullRenderPos）
-			if (data.includes('\x1b[2J') || data.includes('\x1b[H')) {
-				// 终端清屏 + 光标归位 → 新的全屏绘制开始
-				session.lastFullRenderPos = Math.max(0, session.buffer.lastIndexOf(data) + data.length);
 			}
 		});
 
@@ -128,15 +118,14 @@ class TuiSessionManagerImpl {
 
 	/**
 	 * 获取最近一次全屏刷新的内容
+	 * 注意：当前 TUI 使用 inline 渲染（无 alternate screen），
+	 * 所以始终返回完整 buffer。lastFullRenderPos 跟踪机制
+	 * 仅对使用 \x1b[2J+\x1b[H 全屏刷新的 TUI 有效。
 	 */
 	readLastScreen(sessionId: string): string | null {
 		const session = this.sessions.get(sessionId);
 		if (!session) return null;
-		if (session.lastFullRenderPos === 0 && session.buffer.length > 0) {
-			// 如果没有检测到全屏重绘，返回全部内容
-			return session.buffer;
-		}
-		return session.buffer.slice(session.lastFullRenderPos);
+		return session.buffer;
 	}
 
 	/**

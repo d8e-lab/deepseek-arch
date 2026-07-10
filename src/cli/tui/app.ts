@@ -1153,15 +1153,22 @@ export class TuiApp {
 						}
 						case 'subagent_spawned': {
 							flush();
+							// tool_call_start 已输出 [T: subagent_spawn] 行并带 \r\n，
+							// 此处不用再加前导 \r\n 防止多余空行
 							const name = event.subagentName ?? '?';
 							const task = (event.subagentTask ?? '').slice(0, 60);
 							process.stdout.write(
-								cyan(`\r\n[Sub: ${name}] `) + dim(`⏳ ${task}${(event.subagentTask ?? '').length > 60 ? '...' : ''}`) + '\r\n',
+								cyan(`[Sub: ${name}] `) + dim(`⏳ ${task}${(event.subagentTask ?? '').length > 60 ? '...' : ''}`) + '\r\n',
 							);
 							break;
 						}
 						case 'subagent_finished': {
 							flush();
+							// 重置 reasoning 追踪（内容已 flush），
+							// 保持 contentStarted 不让流式重起产生多余空行
+							reasoningStarted = false;
+							if (!contentStarted) contentStarted = true;
+							reasoningEndsWithNewline = true;
 							const name = event.subagentName ?? '?';
 							const ok = event.subagentStatus === 'completed';
 							const icon = ok ? green('✓') : red('✗');
@@ -1172,7 +1179,7 @@ export class TuiApp {
 									? `${(elapsed / 1000).toFixed(1)}s`
 									: `${Math.floor(elapsed / 60000)}m ${Math.round((elapsed % 60000) / 1000)}s`;
 							process.stdout.write(
-								cyan(`[Sub: ${name}] `) + icon + dim(` ${elapsedStr}`) + '\r\n',
+								cyan(`\r\n[Sub: ${name}] `) + icon + dim(` ${elapsedStr}`) + '\r\n',
 							);
 							break;
 						}
