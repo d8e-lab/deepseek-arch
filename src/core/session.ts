@@ -77,6 +77,10 @@ export class SessionManager {
 		this.storage = storage;
 		this.provider = provider;
 		if (tools) this.tools = tools;
+		// 锁定会话基准目录，供所有工具使用
+		if (!process.env.DEEPSEEK_ARCH_SESSION_CWD) {
+			process.env.DEEPSEEK_ARCH_SESSION_CWD = process.cwd();
+		}
 	}
 
 	/** 设置 system prompt（每次请求前插入消息队列首位） */
