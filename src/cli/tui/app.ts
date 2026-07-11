@@ -981,40 +981,29 @@ export class TuiApp {
 	/** 处理命令模式下按 Enter */
 	private handleCommandModeEnter(resolve: (value: string | null) => void): void {
 		const content = this.input.buildSubmitContent();
-		const prefix = this.input.getCommandPrefix();
-
-		// 如果有选中的建议，先补全再提交
-		const suggestion = this.input.getCurrentSuggestion();
-		if (suggestion && prefix.length > 0 && this.input.getSuggestions().length > 0) {
-			// Tab 补全后再 Enter 的逻辑由用户手动控制，这里不自动补全
-		}
 
 		// 检查命令是否已知
 		const cmdName = content.split(/\s+/)[0]; // 取第一个单词（命令名）
 		const isKnown = AVAILABLE_COMMANDS.some((c) => c === cmdName);
 
-		// 退出命令模式并清除建议
-		this.input.exitCommandMode();
-		this.clearSuggestions();
-		this.stdinHandler = null;
-
 		if (isKnown) {
+			// 已知命令：退出命令模式并提交
+			this.input.exitCommandMode();
+			this.clearSuggestions();
+			this.stdinHandler = null;
 			resolve(content);
 		} else {
-			// 未知命令 → 显示错误，不回传给模型
+			// 未知命令：显示错误，不清除输入，让用户继续编辑
 			const errMsg = `Unknown command: ${content}`;
 			process.stdout.write(red(errMsg) + '\r\n');
-			this.input.clear();
-			this.renderInput();
-			// 不 resolve，重新进入输入循环
-			// 但此时 stdinHandler 已被设为 null，readUserInput 的 Promise 不会 resolve
-			// 需要使用原始方式返回
+			process.stdout.write(dim(`  Available: ${AVAILABLE_COMMANDS.join(', ')}`) + '\r\n');
+			// 不清除输入，不清除 stdinHandler，用户可继续修改/重试
+			// 重新渲染输入区域
 			this.printSeparator();
-			// 重新进入输入循环 —— 通过递归调用 inputCycle？
-			// 更好的方式：通知 inputCycle 重新开始
-			// 实际上 stdinHandler 设为 null 后 readUserInput 会 pending，
-			// 我们需要重新设置 handler。
-			this.readUserInput().then(resolve).catch(() => resolve(null));
+			this.lastVisibleInputRows = 1;
+			this.lastCursorDisplayRow = 0;
+			this.drawInputArea();
+			this.renderInput();
 		}
 	}
 

@@ -1,725 +1,704 @@
-# 浏览器反爬虫机制调研 + 多标签页处理方案
+# Browser Anti-Crawling Mechanisms and Multi-Tab Handling
 
-> 调研日期：2026-07-11 · 作者：subagent research · 基于 deepseek-arch v1.3.7
+> Research and recommendations for the deepseek-arch Playwright-based browser automation system.
+> Created: 2026-07-14 · Updated: 2026-07-14
 
----
+## Table of Contents
 
-## 目录
-
-1. [反爬虫机制与对抗方案](#1-反爬虫机制与对抗方案)
-   - [1.1 自动化浏览器被检测的原因](#11-自动化浏览器被检测的原因)
-   - [1.2 各项对抗手段分析](#12-各项对抗手段分析)
-   - [1.3 推荐方案（按优先级排序）](#13-推荐方案按优先级排序)
-   - [1.4 代码实现示例](#14-代码实现示例)
-2. [多标签页场景分析](#2-多标签页场景分析)
-   - [2.1 当前架构的问题](#21-当前架构的问题)
-   - [2.2 CDP 模式的多标签页分析](#22-cdp-模式的多标签页分析)
-   - [2.3 多标签页管理方案](#23-多标签页管理方案)
-   - [2.4 推荐实现路径](#24-推荐实现路径)
-   - [2.5 代码实现示例](#25-代码实现示例)
-3. [总结与实施路线图](#3-总结与实施路线图)
+1. [Anti-Crawling Mechanisms Affecting Playwright](#1-anti-crawling-mechanisms-affecting-playwright)
+2. [Existing Mitigations and Their Limitations](#2-existing-mitigations-and-their-limitations)
+3. [Recommended Approach for This Project](#3-recommended-approach-for-this-project)
+4. [Multi-Tab Handling](#4-multi-tab-handling)
+5. [Practical Recommendations](#5-practical-recommendations)
 
 ---
 
-## 1. 反爬虫机制与对抗方案
+## 1. Anti-Crawling Mechanisms Affecting Playwright
 
-### 1.1 自动化浏览器被检测的原因
+### 1.1 Browser Fingerprinting
 
-Playwright 控制的 Chromium 会被网站通过以下特征识别为自动化工具：
+Modern anti-bot systems (Cloudflare Turnstile, DataDome, Akamai Bot Manager, reCAPTCHA v3, PerimeterX) use a combination of signals to distinguish automated browsers from real users. These fall into several categories:
 
-#### 1.1.1 `navigator.webdriver` 标志（最显著）
+#### JavaScript Property Detection
 
-Playwright 在启动的浏览器中会设置 `navigator.webdriver = true`。网站通过简单的 JS 检查即可发现：
-
-```javascript
-// 网站端的检测
-if (navigator.webdriver) {
-  // 拒绝访问 / 返回空白页
-}
-```
-
-默认 Playwright 会设置此标志，且无法通过 launch args 关闭。
-
-#### 1.1.2 User-Agent 包含 "HeadlessChrome"
-
-Headless 模式下 User-Agent 示例：
-```
-Mozilla/5.0 ... Chrome/... HeadlessChrome/...
-```
-
-网站可以检查 `HeadlessChrome` 标记。
-
-#### 1.1.3 `window.chrome` 对象差异
-
-- 真实 Chrome 有完整的 `window.chrome` 对象（含 `app`, `runtime`, `loadTimes` 等）
-- Headless Chromium 可能缺少部分属性
-- Playwright 启动的 browser context 默认设置 `window.chrome` 为 `undefined`
-
-#### 1.1.4 WebDriver 属性泄漏
-
-Playwright (via CDP) 会设置多个 WebDriver 相关属性：
-
-| 检测点 | 说明 |
-|--------|------|
-| `navigator.webdriver` | 最直接，Playwright 默认置 true |
-| `navigator.plugins` 长度 | Headless 可能返回 0 |
-| `navigator.languages` | 缺少或异常 |
-| `navigator.hardwareConcurrency` | 可能异常（如返回 2） |
-
-#### 1.1.5 浏览器指纹（canvas / WebGL / fonts）
-
-Headless 模式使用的渲染后端与真实浏览器不同：
-
-- **Canvas fingerprint**：Headless 使用 SwiftShader 软件渲染，canvas.toDataURL() 输出与 GPU 渲染不同
-- **WebGL**：`renderer` 字段返回 `"SwiftShader"` 而非真实 GPU 型号
-- **Fonts**：Headless 环境预装字体较少，`document.fonts` 返回列表短
-- **Screen resolution**：Headless 默认 800×600，而真实浏览器通常更大
-
-#### 1.1.6 行为模式检测
-
-- 鼠标无真实移动路径（Playwright click 是瞬间跳跃到目标位置）
-- 滚动模式不自然（直接 JS evaluate 跳转 vs 真实用户手势滚动）
-- 导航后无延迟立即执行操作（人类需要几百毫秒反应时间）
-
-#### 1.1.7 Chrome DevTools Protocol 连接检测
-
-某些高级反爬（如 Cloudflare 5秒盾的高级模式）可以检测到 CDP 连接的存在。
-
-### 1.2 各项对抗手段分析
-
-#### 1.2.1 Chromium launch args 参数（低开销 · 部分有效）
-
-**当前已使用的 args：**
-- `--no-sandbox`
-- `--disable-setuid-sandbox`
-- `--disable-dev-shm-usage`
-
-**建议新增的 args：**
-
-| 参数 | 作用 | 备注 |
-|------|------|------|
-| `--disable-blink-features=AutomationControlled` | **关键！** 移除 `navigator.webdriver` 的 AutomationControlled 特性 | Playwright 1.61 支持 |
-| `--disable-automation` | 禁用自动化提示栏 | Chromium 专属 |
-| `--disable-infobars` | 隐藏 "Chrome is being controlled" 提示 | 已不推荐，用上面的替代 |
-| `--window-size=1920,1080` | 设置窗口大小，避免默认 800×600 | 与 viewport 配合 |
-| `--start-maximized` | 最大化窗口 | 仅 headed 模式有效 |
-| `--lang=zh-CN` (或 en-US) | 设置浏览器语言 | 影响 Accept-Language |
-
-**注意：** `--disable-blink-features=AutomationControlled` 是 Playwright 1.61 (Chromium 130+) 中唯一官方提供的"去自动化标志"手段。但仅靠此参数不足以完全隐藏。
-
-#### 1.2.2 `page.addInitScript()` 覆写检测点（推荐 · 低成本高效）
-
-在每个页面加载前注入脚本，覆写关键检测属性：
+The most well-known signal is `navigator.webdriver`. In Playwright (and Puppeteer), this property is set to `true` by default on the `window.navigator` object. Real browsers never have this property.
 
 ```javascript
-// 注入脚本（在每个页面加载前执行）
-() => {
-  // 1. 覆写 navigator.webdriver
-  Object.defineProperty(navigator, 'webdriver', {
-    get: () => false,
-  });
+// What Playwright exposes by default:
+navigator.webdriver === true  // ← BOT DETECTED
 
-  // 2. 完善 window.chrome 对象（headless 模式下可能缺失）
-  if (!window.chrome) {
-    window.chrome = {
-      app: { isInstalled: false, InstallState: {}, RunningState: {} },
-      runtime: { connect: () => {}, sendMessage: () => {} },
-      loadTimes: () => {},
-      csi: () => {},
-    };
-  }
-
-  // 3. 覆写 navigator.plugins（非必要，但有助于某些检测）
-  // 已存在则保留，不存在则补充空数组
-
-  // 4. 覆写 permissions.query 避免暴露 Automation
-  const originalQuery = Permissions.prototype.query;
-  Permissions.prototype.query = function(desc) {
-    if (desc.name === 'notifications') {
-      return Promise.resolve({ state: 'granted' });
-    }
-    return originalQuery.call(this, desc);
-  };
-}
+// What a real user browser shows:
+navigator.webdriver === undefined
 ```
 
-**有效性评估：** 对大多数反爬（包括 Cloudflare 基础检测、一般 JS 检测）**效果显著**。但对 Cloudflare 5秒盾高级模式、reCAPTCHA v3 等需要真实用户行为模式的场景，仍可能失败。
+Other detected properties include:
 
-#### 1.2.3 playwright-stealth npm 包（不推荐）
+| Property | Automation Value | Real Browser |
+|----------|-----------------|--------------|
+| `navigator.webdriver` | `true` | `undefined` |
+| `navigator.plugins` | May be empty or non-standard | Length > 0 for most users |
+| `navigator.languages` | May be missing | `["en-US", "en"]` |
+| `navigator.hardwareConcurrency` | Default (4) | Varies (4-16) |
+| `chrome.runtime` (in Chrome) | Missing | Present in real Chrome |
+| `window.chrome` | May be incomplete | Full Chrome API surface |
+| `navigator.permissions` | May behave differently | Standard behavior |
 
-| 指标 | 评估 |
-|------|------|
-| 当前状态 | 自 2024 年初基本停更，最后一次更新针对 playwright 1.41 |
-| 与本项目兼容性 | 本项目使用 `playwright@^1.61.1`，存在 API 不兼容风险 |
-| 依赖尺寸 | 引入多个额外的 patch 脚本，增加 node_modules 体积 |
-| 功能 | 提供 20+ 补丁，涵盖 webdriver、chrome 对象、permissions、plugins 等 |
-| 风险 | 部分补丁可能干扰正常 Playwright 行为，导致调试困难 |
+#### Chrome DevTools Protocol (CDP) Detection
 
-**结论：不推荐引入。** 自实现 `addInitScript` 覆盖核心检测点已覆盖 80% 的反爬场景，而 playwright-stealth 的额外 20% 收益与维护成本不成正比。
+Some advanced bot detectors can detect the presence of CDP connections. When Playwright connects via CDP (`connectOverCDP`), there are subtle differences:
 
-#### 1.2.4 CDP 模式连接真实浏览器（最推荐 · 效果最佳）
+- CDP connections leave traces in `chrome://inspect`
+- Some sites detect the `--remote-debugging-port` flag by checking `navigator` or rendering properties
+- WebSocket-based CDP connections can be detected via timing analysis
 
-**原理：** 通过 `--cdp http://host:9222` 连接到宿主机上已有的真实 Edge/Chrome，Playwright 仅通过 CDP 协议控制标签页，不启动新的 Chromium 进程。
+#### User-Agent Analysis
 
-**优势：**
-- ✅ 使用用户真实的浏览器进程，拥有完整的用户配置文件、Cookie、登录态
-- ✅ `navigator.webdriver = false`（真实浏览器不会设置此标志）
-- ✅ User-Agent 为真实浏览器 UA，不含 "HeadlessChrome"
-- ✅ 完整的 `window.chrome` 对象
-- ✅ 真实的 Canvas/WebGL 指纹（使用用户 GPU 渲染）
-- ✅ 真实的字体列表、插件列表
-- 可以绕过 Cloudflare 基础盾和大部分 JS 检测
-
-**劣势：**
-- ❌ 依赖用户在宿主机预先启动 Edge/Chrome（`--remote-debugging-port=9222`）
-- ❌ WSL2 环境下需要配置端口转发（宿主机 localhost 不会自动映射到 WSL2）
-- ❌ 部分高级 Cloudflare 盾（如 JS challenge + 行为分析）仍可能失败
-- ❌ 连接断开时无法自动重连（用户关闭了宿主机浏览器）
-
-**适用场景：** 本项目的主要目标场景——用户在 WSL2 中运行 deepseek-arch，宿主机 Windows 有 Edge。这是**最具可操作性的有效方案**。
-
-#### 1.2.5 Headed 模式的效果
-
-| 方面 | 效果 |
-|------|------|
-| User-Agent | ✅ 改善，不会再出现 "HeadlessChrome" |
-| Canvas/WebGL | ❌ 可能仍使用 SwiftShader（取决于 launch 配置） |
-| `navigator.webdriver` | ❌ 仍然为 true |
-| 行为检测 | ❌ 鼠标点击仍为瞬间跳跃 |
-| Cloudflare 5秒盾 | ⚠️ 部分改善，但不能完全绕过 |
-
-**结论：** Headed 模式是**辅助手段**，不能单独解决问题。必须与 `addInitScript` 和其他参数配合使用。
-
-#### 1.2.6 设置合理的浏览器上下文参数
-
-以下参数应在 `browser.newContext()` 时设置，**当前代码已部分实现**：
-
-| 参数 | 建议值 | 当前状态 | 重要性 |
-|------|--------|---------|--------|
-| `viewport` | `{ width: 1920, height: 1080 }` | ✅ 已设 1280×720 | 高 |
-| `userAgent` | 最新的 Chrome 稳定版 UA | ❌ 未设置（使用默认） | 高 |
-| `locale` | `'zh-CN'` 或 `'en-US'` | ❌ 未设置 | 中 |
-| `timezoneId` | `'Asia/Shanghai'` 或用户时区 | ❌ 未设置 | 中 |
-| `geolocation` | 合适的坐标 | ❌ 未设置 | 低 |
-| `permissions` | `['geolocation']` 等 | ❌ 未设置 | 低 |
-| `colorScheme` | `'light'` | ❌ 未设置 | 低 |
-| `deviceScaleFactor` | `1` 或 `2` | ❌ 未设置 | 低 |
-
-**特别注意 User-Agent：** Playwright 1.61 headless chromium 的默认 UA 包含 `HeadlessChrome`。应手动设置为最新 Chrome 稳定版 UA：
+Playwright's default User-Agent includes `HeadlessChrome` when running headless, which is an immediate red flag. Even in headed mode, the User-Agent may lack the "normal" version signature that real browsers have.
 
 ```
-Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36
+# Headless (detected):
+Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/XXX Safari/537.36
+
+# Headed (still may be flagged):
+Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/XXX Safari/537.36
 ```
 
-### 1.3 推荐方案（按优先级排序）
+#### WebGL and Canvas Fingerprinting
 
-结合本项目特点（终端工具、用户主要在 WSL2、依赖轻量级），推荐按以下优先级实施：
+Automated browsers may have different WebGL renderer strings (`ANGLE (Google, Vulkan 1.3.0, ...)` vs real GPU), different canvas fingerprinting results, and different font rendering. Headless mode often uses SwiftShader (software rendering) which leaves a unique fingerprint.
 
-#### 🥇 第一优先：CDP 模式强化（最有效 · 最少代码变更）
+#### Behavioral Analysis
 
-**理由：** CDP 模式连接到宿主机真实 Edge/Chrome 可以规避绝大多数自动化检测手段，因为使用的是用户真实的浏览器进程。
+Bot detectors analyze interaction patterns:
 
-**实施建议：**
-1. 在 `--cdp` 参数的帮助文本和错误提示中，提供更清晰的 Windows 端 Edge 启动指引
-2. 自动检测 WSL2 中的 `host.docker.internal` (或 `host.containers.internal`) 来简化 CDP 连接
-3. 增加 `cdpUrl` 的自动探测（尝试多个常见 IP 和端口）
+- **Mouse movements**: Automated browsers often have no real mouse movement, or movements are too linear/perfect
+- **Scroll behavior**: Human scrolling is non-uniform with acceleration/deceleration
+- **Click timing**: Human clicks have micro-delays; automated clicks happen instantly
+- **Network timing**: Request patterns, headers, timing between page loads
+- **Viewport/resize**: Automated browsers often have fixed viewport without resizing events
 
-#### 🥈 第二优先：addInitScript + launch args（通用场景保底）
+#### IP Reputation and Rate Limiting
 
-**理由：** 对于不使用 CDP 模式的用户（如在 Linux 原生环境中），这是成本最低、收益最高的方案。几个参数 + 一段注入脚本，即可绕过大多数基础反爬。
+- Cloudflare, Google, and others maintain IP blacklists
+- Datacenter IP ranges (common for cloud-hosted bots) are frequently blocked
+- Rate limiting detects rapid, script-like access patterns
 
-**实施建议：**
-1. 增加 `--disable-blink-features=AutomationControlled` 和 `--disable-automation` 参数
-2. 在 `launch()` 方法中增加 `page.addInitScript()` 覆写 `navigator.webdriver`、`window.chrome` 等
-3. 设置合理的 viewport、userAgent、locale 等 context 参数
+### 1.2 Specific Services and Their Detection Methods
 
-#### 🥉 第三优先：User-Agent 和上下文参数优化
+| Service | Detection Methods | Playwright Impact |
+|---------|------------------|-------------------|
+| **Cloudflare Turnstile** | JS challenges, browser fingerprinting, behavior analysis, IP reputation | High — frequently blocks headless Chromium even with stealth patches |
+| **Cloudflare JS Challenge (5s)** | JS execution capabilities, browser property checks | Moderate — Playwright passes JS execution but may fail property checks |
+| **Google reCAPTCHA v3** | Behavioral scoring, browser signals, risk analysis | High — returns low scores for automated browsers, triggers challenges |
+| **Google reCAPTCHA v2** | Image challenges, interaction patterns | Moderate — solvable but often triggered as additional check |
+| **Akamai Bot Manager** | TLS fingerprinting, HTTP/2 fingerprints, JS challenges | High — very aggressive, uses multiple signal layers |
+| **DataDome** | Real-time JS execution, mouse tracking, fingerprinting | High — actively monitors for Playwright/Puppeteer signatures |
+| **PerimeterX (Human)** | Comprehensive JS challenge, behavioral analysis | High — similar to DataDome |
+| **Shape Security (now F5)** | JS obfuscation, DOM manipulation detection | High — specifically targets automation frameworks |
 
-**理由：** 无需额外依赖，只需在 `browser.newContext()` 时传入参数即可。与其他方案配合效果更好。
+### 1.3 Which Detection Methods Affect This Project Specifically?
 
-#### ❌ 不推荐：playwright-stealth / puppeteer-extra 等第三方隐藏库
+For deepseek-arch, the relevant threat vectors depend on the browser mode:
 
-**理由：** 维护状态差、与当前 Playwright 版本兼容风险大、增加依赖体积。自实现覆盖核心检测点更可控。
+| Mode | Vulnerability |
+|------|--------------|
+| **Mode B: Local headless Chromium** | Highest risk — `navigator.webdriver=true`, `<headless>` in User-Agent, WebGL surface differences, datacenter IP, no browser extensions or cookies |
+| **Mode B: Local headed Chromium** | Moderate risk — `navigator.webdriver=true` still present, standard User-Agent, but visible window + real desktop environment helps behavioral signals slightly |
+| **Mode A: CDP to host Edge** | Lower risk — real browser, real user profile, real User-Agent, real cookies, real GPU. But CDP connection itself can be detected by advanced scanners |
 
-### 1.4 代码实现示例
+**Key vulnerabilities in the current codebase** (src/tools/browser-state.ts):
 
-以下代码展示如何在当前 `browser-state.ts` 中集成推荐的对抗方案：
+1. **No stealth patches**: `navigator.webdriver` remains `true`
+2. **Launch args are minimal**: Only `--no-sandbox`, `--disable-setuid-sandbox`, `--disable-dev-shm-usage` — none address fingerprinting
+3. **Default User-Agent**: Headless mode uses HeadlessChrome UA
+4. **No viewport randomization**: Hardcoded `1280x720` viewport
+5. **No cookie/persistent profile**: Fresh context each launch (no session reuse)
+6. **No request interception**: No route modification to strip identifying headers
 
-#### 修改 `launch()` 方法中的 args
+---
 
-```typescript
-// ── 模式 B: 本地启动 Chromium ───────────────────
-const channel = process.platform === 'win32' ? 'msedge' : 'chromium';
-const headed = browserConfig?.headed ?? process.env.BROWSER_HEADED === '1';
-const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || '';
+## 2. Existing Mitigations and Their Limitations
 
-const launchOptions: Record<string, unknown> = {
-  headless: !headed,
-  channel,
+### 2.1 playwright-extra / puppeteer-extra-plugin-stealth
+
+The `playwright-extra` ecosystem provides a stealth plugin that patches many of the detectable properties:
+
+```javascript
+const { chromium } = require('playwright-extra');
+const stealth = require('puppeteer-extra-plugin-stealth')();
+chromium.use(stealth);
+```
+
+**What it patches:**
+- `navigator.webdriver` → set to `undefined`
+- `navigator.plugins` → adds real-looking plugin array
+- `navigator.languages` → adds typical language array
+- `window.chrome` → adds full Chrome runtime API surface
+- `navigator.permissions` → normalizes permission behavior
+- WebGL vendor/renderer → hides SwiftShader in headless mode
+- `navigator.hardwareConcurrency` → randomizes CPU core count
+
+**Limitations:**
+- **Not actively maintained**: The `playwright-extra` package has lagged behind Playwright releases. As of 2024-2025, it's increasingly incompatible with latest Playwright versions.
+- **Arms race**: Bot detectors are aware of stealth patches and check for the artifacts they leave (e.g., missing certain properties that should exist, or existing properties that shouldn't).
+- **False sense of security**: Patches help with simple detection but don't fool advanced behavioral analysis.
+- **Maintenance burden**: Each Chromium/Playwright update can break stealth patches.
+- **Not available for `connectOverCDP`**: Stealth plugins only work when launching a new browser, not when connecting to an existing one.
+
+### 2.2 Manual Launch Args
+
+Common launch arguments that reduce detection:
+
+```javascript
+chromium.launch({
   args: [
     '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    // 新增：移除自动化控制标志
-    '--disable-blink-features=AutomationControlled',
-    '--disable-automation',
-  ],
-};
+    '--disable-blink-features=AutomationControlled',  // Hides automation flags
+    '--disable-features=IsolateOrigins,site-per-process',
+    '--disable-web-security',  // (not recommended)
+    '--disable-features=EnableEphemeralFlashPermission',
+    '--disable-infobars',
+    '--disable-notifications',
+    '--window-size=1280,720',
+  ]
+});
 ```
 
-#### 修改 `newContext()` 参数
+`--disable-blink-features=AutomationControlled` is the most relevant — it removes the Chrome automation controller that sets `navigator.webdriver`. However, this flag alone is not sufficient against sophisticated detectors.
+
+### 2.3 User-Agent Spoofing
+
+Setting a custom User-Agent:
+
+```javascript
+const context = await browser.newContext({
+  userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+});
+```
+
+**Limitations:** Only masks one signal. Detectors combine User-Agent with other properties to detect inconsistencies.
+
+### 2.4 Viewport / Screen Fingerprint Randomization
+
+```javascript
+const context = await browser.newContext({
+  viewport: { width: 1920, height: 1080 },
+  screen: { width: 1920, height: 1080 },
+  deviceScaleFactor: 1,
+});
+```
+
+**Limitations:** Helps marginally. The LLM agent doesn't need visual consistency, but detectors can still match viewport to known automation patterns.
+
+### 2.5 The CDP Approach (Connecting to a Real Browser)
+
+This is the strongest mitigation. When connecting to a real user's browser (Edge/Chrome with a real profile):
+
+- Real User-Agent (no `HeadlessChrome`)
+- No `navigator.webdriver` flag
+- Real cookies, localStorage, session data
+- Real browser extensions (ad blockers, privacy tools)
+- Real GPU and WebGL fingerprints
+- Real user IP (not datacenter, if running on local machine)
+- Normal `window.chrome` API surface
+
+**However, even CDP has limitations:**
+- Some advanced scanners can detect the CDP WebSocket connection itself
+- The agent creates a **new context** (`browser.newContext()`), which inherits some properties from the browser but starts with no cookies
+- If the user's browser has been used normally, the IP and TLS fingerprint are real — this is the biggest advantage
+
+### 2.6 Summary of Mitigation Effectiveness
+
+| Mitigation | Against Basic Detection | Against Advanced Detection (Cloudflare, Akamai) | Maintenance |
+|-----------|:----------------------:|:----------------------------------------------:|:-----------:|
+| No mitigation (current) | ❌ Fails | ❌ Fails | None |
+| `--disable-blink-features=AutomationControlled` | ✅ Passes basic `navigator.webdriver` check | ❌ Still fails behavioral and multi-signal checks | Low |
+| Playwright-extra stealth plugin | ✅ Passes most JS property checks | ⚠️ Partial — may pass some, fail others | High (compatibility breaks) |
+| User-Agent spoofing | ✅ Hides headless UA | ❌ Insufficient alone | Low |
+| Full fingerprint randomization | ⚠️ Partial improvement | ❌ Still fails advanced checks | Medium |
+| **CDP to real browser** | ✅ Passes all JS property checks | ✅ Best chance against advanced detectors | None needed |
+| **CDP + real user profile** | ✅✅ Strongest | ✅✅ Strongest | None needed |
+
+---
+
+## 3. Recommended Approach for This Project
+
+### 3.1 Guiding Principles
+
+This project is a **terminal AI agent** (not a web scraping tool or bot farm). The browser tools are used for:
+
+- Reading documentation websites
+- Searching for information
+- Interacting with web-based tools (APIs, dashboards)
+- Occasionally filling forms or logging into services
+
+The agent makes **low-frequency, human-paced** requests (one page visit per LLM turn, with thinking time between actions). This is fundamentally different from a scraper that makes thousands of requests per minute.
+
+Therefore, the recommended approach prioritizes:
+1. **Pragmatism over perfection** — avoid over-engineering for edge cases that may never arise
+2. **CDP-first** — leverage the existing CDP infrastructure as the primary anti-detection strategy
+3. **Lightweight hardening for local launch** — add minimal, well-understood patches rather than fragile stealth plugins
+4. **Documentation over code** — educate users on when and how to use CDP vs. local launch
+
+### 3.2 Recommended Changes for Local Chromium Launch
+
+Add the following minimal set of hardening measures to `src/tools/browser-state.ts`:
+
+#### a) `--disable-blink-features=AutomationControlled`
+
+```typescript
+args: [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-blink-features=AutomationControlled',  // ADD
+]
+```
+
+This removes the Chrome automation flag that sets `navigator.webdriver`. It's a single flag, well-understood, and doesn't break with updates.
+
+#### b) Custom User-Agent for headless mode
+
+When running headless, Playwright's default User-Agent includes `HeadlessChrome`. Override it:
 
 ```typescript
 const contextOptions: Record<string, unknown> = {
   acceptDownloads: true,
-  viewport: { width: 1920, height: 1080 },
-  locale: 'zh-CN',
-  timezoneId: 'Asia/Shanghai',
-  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-  colorScheme: 'light',
-  // deviceScaleFactor: 1,  // 可选
+  userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
 };
 ```
 
-#### 新增 `addInitScript` 注入
+**Important**: Only override the User-Agent for headless mode. In headed mode, Playwright uses the real browser's User-Agent which is already correct.
+
+#### c) Remove `navigator.webdriver` via addInitScript
+
+For additional hardening against property-based detection:
 
 ```typescript
-// 在创建 page 后立即注入
-this.page = await this.context.newPage();
-
-// 注入反检测脚本（仅在本地启动 Chromium 时需要）
-if (!cdpUrl) {
-  await this.page.addInitScript(() => {
-    // 1. 覆写 navigator.webdriver
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => false,
-    });
-
-    // 2. 补充 window.chrome 对象
-    if (typeof window.chrome === 'undefined') {
-      (window as any).chrome = {
-        app: {
-          isInstalled: false,
-          InstallState: {},
-          RunningState: {},
-        },
-        runtime: {
-          connect: () => {},
-          sendMessage: () => {},
-        },
-        loadTimes: () => {},
-        csi: () => {},
-      };
-    }
-
-    // 3. 覆写 permissions 查询
-    if (typeof Permissions !== 'undefined') {
-      const originalQuery = Permissions.prototype.query;
-      Permissions.prototype.query = function(desc: any) {
-        if (desc.name === 'notifications') {
-          return Promise.resolve({ state: 'granted', onchange: null });
-        }
-        return originalQuery.call(this, desc);
-      };
-    }
-
-    // 4. 覆写 plugins 长度（可选）
-    if (navigator.plugins.length === 0) {
-      // 某些网站检查 plugins 长度
-      // 实际应用中不建议修改，因为可能会暴露更多特征
-    }
-  });
-}
+// After creating the context but before creating the page:
+await this.context.addInitScript(() => {
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+});
 ```
 
-> **注意：** `addInitScript` 在 CDP 模式下**也应该使用**，因为部分网站可能会通过 CDP 连接的标签页检测自动化特征。
+This is a well-known technique that removes the most obvious automation signal. Note that sophisticated detectors also check for `Object.defineProperty` artifacts, but this still defeats basic detection.
+
+#### d) What NOT to do
+
+- **Do NOT add playwright-extra/stealth**: The maintenance burden exceeds the benefit. It lags behind Playwright releases and gives a false sense of security.
+- **Do NOT add full fingerprint randomization**: WebGL, canvas, font fingerprinting are detectable and the agent's usage patterns (slow, human-paced) don't justify the complexity.
+- **Do NOT add request interception for User-Agent stripping**: The `contextOptions.userAgent` approach is cleaner and doesn't interfere with page loading performance.
+
+### 3.3 CDP is the Primary Anti-Detection Strategy
+
+The existing CDP mode (`--cdp` / `BROWSER_CDP`) is the single most effective strategy. When connecting to a real browser:
+
+- **No automation flags** — the browser was launched manually by the user
+- **Real profile** — cookies, localStorage, extensions are all real
+- **Real IP** — the user's actual network connection, not a datacenter IP
+- **Real browser fingerprint** — GPU, fonts, plugins, etc.
+
+**Recommendation**: Promote CDP as the primary browser mode in documentation. The `--cdp` flag should be the recommended way to browse websites that have anti-bot protection.
+
+**Trade-off**: CDP requires:
+1. A browser already running with `--remote-debugging-port` on the host
+2. Network connectivity between the agent environment and the browser host (important for WSL2 users)
+3. The user's browser remains open during the session
+
+These are reasonable requirements for a developer tool.
+
+### 3.4 How Cloudflare Challenges Should Be Handled
+
+Cloudflare is the most commonly encountered anti-bot system. Here's the pragmatic approach:
+
+**For CDP mode (recommended):**
+- Cloudflare typically does NOT challenge a connection from a real user's browser with real cookies
+- The user visits the site normally in their own browser, Cloudflare sets the `cf_clearance` cookie
+- When the agent connects via CDP, it creates a new context (different cookie jar). The clearance cookie is **NOT** inherited.
+- **Mitigation**: When using CDP, the agent should navigate to a URL that Cloudflare will check. Since the context is fresh, it may still get a challenge.
+- **Workaround**: The user can set up the CDP connection to reuse the default context (user's main browsing session) instead of creating a new isolated context. This would inherit all cookies including Cloudflare clearance. However, this has privacy implications (the agent can see all the user's cookies).
+
+| Approach | Cloudflare Challenge | Privacy | Recommendation |
+|----------|:-------------------:|:-------:|:--------------:|
+| New context via CDP | May still get challenged | ✅ Isolated from user's session | Default behavior |
+| Reuse existing context via CDP | ✅ Passes (clearance cookie inherited) | ⚠️ Agent can access user's cookies | Not recommended by default |
+| Local Chromium (headless/headed) | ❌ Almost always challenged | ✅ Clean session | Not suitable for Cloudflare sites |
+
+**For Cloudflare sites, the current approach has a gap**: the CDP mode creates a new context, so Cloudflare clearance cookies are lost. A potential improvement would be an option to reuse the default context (the user's existing browser session). This could be added as an opt-in flag like `--cdp-context=default`.
+
+**For Local Chromium mode:**
+- Cloudflare will almost always challenge headless Chromium
+- Even headed Chromium is often challenged because `navigator.webdriver` is flagged
+- The `--disable-blink-features=AutomationControlled` flag + `addInitScript` patch improves odds but doesn't guarantee success
+- **Practical advice**: If a site is blocked by Cloudflare, switch to CDP mode. Accept that some sites will be inaccessible to the local Chromium mode.
 
 ---
 
-## 2. 多标签页场景分析
+## 4. Multi-Tab Handling
 
-### 2.1 当前架构的问题
+### 4.1 Current State
 
-当前 `BrowserState` 设计的核心约束：
-
-```
-BrowserState
-  ├── this.browser:  Browser | null    (单浏览器实例)
-  ├── this.context:  BrowserContext | null  (单上下文)
-  └── this.page:     Page | null       (单标签页)
-```
-
-所有浏览器工具（navigate/click/scroll/snapshot/type/pressKey/navigateBack）都通过 `state.getPage()` 获取 `this.page` 进行操作。这意味着：
-
-**问题 1：多标签页完全不受支持**
-
-- 如果用户通过 `page.evaluate(() => window.open(...))` 打开了新标签页，`this.page` 仍然指向旧标签页
-- 如果用户在 CDP 模式下操作宿主机浏览器手动打开新标签页，`this.page` 不会感知
-- 模型无法同时查看两个标签页的内容
-
-**问题 2：当前上下文隔离策略对 CDP 模式的影响**
-
-```
-CDP 连接流程：
-  chromium.connectOverCDP(cdpUrl)
-    → 返回 Browser 对象（代表宿主机浏览器）
-      → browser.newContext()    ← 创建独立上下文（新 cookie jar）
-        → context.newPage()     ← 在独立上下文中创建新标签页
-```
-
-这种方式创建的标签页：
-- **在宿主机浏览器中不可见**（因为使用了独立的 BrowserContext）
-- 模型不会干扰用户在宿主机上已打开的标签页
-- 但也**无法访问用户已有的登录态**（Cookie 隔离）
-
-> **关键发现：** 当前 CDP 模式使用 `browser.newContext()` 创建的是**隔离的隐身上下文**。如果需要访问用户已有的登录态，应使用 `browser.newPage()`（不创建新 context）或者直接使用已有 context 中的页面。
-
-**问题 3：没有页面切换能力**
-
-即使模型发现链接后会打开新标签页（通过 Ctrl+click 或 `window.open`），也没有工具可以：
-
-- 列出所有已打开的标签页
-- 切换到特定标签页
-- 关闭特定标签页
-
-### 2.2 CDP 模式的多标签页分析
-
-CDP 模式连接到宿主机浏览器后，`browser.contexts()` 会返回宿主机浏览器中已有的所有 BrowserContext，包括：
+The current implementation in `src/tools/browser-state.ts` manages:
 
 ```typescript
-// 连接到宿主机浏览器
-const browser = await chromium.connectOverCDP(cdpUrl);
-
-// 获取所有已有的 context（包括用户默认会话）
-const contexts = browser.contexts();
-
-// 获取某个 context 中的所有标签页
-const pages = contexts[0]?.pages() ?? [];
-
-// 在已有 context 中打开新标签页（复用登录态）
-const newPage = await contexts[0].newPage();
-```
-
-**重要区分：**
-
-| 方式 | 代码 | 效果 |
-|------|------|------|
-| **隔离上下文** | `browser.newContext()` + `context.newPage()` | 创建隐身窗口标签页，cookie 隔离，宿主不可见 |
-| **共享上下文** | `contexts[0].newPage()` | 在用户默认上下文中创建标签页，复用登录态，宿主可见 |
-| **直接新建** | `browser.newPage()` | 使用默认上下文（可能不存在），行为取决于 CDP 连接方式 |
-
-**当前代码使用** `browser.newContext()` + `context.newPage()`（隔离上下文方式）。这对于不想干扰用户标签页的场景是安全的，但**限制了复用登录态的能力**。
-
-### 2.3 多标签页管理方案
-
-#### 方案 A：单标签页 + 显式创建与销毁（推荐短期实施）
-
-**思路：** 保持当前的单 page 架构不变，但提供显式的标签页管理工具。
-
-**新增工具：**
-- `browser_new_tab(url?)` — 创建新标签页并切换到它，关闭旧标签页（或者保留在后台）
-- `browser_close_tab` — 关闭当前标签页，切换到上一个
-
-**优点：**
-- 代码改动最小，不需要重构 BrowserState 的数据结构
-- 模型可以明确控制"什么时候开新标签页"
-- 与当前所有工具的 `state.getPage()` 模式兼容
-
-**缺点：**
-- 无法同时"查看"两个标签页（模型仍需交替切换）
-- 无法枚举当前所有标签页
-
-**对工具的调整：**
-- `getPage()` 返回当前活跃的 page，仍然只有一个
-- 新增 `activePage` 指针，`new_tab` 和 `close_tab` 切换此指针
-- 切换标签页时自动快照新页面
-
-#### 方案 B：Page 列表 + 切换工具（推荐中期实施）
-
-**思路：** 将 `BrowserState` 改造为管理 **Page 列表**，新增标签页操作工具。
-
-```
-BrowserState
-  ├── this.browser:  Browser | null
-  ├── this.context:  BrowserContext | null
-  ├── this.pages:    Page[]           ← 多个标签页
-  └── this.activePageIndex: number    ← 当前活跃标签索引
-```
-
-**新增工具：**
-- `browser_list_tabs` — 列出所有标签页（标题 + URL + 索引）
-- `browser_switch_tab(index)` — 切换到指定标签页
-- `browser_new_tab(url?)` — 创建新标签页
-- `browser_close_tab(index?)` — 关闭标签页
-
-**优点：**
-- 模型可以灵活管理多个标签页
-- 可以从页面 A 获取信息，切换到页面 B 操作，再切换回 A
-- 不浪费已打开的页面（避免重复 navigation）
-
-**缺点：**
-- 需要重构 `BrowserState`，改动较大
-- 需要确保所有工具通过 `getPage()` 返回当前活跃页面
-- 标签页数量管理（防止打开过多标签页占用内存）
-
-#### 方案 C：不管理多标签页，保持简化（保守方案）
-
-**思路：** 保持当前设计，不提供任何多标签页支持。模型如果需要打开新页面，直接在当前标签页 navigate。
-
-**优点：**
-- 零改动
-- 模型逻辑简单：一个页面 = 一个会话的专注点
-
-**缺点：**
-- 无法同时查看对比两个页面内容
-- 用户手动打开标签页后，模型无法感知
-- 如果模型用 `window.open` 打开了新标签页，当前标签页失去焦点，工具操作可能不生效
-
-### 2.4 推荐实现路径
-
-结合本项目的 Agent Loop 使用模式（模型自主调用工具），推荐分阶段实施：
-
-#### 阶段一：修复 CDP 上下文策略
-
-**问题：** 当前 CDP 模式使用 `browser.newContext()` 创建隔离上下文，无法复用宿主机浏览器的登录态。
-
-**建议：** 增加一个选项 `--cdp-share-session`（或默认改为共享上下文），使模型可以访问用户已有的登录态。
-
-```typescript
-// CDP 模式下使用共享上下文（复用登录态）
-if (shareSession) {
-  const contexts = this.browser.contexts();
-  if (contexts.length > 0) {
-    // 使用已有上下文，可访问用户登录态
-    this.context = contexts[0];
-    this.page = await this.context.newPage();
-  } else {
-    // 没有已有上下文，创建新的
-    this.page = await this.browser.newPage();
-  }
-} else {
-  // 隔离上下文（当前行为）
-  this.context = await this.browser.newContext({...});
-  this.page = await this.context.newPage();
+class BrowserState {
+  private browser: Browser | null = null;   // Single browser instance
+  private context: BrowserContext | null = null;  // Single context
+  private page: Page | null = null;         // Single page
+  // ...
 }
 ```
 
-#### 阶段二：实现方案 A（单标签页 + 显式创建/关闭）
+**Key observations:**
 
-**目标：** 用最小改动，让模型可以控制标签页生命周期。
+1. **Single page ONLY**: All tools operate on `this.page`. There is no concept of tabs, tab switching, or tracking multiple pages.
+2. **CDP creates a new context**: When using CDP mode, `connectOverCDP()` connects to the host browser, then `browser.newContext()` creates a new isolated context. This context gets a new page via `context.newPage()`. This appears as a new tab/window in the host browser.
+3. **Local launch also creates single context + page**: Same pattern, a fresh context and a single page.
+4. **No popup handler**: There is no listener for page popups (`page.on('popup')` or `context.on('page')`). If a click opens a new tab, that new page is not tracked.
 
-#### 阶段三：评估是否需要方案 B（Page 列表切换）
+### 4.2 Gaps and Risks
 
-**判断标准：** 如果实际使用中模型频繁需要同时关注多个页面（如"对比产品A和产品B的价格"），则实施方案 B。
+#### Gap 1: User Switches Tabs Manually
 
-### 2.5 代码实现示例
+**Scenario**: The agent is browsing in headed mode or CDP mode. The user manually switches to another tab in the browser window. The agent continues to operate on the original page (which is now in the background). This works, but the snapshot reflects the background page, which may confuse the user.
 
-#### 方案 A 的 BrowserState 改造
+**Risk**: Low. The agent has a consistent view of its page.
+
+#### Gap 2: Click Opens a New Tab
+
+**Scenario**: The agent clicks a link with `target="_blank"` or a JavaScript `window.open()`. This creates a new tab but the agent's `this.page` still points to the original page. The agent doesn't know about the new tab.
+
+```html
+<!-- Example: link that opens a new tab -->
+<a href="https://example.com/newpage" target="_blank">Open New Tab</a>
+```
+
+**Risk**: High. The agent sees the original page unchanged, may become confused about why the navigation didn't happen, and may retry or report an error.
+
+**Playwright behavior**: When a click triggers a popup/new tab, Playwright creates a new `Page` object but does NOT automatically switch the agent's reference to it. The agent must listen for the `popup` event:
+
+```javascript
+// Current code — no popup handler
+await page.getByText('Open New Tab').click();
+
+// What happens: new tab opens, but this.page is still the original
+// The agent has no way to interact with the new tab
+```
+
+#### Gap 3: Multiple Tabs Opened by the Agent
+
+**Scenario**: The agent navigates to a page, opens a link in a new tab, then later needs to switch back to the original tab.
+
+**Risk**: Moderate. Currently no tool or mechanism exists for tab management.
+
+#### Gap 4: CDP Context Isolation
+
+**Scenario**: In CDP mode, the agent creates a new context. The user might be browsing in their main context. The user's main context tabs are completely invisible to the agent (and vice versa). This is by design (isolation), but can be confusing if the user expects the agent to see their existing tabs.
+
+**Risk**: Low. This is the intended design for isolation.
+
+### 4.3 Recommended Approach for Multi-Tab Support
+
+#### Design goal: Keep it simple
+
+This is a terminal AI agent, not a web browser. Multi-tab support should follow the principle of least complexity. The agent should be able to:
+
+1. **Know about tabs**: Be aware when a new tab opens
+2. **Switch between tabs**: Have a tool or mechanism to change which tab is active
+3. **Close tabs**: Clean up tabs that are no longer needed
+
+#### Option A: Minimal (Recommended)
+
+Add a `context.on('page')` / `page.on('popup')` handler that tracks new pages, but keep a single "active page" concept. Add a `browser_switch_tab` tool.
+
+**Pros**: Simple, backward-compatible, low code complexity.
+**Cons**: Doesn't give the model full multi-tab awareness without explicit tool calls.
+
+**Implementation sketch:**
 
 ```typescript
 class BrowserState {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
-  private pages: Page[] = [];           // 多个标签页
-  private activeIndex: number = 0;       // 当前活跃标签索引
-  private downloadDir: string = '';
-  private closed = false;
-  private cleanupRegistered = false;
-  private _lastUrl: string = '';
-  private _isCdpMode: boolean = false;
+  private pages: Page[] = [];  // Changed from single page to array
+  private activePageIndex: number = 0;  // Which page is "active"
 
-  /** 获取当前活跃的 Page */
   async getPage(): Promise<Page> {
-    if (this.closed) throw new Error('Browser has been closed');
-
-    // 如果当前标签页有效，直接返回
-    if (this.pages.length > 0 && this.pages[this.activeIndex]?.isClosed() === false) {
-      return this.pages[this.activeIndex];
-    }
-
-    // 尝试找第一个有效的标签页
-    for (let i = 0; i < this.pages.length; i++) {
-      if (!this.pages[i].isClosed()) {
-        this.activeIndex = i;
-        return this.pages[i];
-      }
-    }
-
-    // 所有标签页都关闭了 → 重新启动
-    await this.launch();
-    return this.pages[0];
+    // Returns the currently active page
+    if (this.pages.length === 0) { /* launch */ }
+    return this.pages[this.activePageIndex];
   }
 
-  /** 创建新标签页 */
-  async newTab(url?: string): Promise<number> {
-    const page = await this.context!.newPage();
-    if (url) {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    }
-    this.pages.push(page);
-    this.activeIndex = this.pages.length - 1;
-    return this.activeIndex;
-  }
-
-  /** 切换到指定索引的标签页 */
-  async switchTab(index: number): Promise<boolean> {
-    if (index < 0 || index >= this.pages.length) return false;
-    if (this.pages[index].isClosed()) return false;
-    this.activeIndex = index;
-    return true;
-  }
-
-  /** 关闭标签页 */
-  async closeTab(index?: number): Promise<void> {
-    const idx = index ?? this.activeIndex;
-    if (idx < 0 || idx >= this.pages.length) return;
-    try { await this.pages[idx].close(); } catch { /* ignore */ }
-    this.pages.splice(idx, 1);
-    // 调整 activeIndex
-    if (this.pages.length === 0) {
-      this.activeIndex = -1;
-    } else if (this.activeIndex >= this.pages.length) {
-      this.activeIndex = this.pages.length - 1;
+  async switchTab(index: number): Promise<void> {
+    if (index >= 0 && index < this.pages.length) {
+      await this.pages[index].bringToFront();
+      this.activePageIndex = index;
     }
   }
 
-  /** 列出所有标签页 */
-  listTabs(): Array<{ index: number; title: string; url: string; active: boolean }> {
-    return this.pages.map((page, idx) => ({
-      index: idx,
-      title: page.title().catch(() => ''),
-      url: page.url(),
-      active: idx === this.activeIndex,
-    }));
-  }
-
-  // 修改 launch 中的创建页面部分
-  private async launch(): Promise<void> {
-    // ... 原有启动逻辑 ...
-    
-    // 创建第一个标签页
-    this.pages = [];
-    this.activeIndex = 0;
-    const page = await this.context!.newPage();
-    this.pages.push(page);
-
-    // 注入反检测脚本
-    if (!this._isCdpMode) {
-      await page.addInitScript(antiDetectionScript);
+  async closeTab(index: number): Promise<void> {
+    if (this.pages.length <= 1) return;  // Don't close the last tab
+    await this.pages[index].close();
+    this.pages.splice(index, 1);
+    if (this.activePageIndex >= this.pages.length) {
+      this.activePageIndex = this.pages.length - 1;
     }
-
-    // 下载处理
-    page.on('download', async (download) => { /* ... */ });
   }
 }
 ```
 
-#### 新增工具：browser_new_tab
+**Handler for popups:**
 
 ```typescript
-// src/tools/browser-new-tab.ts
-export const browserNewTabTool: Tool = {
-  name: 'browser_new_tab',
-  description: '创建新标签页。可选指定 URL，不指定则打开空白页。创建后自动切换到新标签页并返回快照。',
-  parameters: {
-    type: 'object',
-    properties: {
-      url: {
-        type: 'string',
-        description: '新标签页导航到的 URL（可选，不填则开空白页）',
-      },
-    },
-  },
-  requiresConfirm: false,
-
-  async execute(params: Record<string, unknown>): Promise<ToolResult> {
-    const url = params.url ? String(params.url).trim() : undefined;
-    try {
-      const state = getBrowserState();
-      const index = await state.newTab(url);
-      const snapshot = await state.buildSnapshot();
-      return { content: `Opened new tab #${index}\n\n${snapshot}` };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { content: '', error: `New tab failed: ${msg}` };
-    }
-  },
-};
+// Register this in launch():
+this.context.on('page', (newPage) => {
+  this.pages.push(newPage);
+  this.activePageIndex = this.pages.length - 1;  // Auto-switch to new tab
+});
 ```
 
-#### 新增工具：browser_close_tab
+**New tool: `browser_switch_tab`**
+
+```
+name: browser_switch_tab
+description: 'Switch to a different browser tab. Use browser_list_tabs to see available tabs.'
+parameters:
+  index: number (required) — tab index to switch to
+```
+
+**New tool: `browser_list_tabs`**
+
+```
+name: browser_list_tabs
+description: 'List all open browser tabs and their current URLs.'
+parameters: (none)
+```
+
+#### Option B: Full Context Array
+
+Track multiple contexts (for isolation between different browsing sessions) and multiple pages per context.
+
+**Pros**: Maximum flexibility.
+**Cons**: Significant complexity, unnecessary for this project's use case.
+
+#### Option C: Status Quo (No Changes)
+
+Accept the single-tab limitation. When a new tab opens, the agent gets an unexpected result from its click. The agent can recover by navigating to the URL manually or reporting an error.
+
+**Pros**: Zero code changes.
+**Cons**: Confusing failures when links open new tabs. The model cannot debug these without explicit help.
+
+#### Recommendation
+
+**Go with Option A**. The key changes needed:
+
+1. **Track all pages**: Change `private page: Page | null` to `private pages: Page[]`
+2. **Auto-track new tabs**: Add `context.on('page')` listener in the launch method (works for both CDP and local mode)
+3. **Add two new tools**: `browser_list_tabs` and `browser_switch_tab`
+4. **Keep `getPage()` simple**: Returns the currently active page
+5. **Update `close()`**: Close all pages
+6. **Update `buildSnapshot()`**: Include tab index/URL info in the snapshot header for context
+
+**What about `browser_list_tabs` in the snapshot?** The snapshot returned after every action should include a small tab summary:
+
+```
+URL: https://example.com/page1
+Title: Example Page
+Active Tab: 2 of 3
+Tabs: [0] https://example.com (about:blank)
+      [1] https://example.com/docs
+    → [2] https://example.com/page1
+```
+
+This keeps the model informed without requiring explicit tool calls.
+
+### 4.4 Handling Target="_blank" and window.open()
+
+These are the most common sources of unwanted new tabs:
+
+```html
+<a href="/other" target="_blank">Link</a>
+<!-- Click → new tab opens in background -->
+```
+
+**Playwright behavior:**
+- `page.getByText('Link').click()` — clicks the link, new tab opens
+- The original page remains the "active" one for the agent
+- The new page is created in the browser but is not tracked by `BrowserState`
+
+**Fix with Option A:**
+- Register `context.on('page')` to automatically track all pages
+- When a popup opens, the new page is added to `this.pages`
+- The agent can then use `browser_switch_tab` to interact with the new page
+- Optionally auto-switch to new tabs immediately (matching user expectation when clicking links)
+
+The `context.on('page')` event fires for:
+- `window.open()` calls
+- `<a target="_blank">` clicks
+- Programmatically created tabs
+- Command-click / middle-click (in headed mode)
+
+### 4.5 CDP Mode Specifics
+
+When using `connectOverCDP`:
 
 ```typescript
-// src/tools/browser-close-tab.ts
-export const browserCloseTabTool: Tool = {
-  name: 'browser_close_tab',
-  description: '关闭当前标签页。如果有其他标签页，自动切换到上一个标签页并返回快照。',
-  parameters: {
-    type: 'object',
-    properties: {},
-  },
-  requiresConfirm: false,
-
-  async execute(_params: Record<string, unknown>): Promise<ToolResult> {
-    try {
-      const state = getBrowserState();
-      await state.closeTab();
-      const snapshot = await state.buildSnapshot();
-      return { content: `Tab closed. Remaining tabs: ${state.listTabs().length}\n\n${snapshot}` };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { content: '', error: `Close tab failed: ${msg}` };
-    }
-  },
-};
+this.browser = await chromium.connectOverCDP(cdpUrl);
 ```
+
+The `browser` object represents the host browser. `browser.contexts` gives access to all existing contexts (including the user's default context). `browser.newContext()` creates a new one.
+
+**Current behavior**: `newContext()` creates an isolated tab group.
+**Issue**: The new context has its own cookie jar, localStorage, etc. Cloudflare clearance cookies from the user's main session are not inherited.
+
+**Potential enhancement for CDP**: Add an option to use the default context instead of creating a new one:
+
+```typescript
+if (useDefaultContext) {
+  const contexts = this.browser.contexts();
+  this.context = contexts[0];  // User's main browser context
+} else {
+  this.context = await this.browser.newContext({...});
+}
+```
+
+This would:
+- ✅ Inherit all cookies (Cloudflare clearance, login sessions)
+- ✅ Use the user's real browser fingerprint
+- ❌ Privacy risk — the agent can see the user's cookies and localStorage
+- ❌ Side effects — the agent's browsing history appears in the user's main context
+
+**Recommendation**: Keep the isolated context as default. Document the trade-off. If users need to access Cloudflare-protected sites, they can:
+1. First visit the site in their main browser to get cookies
+2. Use the agent with CDP (the isolated context won't have those cookies though)
+3. Alternative: Use `--cdp-context=default` if implemented as an opt-in
 
 ---
 
-## 3. 总结与实施路线图
+## 5. Practical Recommendations
 
-### 反爬虫对抗方面
+### 5.1 Summary of Code Changes
 
-| 优先级 | 措施 | 复杂度 | 效果 | 代码位置 |
-|--------|------|--------|------|---------|
-| **P0** | 完善 CDP 模式文档和体验 | 低 | 🌟🌟🌟🌟🌟 | CLI help + 文档 |
-| **P1** | 增加 launch args | 低 | 🌟🌟 | `browser-state.ts` launch() |
-| **P1** | 添加 addInitScript | 低 | 🌟🌟🌟🌟 | `browser-state.ts` launch() |
-| **P2** | 优化 context 参数 (UA/viewport/locale/timezone) | 低 | 🌟🌟 | `browser-state.ts` newContext() |
-| **P3** | 支持共享上下文的 CDP 模式 | 中 | 🌟🌟🌟🌟 | `browser-state.ts` launch() |
-| ❌ | playwright-stealth | 高 | 🌟（不可靠） | 不引入 |
+| Change | Priority | Effort | Benefit |
+|--------|:--------:|:------:|:-------:|
+| Add `--disable-blink-features=AutomationControlled` to launch args | Medium | 5 min | Hides basic automation flag |
+| Override User-Agent in headless mode | Low | 5 min | Hides `HeadlessChrome` string |
+| Add `addInitScript` to remove `navigator.webdriver` | Low | 5 min | Defeats basic JS detection |
+| Add `context.on('page')` listener for new tab tracking | High | 30 min | Prevents silent tab loss |
+| Change `page` → `pages[]` in BrowserState | High | 1-2 hours | Foundation for multi-tab support |
+| Add `browser_list_tabs` tool | Medium | 30 min | Let model see available tabs |
+| Add `browser_switch_tab` tool | Medium | 30 min | Let model switch tabs |
+| Add tab info to snapshot header | Medium | 15 min | Keep model aware of current tab |
+| CDP: default context option (`--cdp-context=default`) | Low | 1 hour | Better Cloudflare handling |
 
-### 多标签页管理方面
+### 5.2 Documentation for Users
 
-| 阶段 | 措施 | 复杂度 | 优先级 |
-|------|------|--------|--------|
-| **阶段一** | 修复 CDP 上下文策略（共享/隔离选项） | 低 | 高 |
-| **阶段二** | 方案 A：新增 `browser_new_tab`/`browser_close_tab` 工具 | 中 | 中 |
-| **阶段三** | 方案 B：Page 列表 + `browser_list_tabs`/`browser_switch_tab` | 高 | 低 |
-| **保守** | 保持现状，依赖模型单标签页导航 | 无 | — |
-
-### 推荐的首次实施范围（预计 ~2 小时工作量）
-
-1. **`browser-state.ts`**：
-   - 增加 2 个 launch args
-   - 添加 `addInitScript` 注入（仅非 CDP 模式）
-   - 优化 context 参数（UA、locale、timezone、更大的 viewport）
-   - 增加多标签页基础数据结构（`pages[]` + `activeIndex`）
-
-2. **新建 `src/tools/browser-new-tab.ts`** 和 **`browser-close-tab.ts`**：
-   - 各一个工具文件 + barrel 注册
-
-3. **更新 `docs/browser-tools.md`**：
-   - 记录新工具
-   - 更新配置参数说明
+Add to the docs:
 
 ---
 
-### 附录：参考资源
+**Browser Anti-Detection Notes**
 
-- [Playwright — BrowserContext.newPage()](https://playwright.dev/docs/api/class-browsercontext#browser-context-new-page)
-- [Playwright — Browser.newContext()](https://playwright.dev/docs/api/class-browser#browser-new-context)
-- [Playwright — connectOverCDP](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp)
-- [navigator.webdriver — W3C WebDriver spec](https://www.w3.org/TR/webdriver/#interface)
-- [Cloudflare bot detection technologies](https://developers.cloudflare.com/bots/)
-- [undetected-chromedriver (Python) — 参考思路](https://github.com/ultrafunkamsterdam/undetected-chromedriver)
+This project uses Playwright for browser automation. Automated browsers are sometimes detected and blocked by websites (Cloudflare, Google, etc.).
+
+**How to avoid detection:**
+
+1. **Use CDP mode (recommended)**: Connect to your real browser:
+   ```bash
+   # Start Edge with remote debugging on host
+   msedge.exe --remote-debugging-port=9222
+
+   # Connect from deepseek-arch
+   deepseek-arch chat --cdp http://host-ip:9222
+   ```
+   This uses your real browser profile, cookies, and IP, making detection very unlikely.
+
+2. **Use headed mode**: If CDP is not available:
+   ```bash
+   deepseek-arch chat --browser
+   ```
+   Headed mode is less likely to be flagged than headless, though not immune.
+
+3. **Know the limitations**: When running headless or even headed local Chromium, some sites with aggressive anti-bot protection may block access. This is expected behavior. Switch to CDP mode for those sites.
+
+**What about Cloudflare?**
+
+Cloudflare challenges are the most common obstacle. The CDP approach is the only reliable way to access Cloudflare-protected sites. If you encounter a Cloudflare challenge:
+1. Open the site in your regular browser (Edge/Chrome) to pass the challenge
+2. The clearance cookie is stored in your browser
+3. Then use `deepseek-arch chat --cdp http://...` — the agent may still get challenged because it uses a fresh context
+4. **Workaround**: For sites that need Cloudflare clearance, implement `--cdp-context=default` (future feature) to reuse your main browser session
+
+---
+
+### 5.3 Handling Common Anti-Bot Scenarios
+
+| Scenario | Problem | Solution |
+|----------|---------|----------|
+| Cloudflare JS challenge page (just says "Checking your browser...") | Local Chromium fails JS challenge | Switch to CDP mode |
+| reCAPTCHA appears | Agent can't solve visual challenges | User must solve manually; switch to CDP mode for that site |
+| Site returns 403 / "Access Denied" | IP blocked / detection triggered | Use CDP mode from home network IP |
+| Site shows empty page | Headless Chromium may not render JS-heavy content | Try `--browser` headed mode or CDP |
+| Slow page load | Network proxy issues | The 30s timeout is generous; adjust proxy settings (`https_proxy`) |
+| `navigator.webdriver` detection | Basic automation flag visible | Add `--disable-blink-features=AutomationControlled` (see 5.1) |
+
+### 5.4 Future Considerations
+
+1. **Browser profile persistence**: Currently, the agent's browser context is ephemeral. Consider persisting the context data (cookies, localStorage) between sessions. This would:
+   - Maintain login sessions across conversations
+   - Build up "normal" browsing history over time
+   - Improve anti-detection (the profile appears more "real")
+   - **Risk**: Cookie leakage, storage bloat
+
+2. **Human-like interaction delays**: The current agent loop has natural delays (LLM thinking time between actions). This is already beneficial for behavioral detection. No artificial delays needed.
+
+3. **TLS fingerprinting**: More advanced anti-bot systems (Akamai, some Cloudflare configurations) analyze TLS handshake characteristics. Playwright uses Node.js's TLS stack, which differs from Chromium's native TLS. Mitigation requires using the OS-level Chromium binary (which deepseek-arch already does with `channel: 'chromium'`/`channel: 'msedge'`). The CDP mode inherently avoids this issue.
+
+4. **Rotating User-Agents**: For a single-user agent tool, a fixed, up-to-date User-Agent is better than rotation. Rotating User-Agents signals automated behavior.
+
+5. **HTTP/2 fingerprinting**: Similar to TLS fingerprinting. Using the system-installed Chromium (not Playwright's bundled one) helps produce more standard fingerprints.
+
+### 5.5 Conclusion
+
+For deepseek-arch's use case as a terminal AI agent with occasional web browsing needs:
+
+- **The CDP approach is the strongest anti-detection strategy** and should be the recommended primary mode.
+- **Lightweight hardening** (one launch arg, one init script, headless UA override) is worth adding for the local Chromium mode — low maintenance cost, meaningful improvement against basic detection.
+- **Multi-tab support** should be implemented to handle `target="_blank"` links and improve model reliability. The tracked-pages-array approach (Section 4.3 Option A) is the right balance of simplicity and functionality.
+- **Anti-bot arms race acceptance**: No amount of stealth will fool all detectors all the time. The practical approach is to provide the CDP escape hatch rather than trying to build an undetectable headless browser.
+
+---
+
+## Appendix: Quick Reference
+
+### Browser Modes
+
+| Mode | Command | Anti-Detection | Tabs | Use Case |
+|------|---------|:--------------:|:----:|----------|
+| Headless (default) | `deepseek-arch chat` | ❌ Weak | 1 basic | Simple sites, documentation |
+| Headed | `deepseek-arch chat --browser` | ⚠️ Moderate | 1 basic | JS-heavy sites |
+| CDP (new context) | `deepseek-arch chat --cdp http://localhost:9222` | ✅ Strong | 1 basic + user's tabs | Cloudflare/protected sites |
+| CDP (default context) | Future: `--cdp-context=default` | ✅✅ Strongest | Shared with user | Sites needing login/clearance |
+
+### Current vs. Recommended Launch Args
+
+| Argument | Current | Recommended | Purpose |
+|----------|:-------:|:-----------:|---------|
+| `--no-sandbox` | ✅ | ✅ | WSL2/Linux compatibility |
+| `--disable-setuid-sandbox` | ✅ | ✅ | WSL2/Linux compatibility |
+| `--disable-dev-shm-usage` | ✅ | ✅ | Docker/Linux compatibility |
+| `--disable-blink-features=AutomationControlled` | ❌ | **✅ ADD** | Hide automation flags |
+| `--disable-infobars` | ❌ | Optional | Remove "Chrome is being controlled" bar (headed mode) |
+
+### Current vs. Recommended Context Options
+
+| Option | Current | Recommended | Purpose |
+|--------|:-------:|:-----------:|---------|
+| `acceptDownloads` | ✅ | ✅ | File downloads |
+| `viewport` | `1280x720` | `1280x720` (or randomize) | Screen size |
+| `userAgent` | Default (Playwright's) | Custom for headless | Hide HeadlessChrome UA |
+| `addInitScript` | ❌ | **✅ ADD** | Remove `navigator.webdriver` |
+
+---
+
+*This document was created as a research reference. See [docs/browser-tools.md](./browser-tools.md) for the existing browser tools design documentation.*
