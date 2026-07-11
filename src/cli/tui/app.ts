@@ -11,7 +11,7 @@ import { SessionManager } from '../../core/session.js';
 import type { StreamEvent } from '../../types/index.js';
 import type { Tool } from '../../tools/types.js';
 import { ConfigManager } from '../../core/config.js';
-import { ConversationView } from './conversation.js';
+import { ConversationView, truncateThink } from './conversation.js';
 import { InputEditor } from './input-editor.js';
 import { Throttle } from '../../utils/throttle.js';
 import { execSync } from 'node:child_process';
@@ -37,7 +37,7 @@ import {
 	renderDiffLine,
 } from './renderer.js';
 import { AppState } from './types.js';
-import type { TuiConfig } from './types.js';
+import type { TuiConfig, ScreenCapture, TurnCaptureInfo, ToolCallCaptureInfo, InputAreaCapture } from './types.js';
 import { Selector } from './selector.js';
 import type { SelectOption } from './selector.js';
 import { MarkdownTableRenderer } from './markdown.js';
@@ -68,6 +68,8 @@ export class TuiApp {
 	private running = false;
 	/** shell 命令模式 */
 	private shellMode = false;
+	/** 自我交互模式（可启动子 TUI 实例） */
+	private selfInteraction = false;
 	/** 待发送的 shell 上下文（[shell_start]...[shell_end] 块） */
 	private pendingShellContext: string[] = [];
 	/** 上次渲染的可见行数（用于缩小时清理残留行） */
@@ -85,6 +87,11 @@ export class TuiApp {
 		this.asyncMode = sessionMgr.getSubagentAsync();
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
+	}
+
+	/** 设置自我交互模式（在 start() 之前调用） */
+	setSelfInteraction(enabled: boolean): void {
+		this.selfInteraction = enabled;
 	}
 
 	// ─── 生命周期 ──────────────────────────────────
@@ -121,8 +128,12 @@ export class TuiApp {
 		const turnCount = session?.meta.turnCount ?? 0;
 		const lastUsage = session?.meta.lastUsage;
 
+		const modeTags: string[] = [];
+		if (this.selfInteraction) modeTags.push('SELF-INTERACTION');
+		const modeStr = modeTags.length > 0 ? `  |  [${modeTags.join(', ')}]` : '';
+
 		process.stdout.write(
-			`deepseek-arch v${this.config.version}  |  Provider: ${this.config.provider}  |  Model: ${this.config.model}\r\n`,
+			`deepseek-arch v${this.config.version}  |  Provider: ${this.config.provider}  |  Model: ${this.config.model}${modeStr}\r\n`,
 		);
 
 		let infoStr = `Session: ${sessionId.slice(0, 8)}...  |  Turns: ${turnCount}`;
@@ -152,6 +163,116 @@ export class TuiApp {
 			process.stdout.write(`Session saved: ${sessionId}\r\n`);
 			process.stdout.write(`To resume: deepseek-arch chat --resume ${sessionId}\r\n`);
 		}
+	}
+
+	// ─── 屏幕捕获（供模型调试工具使用）───────────────
+
+	/**
+	 * 捕获当前 TUI 屏幕状态，返回结构化信息供模型了解渲染情况
+	 *
+	 * 调用时机：仅在 IDLE 状态下有效（流式/sending 时返回 null）
+	 */
+	captureScreen(): ScreenCapture | null {
+		if (this.state !== AppState.IDLE) return null;
+
+		const term = getTermSize();
+		const session = this.sessionMgr.getSession();
+		const turns = session?.turns ?? [];
+		const meta = session?.meta;
+
+		// Header 纯文本
+		const header = `deepseek-arch v${this.config.version} | Provider: ${this.config.provider} | Model: ${this.config.model}`;
+
+		// 对话轮次捕获
+		const turnCaptures: TurnCaptureInfo[] = [];
+		const warnings: string[] = [];
+
+		for (let ti = 0; ti < turns.length; ti++) {
+			const turn = turns[ti];
+			const thinkLines = turn.assistant.reasoning_content
+				? turn.assistant.reasoning_content.split('\n').length
+				: 0;
+			const { isTruncated } = turn.assistant.reasoning_content
+				? truncateThink(turn.assistant.reasoning_content)
+				: { isTruncated: false };
+
+			if (isTruncated) {
+				warnings.push(`Turn #${ti + 1}: think content truncated (${thinkLines} lines, max 4 displayed)`);
+			}
+
+			const contentLines = turn.assistant.content
+				? turn.assistant.content.split('\n').length
+				: 0;
+
+			// 工具调用
+			const tcRecords = (turn as any).tool_calls;
+			const toolCalls: ToolCallCaptureInfo[] = [];
+			if (tcRecords && Array.isArray(tcRecords)) {
+				for (const tcr of tcRecords) {
+					toolCalls.push({
+						name: tcr.name,
+						args: JSON.stringify(tcr.arguments),
+						durationMs: tcr.duration_ms ?? 0,
+						error: tcr.error,
+						resultPreview: tcr.result
+							? tcr.result.split('\n').slice(0, 3).join('\n')
+							: '',
+					});
+				}
+			}
+
+			// Usage
+			const usageParts: string[] = [];
+			if (turn.usage) {
+				if (turn.usage.prompt_tokens > 0) usageParts.push(`${turn.usage.prompt_tokens} in`);
+				if (turn.usage.completion_tokens > 0) usageParts.push(`${turn.usage.completion_tokens} out`);
+			}
+			const usageStr = usageParts.length > 0 ? usageParts.join(' + ') : '';
+			const costStr = turn.cost_rmb && turn.cost_rmb > 0 ? `¥${turn.cost_rmb.toFixed(4)}` : '';
+
+			turnCaptures.push({
+				index: ti,
+				userText: turn.user.content,
+				thinkLines,
+				thinkTruncated: isTruncated,
+				contentLines,
+				toolCalls,
+				usage: [usageStr, costStr].filter(Boolean).join(', '),
+			});
+		}
+
+		// 输入区域捕获
+		const inputLines = this.input.getDisplayLines();
+		const cursorPos = this.input.getCursorDisplayPos();
+		const inputCapture: InputAreaCapture = {
+			shellMode: this.shellMode,
+			lineCount: inputLines.length,
+			maxVisibleLines: 5,
+			cursorRow: cursorPos.row,
+			cursorCol: cursorPos.col,
+			textPreview: inputLines.join('\n').slice(0, 200),
+		};
+
+		// 输入区域接近最大高度的警告
+		if (inputLines.length >= 5) {
+			warnings.push('Input area at max height (5 lines)');
+		}
+
+		// 对话历史行数警告（如果超过终端高度）
+		const convLines = this.conversation.getLineCount(turns, term.cols);
+		if (convLines > term.rows - 3) {
+			warnings.push(`Conversation (${convLines} lines) exceeds terminal height (${term.rows - 3} visible), scrollback only`);
+		}
+
+		return {
+			terminal: { rows: term.rows, cols: term.cols },
+			appState: this.state,
+			header,
+			turnCount: turns.length,
+			turns: turnCaptures,
+			inputArea: inputCapture,
+			warnings,
+		};
 	}
 
 	// ─── 终端设置（全程 raw mode）──────────────────
@@ -294,6 +415,11 @@ export class TuiApp {
 			return await this.toggleAsync();
 		}
 
+		if (content.startsWith('/subagent')) {
+			const arg = content.slice(9).trim();
+			return this.showSubagentDetail(arg);
+		}
+
 		return false;
 	}
 
@@ -322,6 +448,7 @@ export class TuiApp {
 			['/model [name]', 'Switch model (interactive picker if no arg)'],
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
+			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
 			['/help',          'Show this command list'],
 			['/context',       'Show session context & token usage'],
 			['/exit  |  Ctrl+C', 'Exit the session'],
@@ -421,6 +548,136 @@ export class TuiApp {
 		return true;
 	}
 
+	/** /subagent [name] — 显示子代理详情 */
+	private async showSubagentDetail(name?: string): Promise<true> {
+		const store = this.sessionMgr.getSubagentStore();
+		let names = store.list();
+
+		// 如果内存中没有，尝试从存储加载历史记录
+		if (names.length === 0) {
+			const sessionId = this.sessionMgr.getSessionId();
+			if (sessionId && this.configMgr) {
+				try {
+					const { Storage } = await import('../../core/storage.js');
+					const sessionsDir = this.configMgr.getSessionsDir();
+					if (sessionsDir) {
+						const storage = new Storage(sessionsDir);
+						names = await storage.listSubagentRecords(sessionId);
+						// 加载到内存 store 以便后续 get()
+						for (const n of names) {
+							const record = await storage.loadSubagentRecord(sessionId, n);
+							if (record) {
+								store.start(n, record.task);
+								for (const entry of record.entries) {
+									store.push(n, entry);
+								}
+								store.finish(n, record.result ?? '', record.status === 'failed');
+							}
+						}
+					}
+				} catch { /* 存储不可用，忽略 */ }
+			}
+		}
+
+		if (names.length === 0) {
+			process.stdout.write(dim('No subagents in current session.\r\n'));
+			return true;
+		}
+
+		if (!name) {
+			// 无参数：列出所有子代理
+			process.stdout.write(yellow('Subagents') + '\r\n');
+			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
+			for (const n of names) {
+				const record = store.get(n);
+				if (!record) continue;
+				const icon = record.status === 'running' ? '⏳'
+					: record.status === 'completed' ? green('✓')
+					: red('✗');
+				const elapsed = record.endMs
+					? `${((record.endMs - record.startMs) / 1000).toFixed(1)}s`
+					: `${((Date.now() - record.startMs) / 1000).toFixed(1)}s`;
+				process.stdout.write(
+					`  ${icon} ${cyan(n)} ${dim(`(${record.status}, ${elapsed})`)}\r\n`,
+				);
+				process.stdout.write(dim(`     ${record.task.slice(0, 80)}${record.task.length > 80 ? '...' : ''}`) + '\r\n');
+			}
+			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
+			process.stdout.write(dim(`/subagent <name> for full detail  |  ${names.length} total`) + '\r\n');
+			return true;
+		}
+
+		// 指定名称：显示完整输出
+		const record = store.get(name);
+		if (!record) {
+			process.stdout.write(red(`Subagent "${name}" not found. Use /subagent (no args) to list.`) + '\r\n');
+			return true;
+		}
+
+		this.printSubagentRecord(record);
+		return true;
+	}
+
+	/** 打印子代理完整记录 */
+	private printSubagentRecord(record: import('../../core/subagent-store.js').SubagentRecord): void {
+		const icon = record.status === 'running' ? '⏳'
+			: record.status === 'completed' ? '✓'
+			: '✗';
+		const elapsed = record.endMs
+			? `${((record.endMs - record.startMs) / 1000).toFixed(1)}s`
+			: `${((Date.now() - record.startMs) / 1000).toFixed(1)}s`;
+
+		process.stdout.write(yellow(`\r\n═══ Subagent: ${record.name} ${icon} ${dim(elapsed)} ═══`) + '\r\n');
+		process.stdout.write(dim(`Task: ${record.task}`) + '\r\n');
+		process.stdout.write(dim('─'.repeat(60)) + '\r\n');
+
+		for (const entry of record.entries) {
+			switch (entry.type) {
+				case 'thinking':
+					// thinking 不渲染（太冗长），跳过
+					break;
+				case 'content': {
+					const lines = entry.content.split('\n');
+					for (const line of lines) {
+						process.stdout.write('  ' + line + '\r\n');
+					}
+					break;
+				}
+				case 'tool_call':
+					process.stdout.write(
+						cyan(`\r\n  [T: ${entry.toolName ?? '?'}] `) + dim(JSON.stringify(entry.toolArgs ?? {})) + '\r\n',
+					);
+					break;
+				case 'tool_result': {
+					const lines = entry.content.split('\n');
+					for (const line of lines) {
+						process.stdout.write(cyan('  │ ') + dim(line) + '\r\n');
+					}
+					if (entry.toolError) {
+						process.stdout.write(red(`  ✖ ${entry.toolError}`) + '\r\n');
+					}
+					break;
+				}
+				case 'tool_output': {
+					const stream = entry.outputStream ?? 'stdout';
+					if (stream === 'stderr') {
+						process.stdout.write(yellow('  │ ') + dim(entry.content) + '\r\n');
+					} else {
+						process.stdout.write(cyan('  │ ') + dim(entry.content) + '\r\n');
+					}
+					break;
+				}
+			}
+		}
+
+		if (record.result) {
+			process.stdout.write(dim('\r\n── Final Result ──') + '\r\n');
+			process.stdout.write(record.result + '\r\n');
+		}
+
+		process.stdout.write(dim('─'.repeat(60)) + '\r\n');
+	}
+
 	// ─── shell 命令模式 ────────────────────────────
 
 	/** 进入 shell 命令模式：切换背景色并显示提示 */
@@ -510,6 +767,19 @@ export class TuiApp {
 	private pasteBuffer = '';
 
 	private handleInputData(data: string, resolve: (value: string | null) => void): void {
+		// Ctrl+T: toggle subagent detail view
+		if (data === '\x14') {
+			if (this.state === AppState.IDLE) {
+				this.showSubagentDetail();
+				this.printSeparator();
+				this.lastVisibleInputRows = 1;
+				this.lastCursorDisplayRow = 0;
+				this.drawInputArea();
+				process.stdout.write('\r');
+			}
+			return;
+		}
+
 		// Ctrl+C 优先处理（可能在 data 中的任何位置）
 		if (data.includes('\x03')) {
 			if (this.state === AppState.STREAMING || this.state === AppState.SENDING) {
@@ -881,6 +1151,41 @@ export class TuiApp {
 							}
 							break;
 						}
+						case 'subagent_spawned': {
+							flush();
+							// tool_call_start 已输出 [T: subagent_spawn] 行并带 \r\n，
+							// 此处不用再加前导 \r\n 防止多余空行
+							const name = event.subagentName ?? '?';
+							const task = (event.subagentTask ?? '').slice(0, 60);
+							process.stdout.write(
+								cyan(`[Sub: ${name}] `) + dim(`⏳ ${task}${(event.subagentTask ?? '').length > 60 ? '...' : ''}`) + '\r\n',
+							);
+							break;
+						}
+						case 'subagent_finished': {
+							flush();
+							// 重置 reasoning 追踪（内容已 flush），
+							// 保持 contentStarted 不让流式重起产生多余空行
+							reasoningStarted = false;
+							if (!contentStarted) contentStarted = true;
+							reasoningEndsWithNewline = true;
+							const name = event.subagentName ?? '?';
+							const ok = event.subagentStatus === 'completed';
+							const icon = ok ? green('✓') : red('✗');
+							const elapsed = event.subagentElapsedMs ?? 0;
+							const elapsedStr = elapsed < 1000
+								? `${elapsed}ms`
+								: elapsed < 60000
+									? `${(elapsed / 1000).toFixed(1)}s`
+									: `${Math.floor(elapsed / 60000)}m ${Math.round((elapsed % 60000) / 1000)}s`;
+							process.stdout.write(
+								cyan(`\r\n[Sub: ${name}] `) + icon + dim(` ${elapsedStr}`) + '\r\n',
+							);
+							break;
+						}
+						case 'subagent_update':
+							// 增量更新（detail view 通过 store 自行拉取，此处不渲染）
+							break;
 						case 'done':
 							flush();
 							// 刷出表格渲染器中暂存的剩余内容

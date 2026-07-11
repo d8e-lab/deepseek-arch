@@ -36,6 +36,7 @@ import type { Tool, ToolCallRecord } from '../tools/types.js';
 import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
 import { runSubagentLoop } from './subagent.js';
+import { SubagentStore } from './subagent-store.js';
 
 /** 单次 agent loop 最大迭代次数 */
 const MAX_AGENT_ROUNDS = 25;
@@ -70,6 +71,7 @@ export class SessionManager {
 	private systemPrompt: Message | null = null;
 	private tools: Tool[] = [];
 	private _subagentAsync: boolean = false;
+	private subagentStore: SubagentStore = new SubagentStore();
 
 	constructor(storage: Storage, provider: ModelProvider, tools?: Tool[]) {
 		this.storage = storage;
@@ -156,6 +158,11 @@ export class SessionManager {
 	/** 获取子代理异步模式 */
 	getSubagentAsync(): boolean {
 		return this._subagentAsync;
+	}
+
+	/** 获取子代理存储（用于 /subagent 命令查看详情） */
+	getSubagentStore(): SubagentStore {
+		return this.subagentStore;
 	}
 
 	/**
