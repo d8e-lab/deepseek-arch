@@ -294,4 +294,111 @@ program
 		}
 	});
 
+// ─── completion 子命令 ─────────────────────────────
+// 生成 bash/zsh shell 补全脚本
+
+function generateBashCompletion(): void {
+	const D = String.fromCharCode(36);
+	const lines = [
+		'',
+		'# deepseek-arch bash completion',
+		'_deepseek_arch_completions() {',
+		"\tlocal cur prev words cword",
+		"\t_init_completion || return",
+		'',
+		"\t# 第一级子命令",
+		"\tif [[ " + D + "cword -eq 1 ]]; then",
+		"\t\tCOMPREPLY=($(compgen -W \"chat resume clear completion\" -- \"" + D + "cur\"))",
+		"\t\treturn",
+		"\tfi",
+		'',
+		"\t# 子命令选项",
+		"\tcase \"" + D + "{words[1]}\" in",
+		"\t\tchat)",
+		"\t\t\tif [[ \"" + D + "cur\" == -* ]]; then",
+		"\t\t\t\tCOMPREPLY=($(compgen -W \"--resume --yolo --browser --cdp --async\" -- \"" + D + "cur\"))",
+		"\t\t\tfi",
+		"\t\t\t;;",
+		"\t\tresume)",
+		"\t\t\tif [[ \"" + D + "cur\" == -* ]]; then",
+		"\t\t\t\tCOMPREPLY=($(compgen -W \"--browser --cdp --async\" -- \"" + D + "cur\"))",
+		"\t\t\tfi",
+		"\t\t\t;;",
+		"\t\tcompletion)",
+		"\t\t\tCOMPREPLY=($(compgen -W \"bash zsh\" -- \"" + D + "cur\"))",
+		"\t\t\t;;",
+		"\tesac",
+		"} &&",
+		"complete -F _deepseek_arch_completions deepseek-arch",
+	];
+	console.log(lines.join('\n'));
+}
+
+function generateZshCompletion(): void {
+	const D = String.fromCharCode(36);
+	const lines = [
+		'',
+		'#compdef deepseek-arch',
+		'',
+		"_deepseek_arch() {",
+		"\tlocal -a subcommands",
+		"\tsubcommands=(",
+		"\t\t'chat:Start a new conversation or resume an existing one'",
+		"\t\t'resume:List all sessions or resume a specific one'",
+		"\t\t'clear:Delete all sessions except the 10 most recent'",
+		"\t\t'completion:Generate shell completion script'",
+		"\t)",
+		'',
+		"\t_arguments \\",
+		"\t\t'--version[Show version]' \\",
+		"\t\t'--help[Show help]' \\",
+		"\t\t'1: :->command' \\",
+		"\t\t'*:: :->args'",
+		'',
+		"\tcase " + D + "state in",
+		"\t\tcommand)",
+		"\t\t\t_describe -t commands 'deepseek-arch commands' subcommands",
+		"\t\t\t;;",
+		"\t\targs)",
+		"\t\t\tcase " + D + "words[1] in",
+		"\t\t\t\tchat)",
+		"\t\t\t\t\t_arguments \\",
+		"\t\t\t\t\t\t'--resume=[Session ID or name to resume]:id' \\",
+		"\t\t\t\t\t\t'--yolo[Skip all tool confirmations]' \\",
+		"\t\t\t\t\t\t'--browser[Show browser window]' \\",
+		"\t\t\t\t\t\t'--cdp=[Connect to browser via CDP]:url' \\",
+		"\t\t\t\t\t\t'--async[Async subagent mode]'",
+		"\t\t\t\t\t;;",
+		"\t\t\t\tresume)",
+		"\t\t\t\t\t_arguments \\",
+		"\t\t\t\t\t\t'--browser[Show browser window]' \\",
+		"\t\t\t\t\t\t'--cdp=[Connect to browser via CDP]:url' \\",
+		"\t\t\t\t\t\t'--async[Async subagent mode]'",
+		"\t\t\t\t\t;;",
+		"\t\t\t\tcompletion)",
+		"\t\t\t\t\t_arguments '1:shell type:(bash zsh)'",
+		"\t\t\t\t\t;;",
+		"\t\t\tesac",
+		"\t\t\t;;",
+		"\tesac",
+		'}',
+		'',
+		"_deepseek_arch \"" + D + "@\"",
+	];
+	console.log(lines.join('\n'));
+}
+
+program
+	.command('completion')
+	.description('Generate shell completion script for bash or zsh')
+	.argument('[shell]', 'Shell type: bash or zsh')
+	.action((shell?: string) => {
+		const sh = shell || (process.env.SHELL?.includes('zsh') ? 'zsh' : 'bash');
+		if (sh === 'zsh') {
+			generateZshCompletion();
+		} else {
+			generateBashCompletion();
+		}
+	});
+
 program.parse(process.argv);

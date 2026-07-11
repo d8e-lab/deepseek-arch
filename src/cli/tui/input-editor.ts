@@ -36,6 +36,17 @@ export class InputEditor {
 	/** 软换行宽度（0 = 不自动换行） */
 	private wrapWidth: number = 0;
 
+	// ─── 命令补全模式 ──────────────────────────────
+
+	/** 是否处于命令补全模式（输入 / 开头时激活） */
+	private _commandMode: boolean = false;
+	/** 可用命令列表 */
+	private _availableCommands: string[] = [];
+	/** 当前过滤后的建议列表 */
+	private _suggestions: string[] = [];
+	/** 当前高亮的建议索引（-1 = 无选中） */
+	private _suggestionIndex: number = -1;
+
 	/** 设置软换行宽度 */
 	setWrapWidth(width: number): void {
 		this.wrapWidth = Math.max(0, width);
@@ -49,6 +60,84 @@ export class InputEditor {
 
 	hasPaste(): boolean {
 		return this.pasteContents.length > 0;
+	}
+
+	// ─── 命令补全模式 ──────────────────────────────
+
+	/** 进入命令补全模式 */
+	enterCommandMode(commands: string[]): void {
+		this._commandMode = true;
+		this._availableCommands = commands;
+		this._suggestions = [...commands];
+		this._suggestionIndex = this._suggestions.length > 0 ? 0 : -1;
+	}
+
+	/** 退出命令补全模式 */
+	exitCommandMode(): void {
+		this._commandMode = false;
+		this._availableCommands = [];
+		this._suggestions = [];
+		this._suggestionIndex = -1;
+	}
+
+	/** 是否处于命令补全模式 */
+	isInCommandMode(): boolean {
+		return this._commandMode;
+	}
+
+	/** 获取当前过滤后的建议列表 */
+	getSuggestions(): string[] {
+		return this._suggestions;
+	}
+
+	/** 获取当前高亮的建议索引 */
+	getSuggestionIndex(): number {
+		return this._suggestionIndex;
+	}
+
+	/** 设置当前高亮的建议索引 */
+	setSuggestionIndex(idx: number): void {
+		if (idx >= -1 && idx < this._suggestions.length) {
+			this._suggestionIndex = idx;
+		}
+	}
+
+	/** 根据当前输入的命令前缀更新建议列表 */
+	updateSuggestions(prefix: string): void {
+		if (!prefix) {
+			this._suggestions = [...this._availableCommands];
+		} else {
+			const lower = prefix.toLowerCase();
+			this._suggestions = this._availableCommands.filter((cmd) =>
+				cmd.toLowerCase().startsWith(lower),
+			);
+		}
+		// 复位高亮索引
+		this._suggestionIndex = this._suggestions.length > 0 ? 0 : -1;
+	}
+
+	/** 导航建议列表（-1 上移，1 下移）。返回 true 表示切换成功 */
+	navigateSuggestion(direction: -1 | 1): boolean {
+		if (this._suggestions.length === 0) return false;
+		const newIdx = this._suggestionIndex + direction;
+		if (newIdx < 0 || newIdx >= this._suggestions.length) return false;
+		this._suggestionIndex = newIdx;
+		return true;
+	}
+
+	/** 获取当前选中的建议文本，无选中时返回 null */
+	getCurrentSuggestion(): string | null {
+		if (this._suggestionIndex < 0 || this._suggestionIndex >= this._suggestions.length) {
+			return null;
+		}
+		return this._suggestions[this._suggestionIndex];
+	}
+
+	/** 获取命令前缀（/ 之后的文本） */
+	getCommandPrefix(): string {
+		if (!this._commandMode) return '';
+		const firstLine = this.lines[0] || '';
+		return firstLine.startsWith('/') ? firstLine.slice(1) : '';
 	}
 
 	// ─── 字符插入 ──────────────────────────────────
@@ -344,6 +433,7 @@ export class InputEditor {
 		this.savedInput = null;
 		this.pasteContents = [];
 		this.pasteSeq = 0;
+		this.exitCommandMode();
 	}
 
 	// ─── 显示输出 ──────────────────────────────────

@@ -49,6 +49,9 @@ const MAX_INPUT_ROWS = 5;
 /** 可选模型列表 */
 const AVAILABLE_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
+/** 可用命令列表 */
+const AVAILABLE_COMMANDS = ['/model', '/help', '/context', '/yolo', '/async', '/exit'];
+
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
 
@@ -76,6 +79,8 @@ export class TuiApp {
 	private lastVisibleInputRows = 1;
 	/** 上次渲染后的光标所在输入行号（0-based，用于下次回到起点） */
 	private lastCursorDisplayRow = 0;
+	/** 命令补全建议列表的行数（用于清理） */
+	private suggestionLinesCount = 0;
 
 	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean) {
 		this.sessionMgr = sessionMgr;
@@ -343,14 +348,11 @@ export class TuiApp {
 			return;
 		}
 
-		// / 命令分派
+		// / 命令分派（现在 handleCommand 总是返回 true，未知命令也会显示错误）
 		if (content.startsWith('/')) {
-			const handled = await this.handleCommand(content);
-			if (handled) {
-				this.printSeparator();
-				return;
-			}
-			// 未识别的命令 → 作为普通消息发送
+			await this.handleCommand(content);
+			this.printSeparator();
+			return;
 		}
 
 		// 打印用户消息（绿色）
@@ -420,7 +422,17 @@ export class TuiApp {
 			return this.showSubagentDetail(arg);
 		}
 
-		return false;
+		if (content === '/exit') {
+			process.stdout.write(green('Goodbye!') + '\r\n');
+			this.running = false;
+			return true;
+		}
+
+		// 未知命令 — 不再发送给模型，显示错误提示
+		const errMsg = `Unknown command: ${content.split(/\s+/)[0]}`;
+		process.stdout.write(red(errMsg) + '\r\n');
+		process.stdout.write(dim(`  Available: ${AVAILABLE_COMMANDS.join(', ')}`) + '\r\n');
+		return true;
 	}
 
 	/** 切换模型 */
@@ -851,7 +863,18 @@ export class TuiApp {
 
 			if (ch === '\x1b') {
 				i++;
-				if (i >= data.length) return;
+				if (i >= data.length) {
+					// 单独的 ESC 键：在命令模式下退出命令模式
+					if (this.input.isInCommandMode()) {
+						// 删除 / 并退出命令模式
+						while (this.input.getCommandPrefix().length > 0) {
+							this.input.deleteBeforeCursor();
+						}
+						this.input.exitCommandMode();
+						this.clearSuggestions();
+					}
+					continue;
+				}
 				if (data[i] === '[') {
 					i++;
 					let seq = '';
@@ -867,6 +890,11 @@ export class TuiApp {
 			}
 
 			if (ch === '\x0d') {
+				// 命令模式下 Enter：检查命令有效性
+				if (this.input.isInCommandMode()) {
+					this.handleCommandModeEnter(resolve);
+					return;
+				}
 				// \r\n（Windows 换行格式的粘贴）→ 视为换行
 				if (i + 1 < data.length && data[i + 1] === '\x0a') {
 					if (this.shellMode) { i++; continue; } // shell 模式忽略粘贴换行
@@ -892,32 +920,151 @@ export class TuiApp {
 
 			if (ch === '\x0a') { this.input.insertNewline(); continue; }       // Ctrl+J
 			if (ch === '\x7f' || ch === '\x08') {
+				// 命令模式下 Backspace：如果只剩 / 则退出命令模式
+				if (this.input.isInCommandMode()) {
+					const prefix = this.input.getCommandPrefix();
+					if (prefix.length <= 0) {
+						// 删除 /，退出命令模式
+						this.input.deleteBeforeCursor();
+						this.input.exitCommandMode();
+						this.clearSuggestions();
+						this.renderInput();
+						continue;
+					}
+				}
 				this.input.deleteBeforeCursor();
 				if (this.shellMode && this.input.isEmpty()) {
 					this.shellMode = false;
 				}
+				if (this.input.isInCommandMode()) {
+					const prefix = this.input.getCommandPrefix();
+					this.input.updateSuggestions(prefix);
+				}
 				continue;
 			} // Backspace
-			if (ch === '\x09') { this.input.insertChar(' '); this.input.insertChar(' '); continue; } // Tab
-
-			if (ch >= ' ') {
-				// 空输入时输入 ! 进入 shell 命令模式（! 保留在输入框）
-				if (!this.shellMode && ch === '!' && this.input.isEmpty()) {
-					this.input.insertChar(ch);
-					this.enterShellMode();
+			if (ch === '\x09') {
+				// 命令模式下 Tab：补全选中建议
+				if (this.input.isInCommandMode()) {
+					this.completeCommandSuggestion();
 					continue;
 				}
+				this.input.insertChar(' '); this.input.insertChar(' '); continue;
+			} // Tab
+
+			if (ch >= ' ') {
+				// 空输入时检测特殊前缀
+				if (this.input.isEmpty() && !this.shellMode) {
+					if (ch === '!') {
+						this.input.insertChar(ch);
+						this.enterShellMode();
+						continue;
+					}
+					if (ch === '/') {
+						this.input.insertChar(ch);
+						this.input.enterCommandMode(AVAILABLE_COMMANDS);
+						this.renderInput();
+						continue;
+					}
+				}
 				this.input.insertChar(ch);
+				// 命令模式下输入字符后更新建议
+				if (this.input.isInCommandMode()) {
+					const prefix = this.input.getCommandPrefix();
+					this.input.updateSuggestions(prefix);
+				}
 			}
 		}
 
 		this.renderInput();
 	}
 
+	/** 处理命令模式下按 Enter */
+	private handleCommandModeEnter(resolve: (value: string | null) => void): void {
+		const content = this.input.buildSubmitContent();
+		const prefix = this.input.getCommandPrefix();
+
+		// 如果有选中的建议，先补全再提交
+		const suggestion = this.input.getCurrentSuggestion();
+		if (suggestion && prefix.length > 0 && this.input.getSuggestions().length > 0) {
+			// Tab 补全后再 Enter 的逻辑由用户手动控制，这里不自动补全
+		}
+
+		// 检查命令是否已知
+		const cmdName = content.split(/\s+/)[0]; // 取第一个单词（命令名）
+		const isKnown = AVAILABLE_COMMANDS.some((c) => c === cmdName);
+
+		// 退出命令模式并清除建议
+		this.input.exitCommandMode();
+		this.clearSuggestions();
+		this.stdinHandler = null;
+
+		if (isKnown) {
+			resolve(content);
+		} else {
+			// 未知命令 → 显示错误，不回传给模型
+			const errMsg = `Unknown command: ${content}`;
+			process.stdout.write(red(errMsg) + '\r\n');
+			this.input.clear();
+			this.renderInput();
+			// 不 resolve，重新进入输入循环
+			// 但此时 stdinHandler 已被设为 null，readUserInput 的 Promise 不会 resolve
+			// 需要使用原始方式返回
+			this.printSeparator();
+			// 重新进入输入循环 —— 通过递归调用 inputCycle？
+			// 更好的方式：通知 inputCycle 重新开始
+			// 实际上 stdinHandler 设为 null 后 readUserInput 会 pending，
+			// 我们需要重新设置 handler。
+			this.readUserInput().then(resolve).catch(() => resolve(null));
+		}
+	}
+
+	/** 命令模式下 Tab：补全当前选中的建议 */
+	private completeCommandSuggestion(): void {
+		const suggestion = this.input.getCurrentSuggestion();
+		if (!suggestion) return;
+
+		// 替换第一行为选中的命令
+		const currentLine = this.input.getCommandPrefix();
+		// 删除当前命令文本（从 / 之后到行尾）
+		while (this.input.getCommandPrefix().length > 0) {
+			this.input.deleteBeforeCursor();
+		}
+		// 插入补全的命令文本（不含 /）
+		const cmdText = suggestion.startsWith('/') ? suggestion.slice(1) : suggestion;
+		for (const ch of cmdText) {
+			this.input.insertChar(ch);
+		}
+		// 退出命令模式，不再显示建议
+		this.input.exitCommandMode();
+		this.clearSuggestions();
+		this.renderInput();
+	}
+
+	/** 清除建议列表显示（从当前光标位置清到屏幕底部） */
+	private clearSuggestions(): void {
+		if (this.suggestionLinesCount > 0) {
+			process.stdout.write(CLEAR_TO_END);
+			this.suggestionLinesCount = 0;
+		}
+	}
+
 	private handleEscapeSeq(seq: string): void {
 		switch (seq) {
-			case 'A': this.input.navigateHistory(-1) || this.input.moveCursor(-1, 0); break;
-			case 'B': this.input.navigateHistory(1) || this.input.moveCursor(1, 0); break;
+			case 'A':
+				// 命令模式下 ↑↓ 导航建议列表
+				if (this.input.isInCommandMode()) {
+					this.input.navigateSuggestion(-1);
+				} else {
+					this.input.navigateHistory(-1) || this.input.moveCursor(-1, 0);
+				}
+				break;
+			case 'B':
+				if (this.input.isInCommandMode()) {
+					this.input.navigateSuggestion(1);
+				} else {
+					this.input.navigateHistory(1) || this.input.moveCursor(1, 0);
+				}
+				break;
 			case 'C': this.input.moveCursorRight(); break;
 			case 'D': this.input.moveCursorLeft(); break;
 			case 'H': this.input.moveToLineStart(); break;
@@ -971,18 +1118,66 @@ export class TuiApp {
 		}
 		this.lastVisibleInputRows = visibleLines;
 
+		// 绘制建议列表（在输入区域下方）
+		if (this.input.isInCommandMode()) {
+			const suggestIdx = this.input.getSuggestionIndex();
+			const suggestions = this.input.getSuggestions();
+			const totalSuggestLines = this.renderSuggestions(suggestions, suggestIdx, availWidth);
+			this.suggestionLinesCount = totalSuggestLines;
+		} else if (this.suggestionLinesCount > 0) {
+			// 非命令模式：清除旧的建议列表（光标当前在输入区末尾，清到屏底即可）
+			process.stdout.write(CLEAR_TO_END);
+			this.suggestionLinesCount = 0;
+		}
+
 		// 定位光标：
 		// for 循环结束后，光标在最后一行行首（每行末 \r\n 回到下行行首）。
+		// 如果有建议列表，光标在建议列表之后，需先上移建议行数回到输入区
 		//   1. \r 归零列
 		//   2. 上移 linesToDraw-1 行回到第一个输入行
-		//   3. 下移 cursorPos.row，右移 cursorPos.col
+		//   3. 如果绘制了建议，上移建议行数回到输入区域下方
+		//   4. 下移 cursorPos.row，右移 cursorPos.col
 		process.stdout.write('\r');
-		if (linesToDraw > 1) process.stdout.write(`\x1b[${linesToDraw - 1}A`);
+		const totalUp = (linesToDraw - 1) + this.suggestionLinesCount;
+		if (totalUp > 0) process.stdout.write(`\x1b[${totalUp}A`);
 		if (cursorPos.row > 0) process.stdout.write(`\x1b[${cursorPos.row}B`);
 		if (cursorPos.col > 0) process.stdout.write(`\x1b[${cursorPos.col}C`);
 
-		this.lastCursorDisplayRow = cursorPos.row;
+		this.lastCursorDisplayRow = cursorPos.row + this.suggestionLinesCount;
 		showCursor();
+	}
+
+	/**
+	 * 渲染命令补全建议列表
+	 * @returns 绘制的行数
+	 */
+	private renderSuggestions(suggestions: string[], selectedIdx: number, availWidth: number): number {
+		if (suggestions.length === 0) return 0;
+
+		const maxDisplay = Math.min(suggestions.length, 8); // 最多显示 8 条
+		const lines: string[] = [];
+
+		for (let i = 0; i < maxDisplay; i++) {
+			const isSelected = i === selectedIdx;
+			const prefix = isSelected ? '▸ ' : '  ';
+			const text = prefix + suggestions[i];
+			const padded = padToWidth(text, availWidth);
+			lines.push(isSelected ? cyan(padded) : dim(padded));
+		}
+		if (suggestions.length > maxDisplay) {
+			lines.push(dim(`  ... and ${suggestions.length - maxDisplay} more`));
+		}
+
+		// 绘制每一行
+		for (let i = 0; i < lines.length; i++) {
+			const isLast = i === lines.length - 1;
+			process.stdout.write('\r');
+			clearLine();
+			process.stdout.write(lines[i]);
+			if (!isLast) process.stdout.write('\r\n');
+		}
+
+		return lines.length;
 	}
 
 	// ─── 流式发送 ──────────────────────────────────
