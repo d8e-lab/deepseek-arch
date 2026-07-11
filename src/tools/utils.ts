@@ -7,6 +7,11 @@ import { stat, open } from 'node:fs/promises';
 
 const IS_WINDOWS = process.platform === 'win32';
 
+/** 统一路径分隔符为正斜杠（Windows 兼容） */
+export function toForwardSlash(p: string): string {
+	return IS_WINDOWS ? p.replace(/\\/g, '/') : p;
+}
+
 /** 搜索时默认跳过的目录 */
 export const SKIP_DIRS = new Set([
 	'node_modules',
