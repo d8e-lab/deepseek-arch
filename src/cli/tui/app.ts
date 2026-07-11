@@ -1111,7 +1111,19 @@ export class TuiApp {
 		if (this.input.isInCommandMode()) {
 			const suggestIdx = this.input.getSuggestionIndex();
 			const suggestions = this.input.getSuggestions();
+			const oldSuggCount = this.suggestionLinesCount;
 			const totalSuggestLines = this.renderSuggestions(suggestions, suggestIdx, availWidth);
+			// 清除旧建议的残留行（新列表变短时）
+			if (totalSuggestLines < oldSuggCount) {
+				for (let r = totalSuggestLines; r < oldSuggCount; r++) {
+					process.stdout.write('\r\n');
+					clearLine();
+				}
+				// 回到新建议的最后一行
+				if (oldSuggCount - totalSuggestLines > 0) {
+					process.stdout.write(`\x1b[${oldSuggCount - totalSuggestLines}A`);
+				}
+			}
 			this.suggestionLinesCount = totalSuggestLines;
 		} else if (this.suggestionLinesCount > 0) {
 			// 非命令模式：清除旧的建议列表（光标当前在输入区末尾，清到屏底即可）
@@ -1132,7 +1144,7 @@ export class TuiApp {
 		if (cursorPos.row > 0) process.stdout.write(`\x1b[${cursorPos.row}B`);
 		if (cursorPos.col > 0) process.stdout.write(`\x1b[${cursorPos.col}C`);
 
-		this.lastCursorDisplayRow = cursorPos.row + this.suggestionLinesCount;
+		this.lastCursorDisplayRow = cursorPos.row;
 		showCursor();
 	}
 
@@ -1156,6 +1168,9 @@ export class TuiApp {
 		if (suggestions.length > maxDisplay) {
 			lines.push(dim(`  ... and ${suggestions.length - maxDisplay} more`));
 		}
+
+		// 从输入行的下一行开始绘制（避免 \r+clearLine 覆盖输入行）
+		process.stdout.write('\r\n');
 
 		// 绘制每一行
 		for (let i = 0; i < lines.length; i++) {

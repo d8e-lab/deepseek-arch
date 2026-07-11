@@ -109,7 +109,7 @@ export class InputEditor {
 		} else {
 			const lower = prefix.toLowerCase();
 			this._suggestions = this._availableCommands.filter((cmd) =>
-				cmd.toLowerCase().startsWith(lower),
+				cmd.slice(1).toLowerCase().startsWith(lower),
 			);
 		}
 		// 复位高亮索引
