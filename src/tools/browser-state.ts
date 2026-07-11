@@ -199,7 +199,8 @@ class BrowserState {
 
 		// ── 模式 B: 本地启动 Chromium ───────────────────
 		// Windows: msedge, Linux/macOS: chromium
-		const channel = process.platform === 'win32' ? 'msedge' : 'chromium';
+		const useEdge = process.platform === 'win32';
+		const channel = useEdge ? 'msedge' : 'chromium';
 
 		const headed = browserConfig?.headed ?? process.env.BROWSER_HEADED === '1';
 		const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || '';
@@ -227,15 +228,24 @@ class BrowserState {
 			const isMissingBrowser =
 				msg.includes('Executable doesn\'t exist') ||
 				msg.includes('cannot open shared object file') ||
-				msg.includes('Failed to launch browser') ||
-				msg.includes('chromium');
+				msg.includes('Failed to launch browser');
 
 			if (isMissingBrowser) {
+				if (useEdge) {
+					throw new Error(
+						`Browser launch failed: Microsoft Edge not found.\n` +
+						`  Make sure Edge is installed.  Check:  Get-Command msedge\n` +
+						`  Set Edge path permanently (Admin PowerShell):\n` +
+						`    setx PLAYWRIGHT_CHROMIUM_EXECUTABLE "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"\n` +
+						`  Or fallback to Playwright Chromium:  npx playwright install chromium\n` +
+						`  Or connect to Edge via CDP:          set BROWSER_CDP=http://127.0.0.1:9222`
+					);
+				}
 				throw new Error(
 					`Browser launch failed: Chromium is not available.\n` +
 					`  Install system Chromium:    sudo pacman -S chromium\n` +
 					`  Or download Playwright's:   npx playwright install chromium\n` +
-					`  Or connect to host Edge:    set BROWSER_CDP=http://host:9222`
+					`  Or connect to a running browser via CDP`
 				);
 			}
 
