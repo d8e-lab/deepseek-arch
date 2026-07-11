@@ -12,7 +12,7 @@ import { writeFile, mkdir, readFile } from 'node:fs/promises';
 import { relative, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Tool, ToolResult } from './types.js';
-import { checkPath } from './utils.js';
+import { checkPath, toForwardSlash } from './utils.js';
 import { unifiedDiff } from './diff.js';
 import { getFileStateManager } from './file-state.js';
 
@@ -102,7 +102,7 @@ export const editFileTool: Tool = {
 		// 内存中替换
 		const replaced = original.replaceAll(oldStr, newStr);
 
-		const relPath = relative(sessionCwd, check.resolved);
+		const relPath = toForwardSlash(relative(sessionCwd, check.resolved));
 		const diff = await unifiedDiff(original, replaced, `a/${relPath}`, `b/${relPath}`);
 		if (!diff) return 'no changes';
 		return diff;
@@ -134,7 +134,7 @@ export const editFileTool: Tool = {
 			return { content: '', error: staleErr };
 		}
 
-		const relPath = relative(sessionCwd, check.resolved);
+		const relPath = toForwardSlash(relative(sessionCwd, check.resolved));
 
 		// 重新读取文件（preview 和 execute 之间文件可能已被修改）
 		let original: string;

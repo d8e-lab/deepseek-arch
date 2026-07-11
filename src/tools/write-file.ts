@@ -12,7 +12,7 @@ import { writeFile, mkdir, stat, readFile } from 'node:fs/promises';
 import { relative, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Tool, ToolResult } from './types.js';
-import { checkPath } from './utils.js';
+import { checkPath, toForwardSlash } from './utils.js';
 import { unifiedDiff } from './diff.js';
 import { getFileStateManager } from './file-state.js';
 
@@ -62,7 +62,7 @@ export const writeFileTool: Tool = {
 		const staleErr = await fsm.check(check.resolved);
 		if (staleErr) return staleErr;
 
-		const relPath = relative(sessionCwd, check.resolved);
+		const relPath = toForwardSlash(relative(sessionCwd, check.resolved));
 		const exists = await fileExists(check.resolved);
 		const oldContent = exists ? await readFile(check.resolved, 'utf-8') : '';
 
@@ -98,7 +98,7 @@ export const writeFileTool: Tool = {
 			return { content: '', error: staleErr };
 		}
 
-		const relPath = relative(sessionCwd, check.resolved);
+		const relPath = toForwardSlash(relative(sessionCwd, check.resolved));
 		const existed = await fileExists(check.resolved);
 
 		// 确保父目录存在

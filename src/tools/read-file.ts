@@ -10,7 +10,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { relative } from 'node:path';
 import type { Tool, ToolResult } from './types.js';
-import { checkPath, isBinaryFile } from './utils.js';
+import { checkPath, isBinaryFile, toForwardSlash } from './utils.js';
 import { getFileStateManager } from './file-state.js';
 
 /** 默认读取行数 */
@@ -111,7 +111,7 @@ export const readFileTool: Tool = {
 			resultLines.push(`${String(lineNum).padStart(6, ' ')}: ${selected[i]}`);
 		}
 
-		const relPath = relative(sessionCwd, check.resolved);
+		const relPath = toForwardSlash(relative(sessionCwd, check.resolved));
 		let header = `${relPath}  lines ${startIdx + 1}-${endIdx} / ${totalLines}`;
 		if (endIdx < totalLines) {
 			header += ' (truncated)';
