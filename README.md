@@ -77,7 +77,7 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 
 ## 功能概览
 
-- **Agent Loop**：模型可自主调用 shell 等工具，工具结果自动送回模型继续对话（最多 25 轮）
+- **Agent Loop**：模型可自主调用 shell 等工具，工具结果自动送回模型继续对话（无轮次上限，由模型自主决定结束）
 - **Tool Calling**：barrel file 注册模式，新增工具只需一个文件 + 一行 export
 - **Shell 工具**：模型可直接执行 shell 命令（禁止 sudo，10min 超时），用户 y/N 确认后执行
 - **文件编辑**：edit_file/write_file + diff 预览 + 原子写入 + staleness 检查

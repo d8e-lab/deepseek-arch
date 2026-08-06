@@ -183,7 +183,7 @@ async function runSubagentLoop(
 ```
 1. 构建 tool definitions
 2. 构建消息队列: [system_prompt, user_task]
-3. 循环（最多 25 轮）:
+3. 循环（无轮次上限，由模型自主决定完成时机）:
    a. 调用 provider.chatStream()
    b. 累积 delta (thinking, content, tool_calls)
    c. 每轮通过 callbacks.onEntry 发射 SubagentRoundEntry
@@ -192,7 +192,7 @@ async function runSubagentLoop(
       - 传递 onOutput 回调接收实时 stdout/stderr
       - 工具结果追加到消息队列
       - 继续下一轮
-4. 超过 25 轮 → 返回已有结果
+4. 模型返回纯文本 → 返回结果
 ```
 
 ### 4.3 回调接口
@@ -277,14 +277,8 @@ this.subagentStore.finish(name, result, failed);
 
 ### 5.4 Agent Loop 上限
 
-```typescript
-const MAX_AGENT_ROUNDS = 50;
-for (let round = 0; round < MAX_AGENT_ROUNDS && !userDenied; round++) {
-  // ...
-}
-// 达到上限后注入截断消息：
-// "(Reached max tool rounds — stopping. Please summarize...)"
-```
+> 已移除（2026-08-06）：主 Agent 与子代理均不再设轮次上限，由模型自主决定完成时机。
+> 失控兜底依赖外部中断（signal）与工具自身超时。
 
 ---
 
@@ -467,8 +461,8 @@ Agent Loop Round N:
 ### 9.3 子代理数量限制
 
 - 无硬性并发上限（由模型自行管理）
-- 每个子代理有 `MAX_SUBAGENT_ROUNDS = 25` 独立上限
-- 主 Agent 有 `MAX_AGENT_ROUNDS = 50` 总上限
+- 子代理无轮次上限（由模型自主决定完成；失控由 signal 中断与工具超时兜底）
+- 主 Agent 无轮次上限（同上）
 
 ---
 

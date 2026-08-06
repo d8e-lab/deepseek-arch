@@ -38,8 +38,6 @@ import { getAllTools } from '../tools/index.js';
 import { runSubagentLoop } from './subagent.js';
 import { SubagentStore } from './subagent-store.js';
 
-/** 单次 agent loop 最大迭代次数 */
-const MAX_AGENT_ROUNDS = 25;
 
 /** 子代理 System Prompt 追加内容（行为约束） */
 const SUBAGENT_APPEND_PROMPT = `
@@ -304,7 +302,7 @@ export class SessionManager {
 	 * 流式发送用户消息（支持 agent loop + tool calling）
 	 *
 	 * 当 tools 不为空时，模型可能返回 tool_calls。执行工具后将结果发回模型，
-	 * 循环直到模型返回纯文本或无更多工具调用（最多 25 轮）。
+	 * 循环直到模型返回纯文本或无更多工具调用。
 	 *
 	 * 通过 onEvent 回调推送增量内容，支持外部 AbortSignal 中断。
 	 * 流式完成后自动持久化 turn；中断时保存不完整轮次（interrupted=true）。
@@ -812,17 +810,6 @@ export class SessionManager {
 						});
 					} catch { /* 持久化失败不阻塞 */ }
 				}
-			}
-
-			// 达到最大轮次上限：注入截断消息到 agentMessages 以保证序列完整
-			if (!userDenied && !finalContent && toolRecords.length > 0) {
-				const truncMsg = '(Reached max tool rounds — stopping.)';
-				finalContent = truncMsg;
-				agentMessages.push({
-					role: 'assistant',
-					content: truncMsg,
-				});
-				onEvent({ type: 'content_delta', text: truncMsg });
 			}
 
 			// ── 持久化 ──────────────────────────────
