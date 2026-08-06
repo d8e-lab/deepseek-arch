@@ -209,7 +209,12 @@ export class Storage {
 	async saveTurn(
 		sessionId: string,
 		userMessage: Message,
-		assistantMessage: Message & { id: string },
+		assistantMessage: {
+			id: string;
+			role: 'assistant';
+			content?: string;
+			reasoning_content?: string;
+		},
 		usage: TokenUsage,
 		costRmb: number,
 		interrupted = false,
@@ -238,8 +243,17 @@ export class Storage {
 			assistant: {
 				id: assistantMessage.id,
 				role: 'assistant',
-				content: assistantMessage.content,
-				reasoning_content: assistantMessage.reasoning_content,
+				// 方案 C：有完整消息序列（agentLoopMessages 非空）时顶层不存
+				// content/reasoning_content，避免与 messages 双份存储——
+				// 内容由 turnAssistantContent/turnAssistantReasoning 推导。
+				...(agentLoopMessages && agentLoopMessages.length > 0
+					? {}
+					: {
+							content: assistantMessage.content,
+							...(assistantMessage.reasoning_content !== undefined
+								? { reasoning_content: assistantMessage.reasoning_content }
+								: {}),
+						}),
 			},
 			usage,
 			cost_rmb: costRmb,

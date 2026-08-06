@@ -639,10 +639,11 @@ export class SessionManager {
 				if (!turnSaved) {
 					turnSaved = true;
 					try {
-						await this.storage.saveTurn(
+						const inProgress = await this.storage.saveTurn(
 							this.session.meta.id,
 							userMsg,
-							{ id: responseId || '', role: 'assistant', content: roundContent || '', reasoning_content: roundReasoning || undefined },
+							// 方案 C：agentLoopMessages 非空，顶层只存 id（content 由 messages 推导）
+							{ id: responseId || '', role: 'assistant' },
 							{ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
 							0,
 							true, // interrupted — 进行中
@@ -651,6 +652,9 @@ export class SessionManager {
 							roundUsages.length > 0 ? roundUsages : undefined,
 							await this._browserLastUrl(),
 						);
+						// 修复 C-1：进行中的 turn 立即进入内存，保持内存与磁盘一致
+						// （此前只在磁盘落盘、内存缺位，导致结束分支用 length-1 覆盖上一轮）
+						this.session.turns.push(inProgress);
 					} catch { /* 持久化失败不阻塞 */ }
 				}
 
@@ -832,9 +836,8 @@ export class SessionManager {
 			let turn: TurnRecord;
 
 			if (turnSaved) {
-				// 已有进行中的 turn：更新为完成状态
+				// 已有进行中的 turn：更新为完成状态（顶层 content 由 messages 推导，不重复存）
 				turn = (await this.storage.updateLastTurn(this.session.meta.id, {
-					assistant: { content: finalContent || '(no response)', reasoning_content: finalReasoning || undefined },
 					toolCalls: toolRecords.length > 0 ? toolRecords : undefined,
 					messages: agentMessages.length > 0 ? [userMsg, ...agentMessages] : undefined,
 					usage: finalUsage,
@@ -865,18 +868,21 @@ export class SessionManager {
 				this.session.turns.push(turn);
 			}
 
-			// 写入缓存命中率监控日志
+			// 写入缓存命中率监控日志（用实际 turn 号，不依赖内存 length 推断）
 			if (roundUsages.length > 0) {
 				const dir = this.storage.sessionDir(this.session.meta.id);
-				appendCacheLog(dir, this.session.meta.id, this.session.turns.length + 1, roundUsages);
+				appendCacheLog(dir, this.session.meta.id, turn.turn, roundUsages);
 			}
 
-			// 更新内存中的 session 元数据（turnSaved 时 turn 已在 turns 数组中）
+			// 更新内存中的 session 元数据。
+			// turnSaved 时当前轮已在 turns 数组（首次 saveTurn 时 push，修复 C-1），
+			// lastIdx 指向的就是当前轮，直接替换为最终版本。
 			if (turnSaved) {
 				const lastIdx = this.session.turns.length - 1;
 				if (lastIdx >= 0) {
 					this.session.turns[lastIdx] = turn;
 				} else {
+					// 防御：saveTurn 失败未 push 时兜底
 					this.session.turns.push(turn);
 				}
 			}
@@ -902,9 +908,10 @@ export class SessionManager {
 					let turn: TurnRecord;
 
 					if (turnSaved) {
-						// 已有进行中的 turn：更新为中断状态
+						// 已有进行中的 turn：更新为中断状态。
+						// 顶层不写 '[已中断]' 占位符——content 由 messages 推导，
+						// "已中断"状态由 interrupted 标志驱动显示（conversation.ts）。
 						turn = (await this.storage.updateLastTurn(this.session.meta.id, {
-							assistant: { content: '[已中断]', reasoning_content: finalReasoning || undefined },
 							toolCalls: toolRecords,
 							messages: [userMsg, ...agentMessages],
 							usage: partialUsage,
@@ -915,11 +922,12 @@ export class SessionManager {
 						const lastIdx = this.session.turns.length - 1;
 						if (lastIdx >= 0) this.session.turns[lastIdx] = turn;
 					} else {
-						// 工具刚返回 tool_calls 但尚未首次 saveTurn → 直接追加
+						// 工具刚返回 tool_calls 但尚未首次 saveTurn → 直接追加。
+						// agentLoopMessages 非空，顶层只存 id（content 由 messages 推导）。
 						turn = await this.storage.saveTurn(
 							this.session.meta.id,
 							userMsg,
-							{ id: responseId || '', role: 'assistant', content: '[已中断]', reasoning_content: finalReasoning || undefined },
+							{ id: responseId || '', role: 'assistant' },
 							partialUsage,
 							0,
 							true,
@@ -1006,7 +1014,7 @@ export class SessionManager {
 
 			messages.push({
 				role: 'assistant',
-				content: turn.assistant.content,
+				content: turn.assistant.content ?? '',
 				reasoning_content: turn.assistant.reasoning_content,
 			});
 		}

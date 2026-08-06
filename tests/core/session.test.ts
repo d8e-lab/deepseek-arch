@@ -466,5 +466,113 @@ describe('SessionManager', () => {
       expect(toolMsgs[0].content).toContain('partial result');
       expect(toolMsgs[0].content).toContain('Error: Something went wrong');
     });
+
+    it('C-1 回归：同一实例连续两轮工具调用后内存 turns 完整、上下文不丢失', async () => {
+      // provider：call 1/3 返回 tool_calls（触发工具执行），call 2/4 返回文本（结束轮次）
+      // 不使用真实工具——SessionManager 会记录 "Unknown tool" 结果，足以触发 turnSaved 路径
+      const received: Message[][] = [];
+      let call = 0;
+      async function* twoToolRounds(messages: Message[]): AsyncGenerator<StreamChunk> {
+        received.push(JSON.parse(JSON.stringify(messages)));
+        call++;
+        if (call === 1 || call === 3) {
+          yield {
+            id: 'chatcmpl-tool',
+            object: 'chat.completion.chunk',
+            created: 1234567890,
+            model: 'deepseek-v4-pro',
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: 'call_001',
+                  function: { name: 'nonexistent_tool', arguments: '{}' },
+                }],
+              },
+              finish_reason: null,
+            }],
+          };
+        } else {
+          yield chunk({ choices: [{ index: 0, delta: { content: '完成' }, finish_reason: null }] });
+          yield usageChunk({ prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 });
+        }
+      }
+      const streamClient = { chatStream: twoToolRounds } as unknown as ModelProvider;
+
+      const mgr = new SessionManager(storage, streamClient);
+      await mgr.startNewSession('C1 回归测试');
+
+      const turn1 = await mgr.sendMessageStream('Q1', () => {});
+      expect(turn1).not.toBeNull();
+      // 方案 C：有工具调用轮次顶层 assistant 不持久化 content（由 messages 推导）
+      expect(turn1!.assistant.content).toBeUndefined();
+      expect(turn1!.messages!.length).toBeGreaterThan(0);
+      // C-1：第一轮结束内存 turns 应为 1
+      expect(mgr.getSession()!.turns.length).toBe(1);
+      expect(mgr.getSession()!.meta.turnCount).toBe(1);
+
+      const turn2 = await mgr.sendMessageStream('Q2', () => {});
+      expect(turn2).not.toBeNull();
+      // C-1 核心：第二轮结束后内存 turns 应为 2（修复前被覆盖成 1，Q1 从内存丢失）
+      const session = mgr.getSession()!;
+      expect(session.turns.length).toBe(2);
+      expect(session.meta.turnCount).toBe(2);
+      expect(session.turns[0].user.content).toBe('Q1');
+      expect(session.turns[1].user.content).toBe('Q2');
+
+      // 第二轮请求（call 3）的上下文应包含 Q1（修复前内存错乱会缺 Q1）
+      const secondRequest = received.find((msgs) =>
+        msgs.some((m) => m.role === 'user' && m.content === 'Q2'));
+      expect(secondRequest).toBeDefined();
+      expect(secondRequest!.some((m) => m.role === 'user' && m.content === 'Q1')).toBe(true);
+    });
+
+    it('方案 C：有工具轮次磁盘 turns 顶层 assistant 不存 content（helper 推导）', async () => {
+      let call = 0;
+      async function* oneToolRound(): AsyncGenerator<StreamChunk> {
+        call++;
+        if (call === 1) {
+          yield {
+            id: 'chatcmpl-tool',
+            object: 'chat.completion.chunk',
+            created: 1234567890,
+            model: 'deepseek-v4-pro',
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: 'call_001',
+                  function: { name: 'nonexistent_tool', arguments: '{}' },
+                }],
+              },
+              finish_reason: null,
+            }],
+          };
+        } else {
+          yield chunk({ choices: [{ index: 0, delta: { content: '完成' }, finish_reason: null }] });
+          yield usageChunk({ prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 });
+        }
+      }
+      const streamClient = { chatStream: oneToolRound } as unknown as ModelProvider;
+      const mgr = new SessionManager(storage, streamClient);
+      const meta = await mgr.startNewSession('冗余消除测试');
+      await mgr.sendMessageStream('Q', () => {});
+
+      // 磁盘 turns.json：顶层 assistant 无 content（messages 明细在）
+      const diskTurns = await storage.getTurns(meta.id);
+      expect(diskTurns).toHaveLength(1);
+      expect(diskTurns[0].assistant.content).toBeUndefined();
+      expect(diskTurns[0].messages!.length).toBeGreaterThan(0);
+
+      // helper 推导结果 = messages 中所有 assistant content 拼接
+      const { turnAssistantContent } = await import('../../src/utils/turn-utils.js');
+      const joined = diskTurns[0].messages!
+        .filter((m) => m.role === 'assistant')
+        .map((m) => m.content ?? '')
+        .join('');
+      expect(turnAssistantContent(diskTurns[0])).toBe(joined);
+    });
   });
 });
