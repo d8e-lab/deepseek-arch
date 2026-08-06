@@ -82,7 +82,6 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 - **Shell 工具**：模型可直接执行 shell 命令（禁止 sudo，10min 超时），用户 y/N 确认后执行
 - **文件编辑**：edit_file/write_file + diff 预览 + 原子写入 + staleness 检查
 - **浏览器工具**：模型可自主打开网页、浏览内容、点击链接、填写表单、滚动页面、按键盘键，基于 Playwright（纯文本模态，无需视觉能力）
-- **实时预览**：浏览器操作截图通过 HTTP 页面实时展示（VSCode Simple Browser 可打开）
 - **宿主机 Edge 集成**：通过 CDP 连接到 Windows 宿主机 Edge，复用登录态
 - **Session 持久化**：浏览器最后访问的 URL 跨 session 持久化，resume 时自动恢复
 - **流式输出**：SSE 实时增量渲染，ESC/Ctrl+C 中断模型输出
@@ -447,7 +446,6 @@ npm publish --access public
 - **CDP 远程连接**：支持 `BROWSER_CDP` 环境变量连接到 Windows 宿主机 Edge，复用登录态
 - **会话持久化**：最后访问的 URL 自动保存，resume 时恢复浏览器到离开时的页面
 - **崩溃恢复**：用户关闭浏览器窗口后，下一工具调用自动重启 Chromium
-- **实时预览**：浏览器操作截图通过 HTTP 页面实时展示
 - **依赖**：新增 Playwright 库
 
 ### v1.1.0
