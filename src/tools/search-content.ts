@@ -14,7 +14,7 @@
 import { readFile, stat, readdir } from 'node:fs/promises';
 import { join, relative, basename } from 'node:path';
 import type { Tool, ToolResult } from './types.js';
-import { checkPath, isBinaryFile, SKIP_DIRS } from './utils.js';
+import { checkPath, isBinaryFile, SKIP_DIRS, toForwardSlash } from './utils.js';
 
 /** 默认最大结果数 */
 const DEFAULT_MAX_RESULTS = 30;
@@ -35,7 +35,7 @@ function globToRegex(glob: string): RegExp {
 	const escaped = glob
 		.replace(/[.+^${}()|[\]\\]/g, '\\$&')
 		.replace(/\*\*/g, '<<DOUBLESTAR>>')
-		.replace(/\*/g, '[^/]*')
+		.replace(/\*/g, '[^/\\\\]*')
 		.replace(/<<DOUBLESTAR>>/g, '.*');
 	return new RegExp(`^${escaped}$`);
 }
@@ -68,7 +68,7 @@ async function collectFiles(
 
 		if (!entry.isFile()) continue;
 
-		const relPath = relative(sessionCwd, fullPath);
+		const relPath = toForwardSlash(relative(sessionCwd, fullPath));
 		if (globRe && !globRe.test(relPath) && !globRe.test(base)) continue;
 
 		results.push(fullPath);
@@ -215,7 +215,7 @@ export const searchContentTool: Tool = {
 
 			if (matches.length > 0) {
 				fileResults.push({
-					relPath: relative(sessionCwd, filePath),
+					relPath: toForwardSlash(relative(sessionCwd, filePath)),
 					lines: allLines,
 					matches,
 				});
