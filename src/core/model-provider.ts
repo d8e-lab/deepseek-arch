@@ -34,4 +34,6 @@ export interface ModelProvider {
 	chatStream(messages: Message[], options?: StreamChatOptions): AsyncGenerator<StreamChunk>;
 	/** 切换默认模型（可选） */
 	setModel?(model: string): void;
+	/** 设置当前会话 ID（可选，用于请求镜像监听的会话关联） */
+	setSessionId?(id: string | null): void;
 }

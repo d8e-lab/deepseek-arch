@@ -94,6 +94,8 @@ export class SessionManager {
 			turns: [],
 			systemPrompt: this.systemPrompt?.content,
 		};
+		// 关联会话 ID 到 provider（请求镜像监听用）
+		this.provider.setSessionId?.(meta.id);
 
 		// 将完整 system prompt 写入会话目录，方便调试 kv-cache 命中率
 		if (this.systemPrompt?.content) {
@@ -109,6 +111,8 @@ export class SessionManager {
 		const session = await this.storage.getSession(id);
 		if (!session) throw new Error(`会话不存在: ${id}`);
 		this.session = session;
+		// 关联会话 ID 到 provider（请求镜像监听用）
+		this.provider.setSessionId?.(session.meta.id);
 		// 使用持久化的 system prompt 覆盖当前构建的（保证消息前缀与缓存一致）
 		if (session.systemPrompt) {
 			this.systemPrompt = { role: 'system', content: session.systemPrompt };
