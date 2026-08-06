@@ -105,14 +105,19 @@ function formatLogLine(
 	return parts.join(' | ');
 }
 
-/** 写入一条缓存监控日志 */
+/**
+ * 写入一条缓存监控日志。
+ * @param sessionDir 会话目录（<sessionsDir>/<id>，由调用方传入）
+ * @param sessionId  会话 ID（仅用于日志内容 sid= 字段）
+ */
 export async function appendCacheLog(
-	sessionsDir: string,
+	sessionDir: string,
 	sessionId: string,
 	turnNumber: number,
 	roundUsages: RoundUsage[],
 ): Promise<void> {
-	const logPath = join(sessionsDir, sessionId, 'cache.log');
+	// 调用方传入的已是会话目录（含 id），直接拼 cache.log——不能再次 join sessionId
+	const logPath = join(sessionDir, 'cache.log');
 
 	for (let i = 0; i < roundUsages.length; i++) {
 		const prev = i > 0 ? roundUsages[i - 1] : undefined;
