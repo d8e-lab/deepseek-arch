@@ -122,7 +122,7 @@ SessionManager.sendMessage(content)
   ├─► sessionManager.sendMessageStream(content, onEvent, signal, onConfirm)
   │     │
   │     ├─► buildMessages(content)        → system + 历史（含 tool_calls 重建） + 当前
-  │     └─► Agent Loop (最多 25 轮):
+  │     └─► Agent Loop (无轮次上限，由模型自主决定结束):
   │           │
   │           ├─► apiClient.chatStream(messages, { tools, signal })
   │           │     ├─► reasoning_delta   → onEvent → 灰度显示
@@ -137,7 +137,7 @@ SessionManager.sendMessage(content)
   │                 ├─► 拒绝 → 终止 agent loop（不发送回模型）
   │                 ├─► tool.execute(args) → onEvent(tool_result)
   │                 ├─► 结果 push 到 messages → 继续循环
-  │                 └─► 超过 25 轮 → 截断 → 持久化
+  │                 └─► 模型返回纯文本 → 结束循环
   │
   └─► 持久化 turn（含 tool_calls[] 记录）
 ```

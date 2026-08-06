@@ -9,6 +9,7 @@
  */
 
 import { createInterface } from 'node:readline';
+import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { ConfigManager, DEFAULT_CONFIG_DIR } from '../core/config.js';
 import { ApiClient } from '../core/api.js';
@@ -21,6 +22,7 @@ import type { SubagentRunner } from '../tools/index.js';
 import type { Tool } from '../tools/types.js';
 import { buildSystemPromptContext } from '../core/system-info.js';
 import { configureBrowser } from '../tools/browser-state.js';
+import { startApiMonitor } from '../core/api-monitor.js';
 
 /** 获取主代理工具集（含 subagent_spawn/wait/list_subagents） */
 function loadMasterTools(debug = false) {
@@ -53,8 +55,8 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	};
 }
 
-async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false): Promise<SessionManager> {
-	const apiClient = new ApiClient(config.baseUrl, config.apiKey, config.model);
+async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false, monitorUrl?: string): Promise<SessionManager> {
+	const apiClient = new ApiClient(config.baseUrl, config.apiKey, config.model, monitorUrl);
 	const cfg = ConfigManager.getInstance();
 	const sessionsDir = cfg.getSessionsDir();
 	const storage = new Storage(sessionsDir);
@@ -97,10 +99,13 @@ program
 	.option('--cdp <url>', 'connect to host browser via CDP (e.g. http://127.0.0.1:9222)')
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
-	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean }) => {
+	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
+	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; monitor?: string }) => {
 		try {
 			const asyncMode = options.async ?? false;
 			const debug = options.debug ?? false;
+			// 请求镜像监听地址：CLI 参数优先，回退到环境变量
+			const monitorUrl = options.monitor ?? process.env.DEEPSEEK_API_MONITOR_URL;
 			const tuiConfig = await createTuiConfig();
 
 			// 浏览器配置：CLI 参数优先，无则回退到环境变量
@@ -118,7 +123,7 @@ program
 			// 主代理工具集（debug 模式才含 tui_capture / tui_render_preview）
 			const tools = loadMasterTools(debug);
 
-			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode);
+			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl);
 
 			if (options.resume) {
 				// 按 ID 或名称查找会话
@@ -195,11 +200,13 @@ program
 	.option('--cdp <url>', 'connect to host browser via CDP')
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; async?: boolean; debug?: boolean }) => {
+	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; monitor?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
 			const storage = new Storage(sessionsDir);
+			const monitorUrl = options?.monitor ?? process.env.DEEPSEEK_API_MONITOR_URL;
 
 			if (id) {
 				// 浏览器配置
@@ -220,7 +227,7 @@ program
 				const asyncMode = options?.async ?? false;
 				const debug = options?.debug ?? false;
 				const tools = loadMasterTools(debug);
-				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode);
+				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl);
 				await sessionMgr.resumeSession(session.meta.id);
 
 				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance());
@@ -280,7 +287,7 @@ program
 			const tuiConfig = await createTuiConfig();
 			const debug = options?.debug ?? false;
 			const tools = loadMasterTools(debug);
-			const sessionMgr = await createSessionManager(tuiConfig, tools);
+			const sessionMgr = await createSessionManager(tuiConfig, tools, undefined, monitorUrl);
 			await sessionMgr.resumeSession(session.meta.id);
 
 			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance());
@@ -292,6 +299,39 @@ program
 			console.error('Failed:', err?.message ?? err);
 			process.exit(1);
 		}
+	});
+
+// ─── api-monitor 子命令 ─────────────────────────────
+// 启动 API 请求监听进程：接收 ApiClient 镜像发送的请求体，原样保存到磁盘。
+
+program
+	.command('api-monitor')
+	.description('Start an API request monitor server (saves mirrored API requests for debugging)')
+	.option('-p, --port <port>', 'listen port (default 8899)', '8899')
+	.option('-o, --out <dir>', 'output directory (default ./api-requests)', 'api-requests')
+	.action((options: { port?: string; out?: string }) => {
+		const port = parseInt(options.port ?? '8899', 10);
+		const outDir = options.out ?? 'api-requests';
+		const server = startApiMonitor({ port, outDir });
+
+		const addr = server.address();
+		const actualPort = typeof addr === 'object' && addr ? addr.port : port;
+
+		console.log(`API monitor listening on http://127.0.0.1:${actualPort}`);
+		console.log(`Saving mirrored requests to: ${resolve(outDir)}`);
+		console.log('');
+		console.log('In another terminal, mirror requests to this monitor:');
+		console.log(`  deepseek-arch chat --monitor http://127.0.0.1:${actualPort}`);
+		console.log(`  # or: export DEEPSEEK_API_MONITOR_URL=http://127.0.0.1:${actualPort}`);
+		console.log('');
+		console.log('Press Ctrl+C to stop.');
+
+		const shutdown = (): void => {
+			server.close();
+			process.exit(0);
+		};
+		process.on('SIGINT', shutdown);
+		process.on('SIGTERM', shutdown);
 	});
 
 // ─── completion 子命令 ─────────────────────────────

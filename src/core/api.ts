@@ -13,6 +13,7 @@
  *   const resp = await client.chat([{ role: "user", content: "你好" }]);
  */
 
+import { request as httpRequest } from 'node:http';
 import type { Message, ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from '../types/index.js';
 import { ApiError } from '../types/index.js';
 import type { ModelProvider, ChatOptions, StreamChatOptions } from './model-provider.js';
@@ -25,21 +26,72 @@ export class ApiClient implements ModelProvider {
 	private baseUrl: string;
 	private apiKey: string;
 	private defaultModel: string;
+	/** 请求镜像监听地址（可选，如 http://127.0.0.1:8899） */
+	private mirrorUrl?: string;
+	/** 当前会话 ID（用于镜像请求的 X-Session-Id 头） */
+	private sessionId: string | null = null;
 
 	/**
 	 * @param baseUrl   API 基地址，如 "https://api.deepseek.com"
 	 * @param apiKey    API 密钥
 	 * @param defaultModel  默认模型名
+	 * @param mirrorUrl 请求镜像监听地址（可选）。设置后每次发 API 请求都会
+	 *                  同步把相同请求体 POST 给该地址，供监听进程原样保存。
+	 *                  镜像请求失败不影响主请求。
 	 */
-	constructor(baseUrl: string, apiKey: string, defaultModel: string) {
+	constructor(baseUrl: string, apiKey: string, defaultModel: string, mirrorUrl?: string) {
 		this.baseUrl = baseUrl.replace(/\/+$/, '');
 		this.apiKey = apiKey;
 		this.defaultModel = defaultModel;
+		this.mirrorUrl = mirrorUrl?.replace(/\/+$/, '');
 	}
 
 	/** 切换默认模型 */
 	setModel(model: string): void {
 		this.defaultModel = model;
+	}
+
+	/** 设置当前会话 ID（镜像请求通过 X-Session-Id 头关联会话） */
+	setSessionId(id: string | null): void {
+		this.sessionId = id;
+	}
+
+	/**
+	 * 将请求体镜像发送到监听进程（fire-and-forget）。
+	 * 使用 node:http 直接发送，不经过全局 fetch——保证与主请求的 fetch
+	 * 互相独立，且测试中 stub 全局 fetch 不会影响镜像链路。
+	 * 监听地址为本地 http 服务（deepseek-arch api-monitor 启动）。
+	 * 任何失败（监听未启动、超时、网络错误）都静默忽略。
+	 */
+	private mirrorRequest(body: ChatCompletionRequest): void {
+		if (!this.mirrorUrl) return;
+		try {
+			const url = new URL(`${this.mirrorUrl}/`);
+			const payload = JSON.stringify(body);
+			const req = httpRequest(
+				{
+					hostname: url.hostname,
+					port: url.port ? Number(url.port) : 80,
+					path: '/',
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Content-Length': Buffer.byteLength(payload),
+						...(this.sessionId ? { 'X-Session-Id': this.sessionId } : {}),
+					},
+					timeout: 2000,
+				},
+				(res) => {
+					res.resume(); // 丢弃响应体
+				},
+			);
+			req.on('error', () => { /* 镜像失败静默 */ });
+			req.on('timeout', () => req.destroy());
+			req.write(payload);
+			req.end();
+		} catch {
+			/* 镜像失败静默 */
+		}
 	}
 
 	/**
@@ -73,6 +125,9 @@ export class ApiClient implements ModelProvider {
 		}
 
 		const url = `${this.baseUrl}${CHAT_ENDPOINT}`;
+
+		// 镜像请求到监听进程（fire-and-forget，失败静默）
+		this.mirrorRequest(body);
 
 		const response = await fetch(url, {
 			method: 'POST',
@@ -151,6 +206,9 @@ export class ApiClient implements ModelProvider {
 			// 外部信号转发
 			const onExternalAbort = (): void => controller.abort(externalSignal?.reason);
 			externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+
+			// 镜像请求到监听进程（fire-and-forget，失败静默；每次实际尝试都镜像）
+			this.mirrorRequest(body);
 
 			try {
 				const response = await fetch(url, {

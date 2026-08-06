@@ -80,11 +80,13 @@ agentMessages.push({
 
 ---
 
-### 🐛 Bug 4（死代码/误导性逻辑）：MAX_AGENT_ROUNDS 未使用 + 误导性注释
+### ✅ Bug 4（已修复 2026-08-06）：MAX_AGENT_ROUNDS 未使用 + 误导性注释
+
+> **状态**：已修复——`MAX_AGENT_ROUNDS` 常量与"达到上限截断"逻辑已删除，主 Agent 无轮次上限（由模型自主决定结束）。以下为历史记录。
 
 **`src/core/session.ts` 第 41 行**：
 ```typescript
-const MAX_AGENT_ROUNDS = 25;  // 已定义但从未被使用！
+const MAX_AGENT_ROUNDS = 25;  // 已定义但从未被使用！（已删除）
 ```
 
 **第 488 行**（循环条件）：
@@ -103,7 +105,7 @@ if (!userDenied && !finalContent && toolRecords.length > 0) {
 ```
 注释说"达到最大轮次上限"，但**实际上从未检查任何轮次上限**。这行代码根本不会触发——因为如果模型一直返回 tool_calls，`userDenied` 为 false，`finalContent` 会为空字符串（因为模型只产生 tool_calls 无 content），变量到达时就是上面的值——但之前的循环实际上是 for 循环，除非被人为 break 否则不会跳出。所以这段逻辑只有在循环通过某种方式跳出时才会运行。实际上循环只会在`userDenied=true`或`pendingToolCalls.length===0`（无 tool_calls 时 break）时终止，所以`toolRecords.length > 0`意味着至少有一轮有 tool_calls，但循环已经结束了——所以这个条件几乎永远不会触发。
 
-**建议**：要么删除 `MAX_AGENT_ROUNDS` 常量，要么加回上限检查。
+**建议**：已执行——删除 `MAX_AGENT_ROUNDS` 常量与截断逻辑（2026-08-06）。
 
 ---
 
@@ -155,7 +157,7 @@ if (asyncMode && pendingSubagents.size > 0) {
 
 1. **`subagent-spawn.ts` / `subagent-wait.ts` / `subagent-list.ts` 的 fallback 实现**：各自导出正确的 Tool 对象，描述清晰，参数完整，fallback 行为合理
 
-2. **`subagent.ts` 子代理引擎**：独立消息上下文 + 受限工具集 + round 上限（25 轮），实现正确
+2. **`subagent.ts` 子代理引擎**：独立消息上下文 + 受限工具集 + 无轮次上限（2026-08-06 移除 25 轮上限），实现正确
 
 3. **工具集过滤 `getAllTools()`**：`SUBAGENT_TOOLS` 不含 spawn/wait/list/plan/save_plan，子代理无法创建子子代理
 

@@ -10,6 +10,7 @@
 import type { TurnRecord, TokenUsage } from '../../types/index.js';
 import { strDisplayWidth, cyan, dim, green, red, renderDiffLine, stripAnsi } from './renderer.js';
 import { MarkdownTableRenderer } from './markdown.js';
+import { turnAssistantContent, turnAssistantReasoning } from '../../utils/turn-utils.js';
 
 /** think 最大显示行数 */
 const THINK_MAX_LINES = 4;
@@ -102,8 +103,10 @@ export class ConversationView {
 			lines.push('');
 
 			// Think 区域（灰色）
-			if (turn.assistant.reasoning_content) {
-				const { display, isTruncated } = truncateThink(turn.assistant.reasoning_content);
+			// 方案 C：content/reasoning 可能不在顶层（有 messages 时由 messages 推导）
+			const reasoning = turnAssistantReasoning(turn);
+			if (reasoning) {
+				const { display, isTruncated } = truncateThink(reasoning);
 				const thinkLabel = dim('[Think] ');
 				const thinkLabelWidth = strDisplayWidth('[Think] ');
 				const thinkLines = display.split('\n');
@@ -159,8 +162,10 @@ export class ConversationView {
 			}
 
 			// 模型回复（默认颜色，表格渲染）
+			// 方案 C：顶层 content 可能缺失（有 messages 时由 messages 推导）
+			const replyContent = turnAssistantContent(turn);
 			const mdRenderer = new MarkdownTableRenderer();
-			const rendered = mdRenderer.feed(turn.assistant.content) ?? [];
+			const rendered = replyContent ? mdRenderer.feed(replyContent) ?? [] : [];
 			rendered.push(...(mdRenderer.flush() ?? []));
 			for (const rline of rendered) {
 				for (const wline of wrapText(rline, termWidth)) {

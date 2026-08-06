@@ -40,7 +40,16 @@ export interface TurnRecord {
 		/** API 返回的 response id */
 		id: string;
 		role: 'assistant';
-		content: string;
+		/**
+		 * 助手最终回复（content/reasoning_content）。
+		 *
+		 * 注意：当本轮有完整消息序列（messages 字段非空，即有工具调用的轮次）
+		 * 时，顶层**不持久化** content/reasoning_content——顶层只存 id，
+		 * 内容由 messages 中所有 assistant 消息推导（见
+		 * turnAssistantContent / turnAssistantReasoning），避免双份存储。
+		 * 仅无 messages 的轮次（无工具调用 / 中断无交互 / 旧数据）此字段为完整内容。
+		 */
+		content?: string;
 		reasoning_content?: string;
 	};
 	/** Token 用量 */

@@ -9,11 +9,10 @@ import type { ModelProvider } from './model-provider.js';
 import type { Tool, ToolResult } from '../tools/types.js';
 import type { Message, ToolDefinition, ToolCall, ToolCallDelta } from '../types/index.js';
 
-/** 子代理最大轮次（安全上限，防止失控） */
-const MAX_SUBAGENT_ROUNDS = 25;
-
 /**
  * 运行子代理循环。
+ * 无轮次上限——子代理由模型自主决定完成时机（返回纯文本即结束），
+ * 失控兜底依赖外部中断（signal）与工具自身超时。
  */
 export async function runSubagentLoop(
 	task: string,
@@ -38,7 +37,7 @@ export async function runSubagentLoop(
 
 	let finalContent = '';
 
-	for (let round = 0; round < MAX_SUBAGENT_ROUNDS; round++) {
+	while (true) {
 		if (signal?.aborted) return '(subagent cancelled by user)';
 
 		let content = '';
@@ -100,7 +99,8 @@ export async function runSubagentLoop(
 		}
 	}
 
-	return finalContent || '(subagent hit max rounds limit)';
+	// 不可达兜底：循环内所有路径均 return；此处满足类型检查并保持语义
+	return finalContent || '(subagent completed with no output)';
 }
 
 function accumulateToolCalls(toolCalls: ToolCall[], deltas: ToolCallDelta[]): void {

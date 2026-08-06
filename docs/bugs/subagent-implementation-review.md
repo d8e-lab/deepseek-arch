@@ -57,23 +57,25 @@ for (let i = 0; i < pendingToolCalls.length; i++) {  // ← 外层循环
 
 ---
 
-### 🟢 Bug #4: MAX_AGENT_ROUNDS 死代码
+### ✅ Bug #4（已解决 2026-08-06）: MAX_AGENT_ROUNDS 死代码
 
-**位置**: 已从 session.ts 移除（本次同步基线时删除）。
+**位置**: 已从 session.ts 移除（本次同步基线时删除；2026-08-06 彻底删除轮次上限概念）。
 
-但 Bug #7 仍然存在——agent loop 没有 round 上限：
+原 Bug #7 的"无限循环"担忧随"无轮次上限"设计成为非问题——主 Agent 与子代理均由模型自主决定结束，失控靠 signal 中断与工具超时兜底：
 
 ```typescript
 for (let round = 0; !userDenied; round++) {
 ```
 
-理论上模型可以无限循环（持续返回 tool_calls 不终止）。应在循环条件或 `continue` 前加检查。
+不再需要上限检查。
 
 ---
 
-### 🟡 Bug #7: 潜在死循环（无 round 上限）
+### ✅ Bug #7（已解决 2026-08-06）: 潜在死循环（无 round 上限）
 
 异步模式下子代理未完成时 `continue` 重入循环，无上限保护。若模型持续返回纯文本不调用工具，会无限循环。
+
+> **状态**：已解决——无轮次上限成为设计决策（主 Agent 与子代理均如此），由模型自主决定结束，失控靠 signal 中断与工具超时兜底。
 
 ---
 
