@@ -32,7 +32,7 @@ export interface SubagentRecord {
 	/** 委派任务 */
 	task: string;
 	/** 状态 */
-	status: 'running' | 'completed' | 'failed';
+	status: 'running' | 'completed' | 'failed' | 'cancelled';
 	/** 启动时间 ms */
 	startMs: number;
 	/** 结束时间 ms（完成后填入） */
@@ -68,10 +68,10 @@ export class SubagentStore {
 	}
 
 	/** 标记子代理完成 */
-	finish(name: string, result: string, failed: boolean): void {
+	finish(name: string, result: string, status: 'completed' | 'failed' | 'cancelled'): void {
 		const record = this.records.get(name);
 		if (record) {
-			record.status = failed ? 'failed' : 'completed';
+			record.status = status;
 			record.endMs = Date.now();
 			record.result = result;
 		}

@@ -64,7 +64,7 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	const sessionMgr = new SessionManager(storage, apiClient, tools);
 
 	// 注入子代理执行器（懒绑定，解决循环依赖）
-	setSubagentRunner((task, signal) => sessionMgr.runSubagent(task, signal));
+	setSubagentRunner((name, task) => sessionMgr.runSubagent(name, task));
 
 	// 设置子代理异步模式
 	sessionMgr.setSubagentAsync(asyncMode);

@@ -35,7 +35,7 @@ export type { StreamEvent };
 import type { Tool, ToolCallRecord } from '../tools/types.js';
 import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
-import { runSubagentLoop } from './subagent.js';
+import { runSubagentLoop, SUBAGENT_CANCELLED } from './subagent.js';
 import { SubagentStore } from './subagent-store.js';
 
 
@@ -53,11 +53,11 @@ You are running as a subagent delegated by a master agent. Key constraints:
 - If you cannot complete the task, explain why and return what you have.
 - Keep output focused: the master agent needs your result, not a conversation.`;
 
-/** 后台子代理状态（Agent Loop 中追踪） */
+/** 后台子代理状态（SessionManager 实例级，跨 sendMessageStream 存活） */
 interface PendingSubagent {
 	toolCallId: string;
 	promise: Promise<string>;
-	status: 'running' | 'completed' | 'failed';
+	status: 'running' | 'completed' | 'failed' | 'cancelled';
 	result?: string;
 	startMs: number;
 }
@@ -70,6 +70,14 @@ export class SessionManager {
 	private tools: Tool[] = [];
 	private _subagentAsync: boolean = false;
 	private subagentStore: SubagentStore = new SubagentStore();
+	/** 实例级：后台子代理状态（I-1：主代理中断后子代理继续跑，后续轮次仍可 wait/取消） */
+	private pendingSubagents = new Map<string, PendingSubagent>();
+	/** 实例级：已通过 wait 取走结果的子代理名集合 */
+	private retrievedSubagents = new Set<string>();
+	/** 实例级：每个子代理的独立 AbortController（I-1 + 取消机制） */
+	private subagentControllers = new Map<string, AbortController>();
+	/** 子代理 token 累积（O-1：并入主会话 usage 入账） */
+	private subagentUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 
 	constructor(storage: Storage, provider: ModelProvider, tools?: Tool[]) {
 		this.storage = storage;
@@ -176,12 +184,75 @@ export class SessionManager {
 	 *
 	 * 子代理使用独立消息上下文、受限工具集（无 spawn/wait/list/plan），
 	 * 复用当前 provider 和 system prompt（追加子代理行为约束）。
+	 *
+	 * I-1：子代理内部创建独立 AbortController，不接收/不联动主 agent 的 signal——
+	 * 用户中断主 agent 不会连坐杀死后台子代理；取消需显式调用 cancelSubagent()。
+	 * M-1：通过 callbacks 将每轮输出写入 SubagentStore，完成后持久化记录。
 	 */
-	async runSubagent(task: string, signal?: AbortSignal): Promise<string> {
+	async runSubagent(name: string, task: string): Promise<string> {
 		const subagentTools = getAllTools(); // 不含 subagent 管理工具
 		const basePrompt = this.systemPrompt?.content ?? '';
 		const subagentPrompt = basePrompt + SUBAGENT_APPEND_PROMPT;
-		return runSubagentLoop(task, this.provider, subagentTools, subagentPrompt, signal);
+
+		// I-1：独立 AbortController（取消机制的唯一入口）
+		const controller = new AbortController();
+		this.subagentControllers.set(name, controller);
+		const signal = controller.signal;
+
+		this.subagentStore.start(name, task);
+
+		const result = await runSubagentLoop(task, this.provider, subagentTools, subagentPrompt, signal, {
+			onEntry: (entry) => {
+				this.subagentStore.push(name, entry);
+			},
+			// O-1：子代理 token 累积入账
+			onUsage: (usage) => {
+				this.subagentUsage.prompt_tokens += usage.prompt_tokens;
+				this.subagentUsage.completion_tokens += usage.completion_tokens;
+				this.subagentUsage.total_tokens += usage.total_tokens;
+			},
+		});
+
+		// I-2：cancelled / failed / completed 三态判定（取消是独立状态，不误标 completed）
+		let status: 'completed' | 'failed' | 'cancelled';
+		if (result === SUBAGENT_CANCELLED) {
+			status = 'cancelled';
+		} else if (result.startsWith('Error:')) {
+			status = 'failed';
+		} else {
+			status = 'completed';
+		}
+		this.subagentStore.finish(name, result, status);
+
+		// 清理独立控制器
+		this.subagentControllers.delete(name);
+
+		// M-1：持久化子代理记录（供 resume 后 /subagent 查看历史）
+		if (this.session) {
+			const record = this.subagentStore.get(name);
+			if (record) {
+				try {
+					await this.storage.saveSubagentRecord(this.session.meta.id, record);
+				} catch { /* 持久化失败不阻塞 */ }
+			}
+		}
+
+		return result;
+	}
+
+	/**
+	 * 取消一个或多个子代理（'all' 取消全部运行中的）。
+	 * 主代理通过 subagent_cancel 工具、用户通过 /subagent_cancel 命令调用。
+	 * @returns 实际被取消的子代理名列表
+	 */
+	cancelSubagent(name: string): string[] {
+		const targets = name === 'all'
+			? [...this.subagentControllers.keys()]
+			: (this.subagentControllers.has(name) ? [name] : []);
+		for (const n of targets) {
+			this.subagentControllers.get(n)?.abort();
+		}
+		return targets;
 	}
 
 	/** 更新会话标题 */
@@ -344,25 +415,51 @@ export class SessionManager {
 		let turnSaved = false;
 		const userMsg: Message = { role: 'user', content: userContent };
 
-		// ── 子代理状态追踪 ──────────────────────
-		const pendingSubagents = new Map<string, PendingSubagent>();
-		/** 模型已通过 wait 取走结果的 subagent 名称集合 */
-		const retrievedSubagents = new Set<string>();
+		// ── 子代理状态追踪（实例级，跨轮次/跨中断存活）──
 		/** 是否异步模式（默认非异步） */
 		const asyncMode = this._subagentAsync ?? false;
 
-		/** 拦截子代理工具调用（subagent_spawn / wait / list_subagents），返回 true 表示已处理 */
+		/** 异步模式状态块（拼到 roundMessages 末尾，不写 agentMessages——kv-cache 前缀稳定） */
+		const buildStatusBlock = (): Message | null => {
+			if (!asyncMode || this.pendingSubagents.size === 0) return null;
+
+			const now = Date.now();
+			const lines: string[] = ['[Subagent Status — async mode]'];
+			let hasContent = false;
+
+			for (const [name, sub] of this.pendingSubagents) {
+				const elapsed = Math.round((now - sub.startMs) / 1000);
+				const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+
+				if (sub.status === 'running') {
+					lines.push(`- "${name}"  (running, ${elapsedStr})`);
+					hasContent = true;
+				} else if (sub.status === 'completed' && !this.retrievedSubagents.has(name)) {
+					lines.push(`- "${name}"  (completed, ${elapsedStr}) — use wait("${name}")`);
+					hasContent = true;
+				} else if (sub.status === 'failed' && !this.retrievedSubagents.has(name)) {
+					const errMsg = sub.result ? `: ${sub.result.slice(0, 60)}` : '';
+					lines.push(`- "${name}"  (failed, ${elapsedStr})${errMsg} — use wait("${name}")`);
+					hasContent = true;
+				} else if (sub.status === 'cancelled' && !this.retrievedSubagents.has(name)) {
+					lines.push(`- "${name}"  (cancelled, ${elapsedStr})`);
+					hasContent = true;
+				}
+			}
+
+			return hasContent ? { role: 'user', content: lines.join('\n') } : null;
+		};
+
+		/** 拦截子代理工具调用（spawn/wait/list_subagents/subagent_cancel），返回 true 表示已处理 */
 		const interceptSubagentTool = async (
 			tc: ToolCall,
 			args: Record<string, unknown>,
-			pending: Map<string, PendingSubagent>,
-			retrieved: Set<string>,
 			async: boolean,
 			msgs: Message[],
 			records: ToolCallRecord[],
 			emit: (event: StreamEvent) => void,
-			launch: (task: string) => Promise<string>,
-			signal?: AbortSignal,
+			launch: (name: string, task: string) => Promise<string>,
+			deferredSpawns?: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: PendingSubagent }[],
 		): Promise<boolean> => {
 			const pushResult = (result: string, error?: string, durationMs = 0) => {
 				msgs.push({ role: 'tool', content: result, tool_call_id: tc.id });
@@ -384,21 +481,23 @@ export class SessionManager {
 						pushResult('Error: both "subagent_name" and "task" are required.', 'invalid_params');
 						return true;
 					}
-					if (pending.has(name)) {
+					if (this.pendingSubagents.has(name)) {
 						pushResult(`Error: subagent "${name}" already exists. Use a unique name.`, 'duplicate');
 						return true;
 					}
 
 					const startMs = Date.now();
-					const promise = launch(task).then((r) => {
-						const sub = pending.get(name);
+					const promise = launch(name, task).then((r) => {
+						const sub = this.pendingSubagents.get(name);
 						if (sub) {
-							sub.status = r.startsWith('Error:') ? 'failed' : 'completed';
 							sub.result = r;
+							// I-2：cancelled 优先于 failed/completed
+							if (r === SUBAGENT_CANCELLED) sub.status = 'cancelled';
+							else sub.status = r.startsWith('Error:') ? 'failed' : 'completed';
 						}
 						return r;
 					}).catch((err) => {
-						const sub = pending.get(name);
+						const sub = this.pendingSubagents.get(name);
 						if (sub) {
 							sub.status = 'failed';
 							sub.result = `Error: ${err instanceof Error ? err.message : String(err)}`;
@@ -406,27 +505,63 @@ export class SessionManager {
 						return '';  // 不会到这里
 					});
 
-					pending.set(name, {
+					const sub: PendingSubagent = {
 						toolCallId: tc.id,
 						promise,
 						status: 'running',
 						startMs,
-					});
+					};
+					this.pendingSubagents.set(name, sub);
 
 					if (async) {
-						pushResult(
-							`[SPAWNED] Subagent "${name}" started. Task: ${task.slice(0, 150)}${task.length > 150 ? '...' : ''}\nUse list_subagents to check status, wait("${name}") to retrieve result.`,
-						);
-					} else {
-						// 非异步：阻塞等待
-						const result = await promise;
-						// 此时 status 已由 then/catch 更新为 completed/failed
-						pushResult(
-							`Subagent "${name}" completed.\n\n${result}`,
-							pending.get(name)?.status === 'failed' ? 'subagent_failed' : undefined,
-							Date.now() - startMs,
-						);
+						// M-5：异步模式发紧凑事件（替代 12 行 tool_result）
+						const summary = `[SPAWNED] Subagent "${name}" started. Task: ${task.slice(0, 150)}${task.length > 150 ? '...' : ''}\nUse list_subagents to check status, wait("${name}") to retrieve result.`;
+						msgs.push({ role: 'tool', content: summary, tool_call_id: tc.id });
+						records.push({
+							id: tc.id, name: tc.function.name, arguments: args,
+							result: summary, duration_ms: 0,
+						});
+						emit({
+							type: 'subagent_spawned',
+							subagentName: name,
+							subagentTask: task,
+						});
+
+						// 后台监听完成时发 subagent_finished 事件（cancelled 映射为 failed，UI 显示 ✗）
+						promise.then(() => {
+							const s = this.pendingSubagents.get(name);
+							if (s) {
+								emit({
+									type: 'subagent_finished',
+									subagentName: name,
+									subagentStatus: s.status === 'completed' ? 'completed' : 'failed',
+									subagentElapsedMs: Date.now() - startMs,
+									error: s.status !== 'completed' ? s.result : undefined,
+								});
+							}
+						});
+					} else if (deferredSpawns) {
+						// M-3：非异步模式延迟到循环结束，与其它子代理并行 Promise.all
+						deferredSpawns.push({ name, tc, args, sub });
 					}
+					return true;
+				}
+
+				case 'subagent_cancel': {
+					const name = (args.subagent_name as string) || '';
+					if (!name) {
+						pushResult('Error: "subagent_name" is required ("all" cancels every running subagent).', 'invalid_params');
+						return true;
+					}
+					const targets = this.cancelSubagent(name);
+					if (targets.length === 0) {
+						pushResult(
+							`No running subagent named "${name}" found. Use list_subagents to check.`,
+							'not_found',
+						);
+						return true;
+					}
+					pushResult(`Cancelled subagent${targets.length > 1 ? 's' : ''}: ${targets.join(', ')}`);
 					return true;
 				}
 
@@ -436,7 +571,7 @@ export class SessionManager {
 						pushResult('Error: "subagent_name" is required.', 'invalid_params');
 						return true;
 					}
-					const sub = pending.get(name);
+					const sub = this.pendingSubagents.get(name);
 					if (!sub) {
 						pushResult(
 							`Subagent "${name}" not found. It may have already been retrieved or never existed. Use list_subagents to check.`,
@@ -444,7 +579,7 @@ export class SessionManager {
 						);
 						return true;
 					}
-					if (retrieved.has(name)) {
+					if (this.retrievedSubagents.has(name)) {
 						pushResult(
 							`Subagent "${name}" result was already retrieved and cannot be retrieved again.`,
 							'already_retrieved',
@@ -456,31 +591,33 @@ export class SessionManager {
 					const result = await sub.promise;
 					const elapsed = Date.now() - startMs;
 
-					retrieved.add(name);
+					this.retrievedSubagents.add(name);
 					pushResult(
 						`Subagent "${name}" result:\n\n${result}`,
-						sub.status === 'failed' ? 'subagent_failed' : undefined,
+						sub.status === 'failed' || sub.status === 'cancelled' ? 'subagent_failed' : undefined,
 						elapsed,
 					);
 					return true;
 				}
 
 				case 'list_subagents': {
-					if (pending.size === 0) {
+					if (this.pendingSubagents.size === 0) {
 						pushResult('No subagents in this session.');
 						return true;
 					}
 					const now = Date.now();
 					const lines: string[] = [];
-					for (const [n, sub] of pending) {
+					for (const [n, sub] of this.pendingSubagents) {
 						const elapsed = Math.round((now - sub.startMs) / 1000);
 						const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
-						const retrievedStr = retrieved.has(n) ? ' [retrieved]' : '';
+						const retrievedStr = this.retrievedSubagents.has(n) ? ' [retrieved]' : '';
 
 						if (sub.status === 'running') {
 							lines.push(`- "${n}"  running (${elapsedStr})`);
 						} else if (sub.status === 'completed') {
 							lines.push(`- "${n}"  completed (${elapsedStr}) — use wait("${n}")${retrievedStr}`);
+						} else if (sub.status === 'cancelled') {
+							lines.push(`- "${n}"  cancelled (${elapsedStr})${retrievedStr}`);
 						} else {
 							lines.push(`- "${n}"  failed (${elapsedStr}) — use wait("${n}")${retrievedStr}`);
 						}
@@ -499,7 +636,11 @@ export class SessionManager {
 			let userDenied = false;
 
 			for (let round = 0; !userDenied; round++) {
-				const roundMessages = [...baseMessages, ...agentMessages];
+				// M-2：异步模式状态块拼到 roundMessages 末尾（不写 agentMessages——kv-cache 前缀稳定）
+				const statusBlock = buildStatusBlock();
+				const roundMessages = statusBlock
+					? [...baseMessages, ...agentMessages, statusBlock]
+					: [...baseMessages, ...agentMessages];
 
 				let roundContent = '';
 				let roundReasoning = '';
@@ -563,27 +704,8 @@ export class SessionManager {
 						reasoning_content: roundReasoning || undefined,
 					});
 
-					// 异步模式：存在未取走且未完成的子代理 → 提醒模型继续
-					if (asyncMode && pendingSubagents.size > 0) {
-						const hasIncomplete = [...pendingSubagents.values()].some(
-							(s) => s.status === 'running',
-						);
-						const hasUnretrieved = [...pendingSubagents.entries()].some(
-							([name, s]) =>
-								(s.status === 'completed' || s.status === 'failed') &&
-								!retrievedSubagents.has(name),
-						);
-
-						if (hasIncomplete || hasUnretrieved) {
-							// 静态提醒，不随子代理状态变化——保证 kv-cache 前缀稳定
-							agentMessages.push({
-								role: 'user',
-								content: '[system] You have pending subagents. Use list_subagents to check status, wait("<name>") to retrieve results.',
-							});
-							continue;
-						}
-						// All retrieved → normal flow (break)
-					}
+					// M-2：异步模式下子代理状态已由 roundMessages 末尾的状态块提供给模型，
+					// 模型看到状态后自主调度 wait/list_subagents；不再注入静态提醒或强制 continue。
 
 					// ── YOLO 审查：检查模型回复是否需要自动继续 ──────
 					if (reviewModelName && autoContinueCount < MAX_AUTO_CONTINUE) {
@@ -660,6 +782,9 @@ export class SessionManager {
 					} catch { /* 持久化失败不阻塞 */ }
 				}
 
+				// M-3：收集本轮所有子代理 spawn（非异步模式用于循环结束后并行 Promise.all）
+				const allDeferredSpawns: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: PendingSubagent }[] = [];
+
 				for (let i = 0; i < pendingToolCalls.length; i++) {
 					const tc = pendingToolCalls[i];
 					const tool = this.tools.find((t) => t.name === tc.function.name);
@@ -680,10 +805,10 @@ export class SessionManager {
 
 					// ── 子代理工具拦截 ──────────────────
 					const intercepted = await interceptSubagentTool(
-						tc, args, pendingSubagents, retrievedSubagents,
+						tc, args,
 						asyncMode, agentMessages, toolRecords, onEvent,
-						(task) => this.runSubagent(task, signal),
-						signal,
+						(name, task) => this.runSubagent(name, task),
+						allDeferredSpawns,
 					);
 					if (intercepted) continue;
 					// ───────────────────────────────────
@@ -802,6 +927,32 @@ export class SessionManager {
 					});
 				}
 
+				// ── M-3：非异步模式的 deferred spawns：收集完毕，并行等待 ──
+				if (allDeferredSpawns.length > 0) {
+					await Promise.all(allDeferredSpawns.map((d) => d.sub.promise));
+					for (const d of allDeferredSpawns) {
+						const sub = d.sub;
+						agentMessages.push({
+							role: 'tool',
+							content: `Subagent "${d.name}" completed.\n\n${sub.result}`,
+							tool_call_id: d.tc.id,
+						});
+						toolRecords.push({
+							id: d.tc.id, name: 'subagent_spawn', arguments: d.args,
+							result: sub.result,
+							error: sub.status === 'failed' || sub.status === 'cancelled' ? 'subagent_failed' : undefined,
+							duration_ms: Date.now() - sub.startMs,
+						});
+						onEvent({
+							type: 'tool_result',
+							toolCallId: d.tc.id,
+							toolName: 'subagent_spawn',
+							toolResult: sub.result,
+							error: sub.status === 'failed' || sub.status === 'cancelled' ? 'subagent_failed' : undefined,
+						});
+					}
+				}
+
 				// 每轮工具执行后增量落盘（在 agent loop 内）
 				if (turnSaved) {
 					try {
@@ -822,6 +973,13 @@ export class SessionManager {
 				completion_tokens: 0,
 				total_tokens: 0,
 			};
+			// O-1：子代理 token 入账（累积增量并入本轮 usage，入账后清零）
+			if (this.subagentUsage.total_tokens > 0) {
+				finalUsage.prompt_tokens += this.subagentUsage.prompt_tokens;
+				finalUsage.completion_tokens += this.subagentUsage.completion_tokens;
+				finalUsage.total_tokens += this.subagentUsage.total_tokens;
+				this.subagentUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+			}
 
 			const browserUrl = await this._browserLastUrl();
 			let turn: TurnRecord;
@@ -893,6 +1051,13 @@ export class SessionManager {
 					completion_tokens: 0,
 					total_tokens: 0,
 				};
+				// O-1：子代理 token 入账（中断路径同样并入）
+				if (this.subagentUsage.total_tokens > 0) {
+					partialUsage.prompt_tokens += this.subagentUsage.prompt_tokens;
+					partialUsage.completion_tokens += this.subagentUsage.completion_tokens;
+					partialUsage.total_tokens += this.subagentUsage.total_tokens;
+					this.subagentUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+				}
 
 				try {
 					const browserUrl = await this._browserLastUrl();

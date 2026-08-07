@@ -37,7 +37,7 @@ describe('SubagentStore', () => {
 	it('finish 标记 completed', () => {
 		const store = new SubagentStore();
 		store.start('test', 'task');
-		store.finish('test', 'all done', false);
+		store.finish('test', 'all done', 'completed');
 
 		const record = store.get('test');
 		expect(record!.status).toBe('completed');
@@ -48,11 +48,21 @@ describe('SubagentStore', () => {
 	it('finish 标记 failed', () => {
 		const store = new SubagentStore();
 		store.start('test', 'task');
-		store.finish('test', 'Error: something broke', true);
+		store.finish('test', 'Error: something broke', 'failed');
 
 		const record = store.get('test');
 		expect(record!.status).toBe('failed');
 		expect(record!.result).toBe('Error: something broke');
+	});
+
+	it('finish 标记 cancelled', () => {
+		const store = new SubagentStore();
+		store.start('test', 'task');
+		store.finish('test', '(subagent cancelled by user)', 'cancelled');
+
+		const record = store.get('test');
+		expect(record!.status).toBe('cancelled');
+		expect(record!.result).toBe('(subagent cancelled by user)');
 	});
 
 	it('get 返回 undefined 对于不存在的记录', () => {
@@ -125,7 +135,7 @@ describe('SubagentStore', () => {
 		store.push('test', { type: 'content', content: 'working...', timestamp: 1 });
 		store.push('test', { type: 'tool_call', content: 'read_file', timestamp: 2, toolName: 'read_file', toolArgs: { path: 'x.ts' } });
 		store.push('test', { type: 'tool_result', content: 'file contents', timestamp: 3, toolName: 'read_file' });
-		store.finish('test', 'task completed successfully', false);
+		store.finish('test', 'task completed successfully', 'completed');
 
 		const record = store.get('test')!;
 		expect(record.status).toBe('completed');

@@ -50,7 +50,7 @@ const MAX_INPUT_ROWS = 5;
 const AVAILABLE_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
 /** 可用命令列表 */
-const AVAILABLE_COMMANDS = ['/model', '/help', '/context', '/yolo', '/async', '/exit'];
+const AVAILABLE_COMMANDS = ['/model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/exit'];
 
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
@@ -417,6 +417,11 @@ export class TuiApp {
 			return await this.toggleAsync();
 		}
 
+		if (content.startsWith('/subagent_cancel')) {
+			// 注意：必须以 /subagent_cancel 精确前缀匹配，且放在 /subagent 之前（二者同前缀）
+			return await this.cancelSubagentInteractive();
+		}
+
 		if (content.startsWith('/subagent')) {
 			const arg = content.slice(9).trim();
 			return this.showSubagentDetail(arg);
@@ -461,6 +466,7 @@ export class TuiApp {
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
 			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
+			['/subagent_cancel','Cancel subagent(s) via interactive list'],
 			['/help',          'Show this command list'],
 			['/context',       'Show session context & token usage'],
 			['/exit  |  Ctrl+C', 'Exit the session'],
@@ -560,6 +566,49 @@ export class TuiApp {
 		return true;
 	}
 
+	/** /subagent_cancel — 交互式选择要取消的子代理（含"全部取消"选项） */
+	private async cancelSubagentInteractive(): Promise<true> {
+		const store = this.sessionMgr.getSubagentStore();
+		const names = store.list();
+		if (names.length === 0) {
+			process.stdout.write(dim('No subagents to cancel.') + '\r\n');
+			return true;
+		}
+
+		const options: SelectOption<string>[] = [
+			{ label: `全部取消 (${names.length} 个)`, value: '__all__' },
+			...names.map((n) => {
+				const rec = store.get(n);
+				const status = rec?.status ?? 'running';
+				const icon = status === 'running' ? '⏳'
+					: status === 'completed' ? '✓'
+					: status === 'cancelled' ? '✕'
+					: '✗';
+				return { label: `${n}  (${icon} ${status})`, value: n };
+			}),
+		];
+
+		const selector = new Selector(options, '选择要取消的子代理 (↑↓ 移动, Enter 确认, Ctrl+C 取消):');
+		const selected = await selector.select(
+			() => this.stdinHandler,
+			(h) => {
+				this.stdinHandler = h;
+			},
+		);
+
+		if (selected) {
+			const cancelled = this.sessionMgr.cancelSubagent(selected === '__all__' ? 'all' : selected);
+			if (cancelled.length > 0) {
+				process.stdout.write(
+					green(`[cancelled] ${selected === '__all__' ? `全部 ${cancelled.length} 个子代理` : selected}`) + '\r\n',
+				);
+			} else {
+				process.stdout.write(dim(`No running subagent matched.`) + '\r\n');
+			}
+		}
+		return true;
+	}
+
 	/** /subagent [name] — 显示子代理详情 */
 	private async showSubagentDetail(name?: string): Promise<true> {
 		const store = this.sessionMgr.getSubagentStore();
@@ -583,7 +632,7 @@ export class TuiApp {
 								for (const entry of record.entries) {
 									store.push(n, entry);
 								}
-								store.finish(n, record.result ?? '', record.status === 'failed');
+								store.finish(n, record.result ?? '', record.status === 'cancelled' ? 'cancelled' : record.status === 'failed' ? 'failed' : 'completed');
 							}
 						}
 					}
