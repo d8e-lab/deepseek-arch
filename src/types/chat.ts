@@ -29,29 +29,35 @@ export interface Message {
 	tool_calls?: import('./api.js').ToolCall[];
 }
 
-/** 一轮对话（user + assistant + usage + cost） */
+/** 一轮对话（v2：messages 恒存，唯一事实源） */
 export interface TurnRecord {
-	/** 轮次序号（从 1 开始） */
-	turn: number;
-	/** 用户消息 */
-	user: Message;
-	/** 助手回复 */
-	assistant: {
+	/**
+	 * schema 版本（v2 起写入）。
+	 * v2：messages 恒存；顶层不再持久化 turn/user/assistant
+	 * （轮次号 = 数组下标+1，用户消息 = messages[0]，助手回复由 messages 推导）。
+	 * 旧数据（无 version 或 version=1）仍有 turn/user/assistant 字段，读取时兼容回退。
+	 */
+	version?: 2;
+	/** 用户消息（仅 v1 旧数据存在；v2 由 messages[0] 推导，见 turnUserContent） */
+	user?: Message;
+	/**
+	 * 助手回复（仅 v1 旧数据存在；v2 由 messages 推导，
+	 * 见 turnAssistantContent / turnAssistantReasoning）。
+	 * v1 无 messages 的轮次（无工具调用 / 中断无交互）此字段为完整内容。
+	 */
+	assistant?: {
 		/** API 返回的 response id */
 		id: string;
 		role: 'assistant';
-		/**
-		 * 助手最终回复（content/reasoning_content）。
-		 *
-		 * 注意：当本轮有完整消息序列（messages 字段非空，即有工具调用的轮次）
-		 * 时，顶层**不持久化** content/reasoning_content——顶层只存 id，
-		 * 内容由 messages 中所有 assistant 消息推导（见
-		 * turnAssistantContent / turnAssistantReasoning），避免双份存储。
-		 * 仅无 messages 的轮次（无工具调用 / 中断无交互 / 旧数据）此字段为完整内容。
-		 */
 		content?: string;
 		reasoning_content?: string;
 	};
+	/**
+	 * 本轮完整消息序列（含 user、中间 assistant tool_calls、tool results、最终 assistant）
+	 * 用于精确回放 API 收发的消息前缀，命中 KV cache。
+	 * v2 恒存在；v1 旧数据缺失时回退到从 user/assistant/tool_calls 重建（兼容路径）。
+	 */
+	messages?: Message[];
 	/** Token 用量 */
 	usage?: TokenUsage;
 	/** 本轮费用 (CNY) */
@@ -60,14 +66,8 @@ export interface TurnRecord {
 	created_at: string;
 	/** 是否为中断的不完整轮次（不会被发送回 API 作为上下文） */
 	interrupted?: boolean;
-	/** 本轮工具调用记录（含执行结果，agent 模式下填充） */
+	/** 本轮工具调用记录（展示元数据：duration/preview/结构化 error，v2 保留） */
 	tool_calls?: ToolCallRecord[];
-	/**
-	 * 本轮完整消息序列（含 user、中间 assistant tool_calls、tool results、最终 assistant）
-	 * 用于精确回放 API 收发的消息前缀，命中 KV cache。
-	 * 不存在时回退到从 tool_calls 重建（兼容旧数据）。
-	 */
-	messages?: Message[];
 	/** Agent loop 每轮 API 调用的 token 用量（用于监控缓存命中率） */
 	round_usage?: RoundUsage[];
 }

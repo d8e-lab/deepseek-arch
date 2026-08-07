@@ -12,6 +12,7 @@ import type { StreamEvent } from '../../types/index.js';
 import type { Tool } from '../../tools/types.js';
 import { ConfigManager } from '../../core/config.js';
 import { ConversationView, truncateThink } from './conversation.js';
+import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../../utils/turn-utils.js';
 import { InputEditor } from './input-editor.js';
 import { Throttle } from '../../utils/throttle.js';
 import { execSync } from 'node:child_process';
@@ -194,23 +195,20 @@ export class TuiApp {
 
 		for (let ti = 0; ti < turns.length; ti++) {
 			const turn = turns[ti];
-			const thinkLines = turn.assistant.reasoning_content
-				? turn.assistant.reasoning_content.split('\n').length
-				: 0;
-			const { isTruncated } = turn.assistant.reasoning_content
-				? truncateThink(turn.assistant.reasoning_content)
-				: { isTruncated: false };
+			// F-2：v2 顶层无 assistant.content/reasoning（方案 C 后恒 undefined），统一走 turn-utils 推导
+			const thinkText = turnAssistantReasoning(turn);
+			const thinkLines = thinkText ? thinkText.split('\n').length : 0;
+			const { isTruncated } = thinkText ? truncateThink(thinkText) : { isTruncated: false };
 
 			if (isTruncated) {
 				warnings.push(`Turn #${ti + 1}: think content truncated (${thinkLines} lines, max 4 displayed)`);
 			}
 
-			const contentLines = turn.assistant.content
-				? turn.assistant.content.split('\n').length
-				: 0;
+			const contentText = turnAssistantContent(turn);
+			const contentLines = contentText ? contentText.split('\n').length : 0;
 
 			// 工具调用
-			const tcRecords = (turn as any).tool_calls;
+			const tcRecords = turn.tool_calls;
 			const toolCalls: ToolCallCaptureInfo[] = [];
 			if (tcRecords && Array.isArray(tcRecords)) {
 				for (const tcr of tcRecords) {
@@ -237,7 +235,7 @@ export class TuiApp {
 
 			turnCaptures.push({
 				index: ti,
-				userText: turn.user.content,
+				userText: turnUserContent(turn),
 				thinkLines,
 				thinkTruncated: isTruncated,
 				contentLines,

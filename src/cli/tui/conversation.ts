@@ -10,7 +10,7 @@
 import type { TurnRecord, TokenUsage } from '../../types/index.js';
 import { strDisplayWidth, cyan, dim, green, red, renderDiffLine, stripAnsi } from './renderer.js';
 import { MarkdownTableRenderer } from './markdown.js';
-import { turnAssistantContent, turnAssistantReasoning } from '../../utils/turn-utils.js';
+import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../../utils/turn-utils.js';
 
 /** think 最大显示行数 */
 const THINK_MAX_LINES = 4;
@@ -88,10 +88,10 @@ export class ConversationView {
 			const turn = turns[ti];
 			if (ti > 0) lines.push('');
 
-			// 用户消息（绿色）
+			// 用户消息（绿色）（v2：顶层无 user，走 turn-utils 推导）
 			const userLabel = green('[You] ');
 			const userLabelWidth = strDisplayWidth('[You] ');
-			const userWrapped = wrapText(turn.user.content, termWidth - userLabelWidth);
+			const userWrapped = wrapText(turnUserContent(turn), termWidth - userLabelWidth);
 			for (let i = 0; i < userWrapped.length; i++) {
 				if (i === 0) {
 					lines.push(userLabel + green(userWrapped[i]));
@@ -130,7 +130,7 @@ export class ConversationView {
 			}
 
 			// 工具调用记录
-			const tcRecords = (turn as any).tool_calls;
+			const tcRecords = turn.tool_calls;
 			if (tcRecords && Array.isArray(tcRecords) && tcRecords.length > 0) {
 				for (const tcr of tcRecords) {
 					const shortName = tcr.name.replace('execute_', '');

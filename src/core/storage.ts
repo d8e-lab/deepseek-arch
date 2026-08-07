@@ -5,11 +5,12 @@
  *   <sessionsDir>/
  *   └── <session-id>/
  *       ├── meta.json        # 会话元数据
- *       ├── turn-001.json    # 第 1 轮对话
- *       ├── turn-002.json    # 第 2 轮对话
- *       └── ...
+ *       ├── turns.json       # 全部轮次（单文件数组，v2 格式）
+ *       ├── system-prompt.txt# 会话 system prompt（kv-cache 命中用）
+ *       └── subagents/       # 子代理执行记录（<name>.json + _index.json）
  *
- * 每轮对话一个 JSON 文件，独立管理，避免长上下文下数据库膨胀。
+ * turns.json 为单文件全量读写（每轮对话一个 JSON 文件的旧格式已废弃，
+ * loadTurns 保留读取兼容）。
  */
 
 import { readFile, writeFile, mkdir, readdir, rm, access } from 'node:fs/promises';
@@ -237,24 +238,25 @@ export class Storage {
 		const existingTurns = await this.loadTurns(sessionId);
 		const turnNumber = existingTurns.length + 1;
 
+		// v2：messages 恒存（唯一事实源），顶层不再存 turn/user/assistant。
+		// C-2 修复：agentLoopMessages 由调用方传入且已含 user 消息，此处不再二次拼接；
+		// 无工具轮次（agentLoopMessages 为空）由本层统一构造 [user, assistant]。
+		const messages: Message[] = agentLoopMessages && agentLoopMessages.length > 0
+			? agentLoopMessages
+			: [
+					userMessage,
+					{
+						role: 'assistant',
+						content: assistantMessage.content ?? '',
+						...(assistantMessage.reasoning_content !== undefined
+							? { reasoning_content: assistantMessage.reasoning_content }
+							: {}),
+					},
+				];
+
 		const turn: Record<string, unknown> = {
-			turn: turnNumber,
-			user: userMessage,
-			assistant: {
-				id: assistantMessage.id,
-				role: 'assistant',
-				// 方案 C：有完整消息序列（agentLoopMessages 非空）时顶层不存
-				// content/reasoning_content，避免与 messages 双份存储——
-				// 内容由 turnAssistantContent/turnAssistantReasoning 推导。
-				...(agentLoopMessages && agentLoopMessages.length > 0
-					? {}
-					: {
-							content: assistantMessage.content,
-							...(assistantMessage.reasoning_content !== undefined
-								? { reasoning_content: assistantMessage.reasoning_content }
-								: {}),
-						}),
-			},
+			version: 2,
+			messages,
 			usage,
 			cost_rmb: costRmb,
 			created_at: new Date().toISOString(),
@@ -263,10 +265,6 @@ export class Storage {
 
 		if (toolCalls && toolCalls.length > 0) {
 			turn.tool_calls = toolCalls;
-		}
-
-		if (agentLoopMessages && agentLoopMessages.length > 0) {
-			turn.messages = [userMessage, ...agentLoopMessages];
 		}
 
 		if (roundUsages && roundUsages.length > 0) {

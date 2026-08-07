@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { Storage } from './storage.js';
 import type { ModelProvider } from './model-provider.js';
 import { yieldEventLoop } from '../utils/event-loop.js';
+import { turnUserContent } from '../utils/turn-utils.js';
 import { appendCacheLog } from './cache-log.js';
 import { reviewConversation } from './reviewer.js';
 import type {
@@ -711,7 +712,7 @@ export class SessionManager {
 					if (reviewModelName && autoContinueCount < MAX_AUTO_CONTINUE) {
 						const pastInputs = this.session!.turns
 							.slice(-(MAX_AUTO_CONTINUE + 1))
-							.map(t => t.user.content);
+							.map(t => turnUserContent(t));
 						const recentInputs = [...pastInputs, userContent].slice(-5);
 
 						const { verdict, reason } = await reviewConversation(
@@ -985,15 +986,34 @@ export class SessionManager {
 			let turn: TurnRecord;
 
 			if (turnSaved) {
-				// 已有进行中的 turn：更新为完成状态（顶层 content 由 messages 推导，不重复存）
-				turn = (await this.storage.updateLastTurn(this.session.meta.id, {
+				// 已有进行中的 turn：更新为完成状态（messages 已由增量落盘维护）
+				// C-5：updateLastTurn 返回 null（磁盘 turns 为空/损坏）时回退 saveTurn 兜底
+				const updated = await this.storage.updateLastTurn(this.session.meta.id, {
 					toolCalls: toolRecords.length > 0 ? toolRecords : undefined,
 					messages: agentMessages.length > 0 ? [userMsg, ...agentMessages] : undefined,
 					usage: finalUsage,
 					roundUsages: roundUsages.length > 0 ? roundUsages : undefined,
 					interrupted: false,
 					lastBrowserUrl: browserUrl,
-				}))!;
+				});
+				if (updated) {
+					turn = updated;
+				} else {
+					// 磁盘无进行中 turn（首次 saveTurn 失败被吞）：重新保存完整 turn
+					turn = await this.storage.saveTurn(
+						this.session.meta.id,
+						userMsg,
+						{ id: responseId || '', role: 'assistant', content: finalContent, reasoning_content: finalReasoning || undefined },
+						finalUsage,
+						0,
+						false,
+						toolRecords.length > 0 ? toolRecords : undefined,
+						[userMsg, ...agentMessages],
+						roundUsages.length > 0 ? roundUsages : undefined,
+						browserUrl,
+					);
+					this.session.turns.push(turn);
+				}
 			} else {
 				// 无工具调用：直接追加新 turn
 				const costRmb = 0;
@@ -1017,10 +1037,10 @@ export class SessionManager {
 				this.session.turns.push(turn);
 			}
 
-			// 写入缓存命中率监控日志（用实际 turn 号，不依赖内存 length 推断）
+			// 写入缓存命中率监控日志（v2 无 turn 字段，轮次号 = 内存 turns 长度——此时已含当前轮）
 			if (roundUsages.length > 0) {
 				const dir = this.storage.sessionDir(this.session.meta.id);
-				appendCacheLog(dir, this.session.meta.id, turn.turn, roundUsages);
+				appendCacheLog(dir, this.session.meta.id, this.session.turns.length, roundUsages);
 			}
 
 			// 更新内存中的 session 元数据。
@@ -1065,18 +1085,36 @@ export class SessionManager {
 
 					if (turnSaved) {
 						// 已有进行中的 turn：更新为中断状态。
-						// 顶层不写 '[已中断]' 占位符——content 由 messages 推导，
 						// "已中断"状态由 interrupted 标志驱动显示（conversation.ts）。
-						turn = (await this.storage.updateLastTurn(this.session.meta.id, {
+						// C-5：updateLastTurn 返回 null（磁盘无进行中 turn）时回退 saveTurn 追加
+						const updated = await this.storage.updateLastTurn(this.session.meta.id, {
 							toolCalls: toolRecords,
 							messages: [userMsg, ...agentMessages],
 							usage: partialUsage,
 							roundUsages: roundUsages.length > 0 ? roundUsages : undefined,
 							interrupted: true,
 							lastBrowserUrl: browserUrl,
-						}))!;
-						const lastIdx = this.session.turns.length - 1;
-						if (lastIdx >= 0) this.session.turns[lastIdx] = turn;
+						});
+						if (updated) {
+							turn = updated;
+							const lastIdx = this.session.turns.length - 1;
+							if (lastIdx >= 0) this.session.turns[lastIdx] = turn;
+						} else {
+							// 磁盘无进行中 turn：直接保存完整中断 turn
+							turn = await this.storage.saveTurn(
+								this.session.meta.id,
+								userMsg,
+								{ id: responseId || '', role: 'assistant' },
+								partialUsage,
+								0,
+								true,
+								toolRecords,
+								[userMsg, ...agentMessages],
+								roundUsages.length > 0 ? roundUsages : undefined,
+								browserUrl,
+							);
+							this.session.turns.push(turn);
+						}
 					} else {
 						// 工具刚返回 tool_calls 但尚未首次 saveTurn → 直接追加。
 						// agentLoopMessages 非空，顶层只存 id（content 由 messages 推导）。
@@ -1127,7 +1165,7 @@ export class SessionManager {
 					messages.push(...turn.messages);
 				} else {
 					// 兼容旧数据：至少保留用户消息
-					messages.push(turn.user);
+					if (turn.user) messages.push(turn.user);
 				}
 				continue;
 			}
@@ -1138,10 +1176,10 @@ export class SessionManager {
 				continue;
 			}
 
-			// 兼容旧数据：从 tool_calls 反向重建
-			messages.push(turn.user);
+			// 兼容旧数据（v1）：从 user/assistant/tool_calls 反向重建
+			if (turn.user) messages.push(turn.user);
 
-			const tcRecords = (turn as unknown as Record<string, unknown>).tool_calls as ToolCallRecord[] | undefined;
+			const tcRecords = turn.tool_calls;
 			if (tcRecords && tcRecords.length > 0) {
 				const toolCalls: ToolCall[] = tcRecords.map((tcr) => ({
 					id: tcr.id,
@@ -1170,8 +1208,8 @@ export class SessionManager {
 
 			messages.push({
 				role: 'assistant',
-				content: turn.assistant.content ?? '',
-				reasoning_content: turn.assistant.reasoning_content,
+				content: turn.assistant?.content ?? '',
+				reasoning_content: turn.assistant?.reasoning_content,
 			});
 		}
 

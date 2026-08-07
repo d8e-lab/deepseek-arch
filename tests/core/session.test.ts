@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { Storage } from '../../src/core/storage.js';
 import type { ModelProvider } from '../../src/core/model-provider.js';
 import { SessionManager, type StreamEvent } from '../../src/core/session.js';
+import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../../src/utils/turn-utils.js';
 import type { Message, ChatCompletionResponse, StreamChunk, TokenUsage } from '../../src/types/index.js';
 import type { Tool, ToolResult } from '../../src/tools/types.js';
 
@@ -120,11 +121,11 @@ describe('SessionManager', () => {
       await manager.startNewSession('消息测试');
 
       const { turn, response } = await manager.sendMessage('你好');
-      expect(turn.turn).toBe(1);
-      expect(turn.user.content).toBe('你好');
-      expect(turn.assistant.content).toBe('你好！');
-      expect(turn.assistant.reasoning_content).toBe('用户说你好，我应回应问候。');
-      expect(turn.assistant.id).toBe('chatcmpl-test-001');
+      // v2：无 turn 字段（轮次号=数组下标+1），user/assistant 由 messages 推导
+      expect(turn.version).toBe(2);
+      expect(turn.messages![0].content).toBe('你好');
+      expect(turnAssistantContent(turn)).toBe('你好！');
+      expect(turnAssistantReasoning(turn)).toBe('用户说你好，我应回应问候。');
       expect(turn.usage.total_tokens).toBe(30);
       expect(turn.cost_rmb).toBe(0); // Phase 7 前为 0
       expect(response.choices[0].message?.content).toBe('你好！');
@@ -134,13 +135,11 @@ describe('SessionManager', () => {
       await manager.startNewSession();
 
       const t1 = await manager.sendMessage('第一轮');
-      expect(t1.turn.turn).toBe(1);
-
       const t2 = await manager.sendMessage('第二轮');
-      expect(t2.turn.turn).toBe(2);
-
       const t3 = await manager.sendMessage('第三轮');
-      expect(t3.turn.turn).toBe(3);
+      // v2：无 turn 字段，用内存 turns 下标验证顺序
+      expect(manager.getSession()!.turns.map((t) => turnUserContent(t))).toEqual(['第一轮', '第二轮', '第三轮']);
+      expect([t1, t2, t3].map((t) => t.turn.messages![0].content)).toEqual(['第一轮', '第二轮', '第三轮']);
     });
 
     it('历史消息被传递到 API（含 reasoning_content）', async () => {
@@ -239,10 +238,10 @@ describe('SessionManager', () => {
       const result = await mgr.sendMessageStream('你好', (e) => events.push(e));
 
       expect(result).not.toBeNull();
-      expect(result!.turn).toBe(1);
-      expect(result!.user.content).toBe('你好');
-      expect(result!.assistant.content).toBe('你好世界');
-      expect(result!.assistant.reasoning_content).toBe('思考中');
+      expect(result!.version).toBe(2);
+      expect(result!.messages![0].content).toBe('你好');
+      expect(turnAssistantContent(result!)).toBe('你好世界');
+      expect(turnAssistantReasoning(result!)).toBe('思考中');
       expect(result!.interrupted).toBeUndefined();
 
       // 验证事件
@@ -447,7 +446,7 @@ describe('SessionManager', () => {
 
       // 验证：turn 被保存
       expect(result).not.toBeNull();
-      expect(result!.turn).toBe(1);
+      expect(result!.version).toBe(2);
 
       // 验证：tool_record 中包含 error
       expect(result!.tool_calls).toHaveLength(1);
@@ -505,8 +504,8 @@ describe('SessionManager', () => {
 
       const turn1 = await mgr.sendMessageStream('Q1', () => {});
       expect(turn1).not.toBeNull();
-      // 方案 C：有工具调用轮次顶层 assistant 不持久化 content（由 messages 推导）
-      expect(turn1!.assistant.content).toBeUndefined();
+      // v2：有工具调用轮次顶层无 assistant（由 messages 推导）
+      expect(turn1!.assistant).toBeUndefined();
       expect(turn1!.messages!.length).toBeGreaterThan(0);
       // C-1：第一轮结束内存 turns 应为 1
       expect(mgr.getSession()!.turns.length).toBe(1);
@@ -518,8 +517,8 @@ describe('SessionManager', () => {
       const session = mgr.getSession()!;
       expect(session.turns.length).toBe(2);
       expect(session.meta.turnCount).toBe(2);
-      expect(session.turns[0].user.content).toBe('Q1');
-      expect(session.turns[1].user.content).toBe('Q2');
+      expect(turnUserContent(session.turns[0])).toBe('Q1');
+      expect(turnUserContent(session.turns[1])).toBe('Q2');
 
       // 第二轮请求（call 3）的上下文应包含 Q1（修复前内存错乱会缺 Q1）
       const secondRequest = received.find((msgs) =>
@@ -560,14 +559,13 @@ describe('SessionManager', () => {
       const meta = await mgr.startNewSession('冗余消除测试');
       await mgr.sendMessageStream('Q', () => {});
 
-      // 磁盘 turns.json：顶层 assistant 无 content（messages 明细在）
+      // 磁盘 turns.json：v2 顶层无 assistant（messages 明细在）
       const diskTurns = await storage.getTurns(meta.id);
       expect(diskTurns).toHaveLength(1);
-      expect(diskTurns[0].assistant.content).toBeUndefined();
+      expect(diskTurns[0].assistant).toBeUndefined();
       expect(diskTurns[0].messages!.length).toBeGreaterThan(0);
 
       // helper 推导结果 = messages 中所有 assistant content 拼接
-      const { turnAssistantContent } = await import('../../src/utils/turn-utils.js');
       const joined = diskTurns[0].messages!
         .filter((m) => m.role === 'assistant')
         .map((m) => m.content ?? '')

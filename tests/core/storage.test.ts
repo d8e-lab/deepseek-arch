@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Storage } from '../../src/core/storage.js';
 import type { Message, TokenUsage } from '../../src/types/index.js';
+import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../../src/utils/turn-utils.js';
 
 /** 创建已初始化的 Storage（临时目录） */
 async function createStore(): Promise<Storage> {
@@ -86,8 +87,9 @@ describe('Storage (文件系统)', () => {
       expect(session).not.toBeNull();
       expect(session!.meta.title).toBe('完整会话');
       expect(session!.turns).toHaveLength(1);
-      expect(session!.turns[0].user.content).toBe('你好');
-      expect(session!.turns[0].assistant.content).toBe('你好！');
+      // v2：user/assistant 由 messages 推导
+      expect(turnUserContent(session!.turns[0])).toBe('你好');
+      expect(turnAssistantContent(session!.turns[0])).toBe('你好！');
       expect(session!.meta.turnCount).toBe(1);
     });
 
@@ -154,26 +156,28 @@ describe('Storage (文件系统)', () => {
       const { sessionId } = await setupSession(store);
       const turn = await saveTurn(store, sessionId, '你好', '你好！', '思考中...');
 
-      expect(turn.turn).toBe(1);
-      expect(turn.user.content).toBe('你好');
-      expect(turn.assistant.content).toBe('你好！');
-      expect(turn.assistant.reasoning_content).toBe('思考中...');
+      // v2：无 turn/user/assistant 顶层字段，messages 恒存
+      expect(turn.version).toBe(2);
+      expect(turn.turn).toBeUndefined();
+      expect(turn.user).toBeUndefined();
+      expect(turn.assistant).toBeUndefined();
+      expect(turn.messages![0].content).toBe('你好');
+      expect(turnAssistantContent(turn)).toBe('你好！');
+      expect(turnAssistantReasoning(turn)).toBe('思考中...');
       expect(turn.usage.prompt_cache_hit_tokens).toBe(80);
       expect(turn.cost_rmb).toBe(0.0015);
-      expect(turn.assistant.id).toMatch(/^chatcmpl-/);
     });
 
-    it('saveTurn() 多轮序号递增', async () => {
+    it('saveTurn() 多轮序号递增（meta.turnCount）', async () => {
       const { sessionId } = await setupSession(store);
 
-      const t1 = await saveTurn(store, sessionId, 'Q1', 'A1');
-      expect(t1.turn).toBe(1);
+      await saveTurn(store, sessionId, 'Q1', 'A1');
+      await saveTurn(store, sessionId, 'Q2', 'A2');
+      await saveTurn(store, sessionId, 'Q3', 'A3');
 
-      const t2 = await saveTurn(store, sessionId, 'Q2', 'A2');
-      expect(t2.turn).toBe(2);
-
-      const t3 = await saveTurn(store, sessionId, 'Q3', 'A3');
-      expect(t3.turn).toBe(3);
+      const session = await store.getSession(sessionId);
+      expect(session!.meta.turnCount).toBe(3);
+      expect(session!.turns.map((t) => turnUserContent(t))).toEqual(['Q1', 'Q2', 'Q3']);
     });
 
     it('saveTurn() 更新 meta 的 turnCount 和 totalCost', async () => {
@@ -195,8 +199,8 @@ describe('Storage (文件系统)', () => {
 
       const turns = await store.getTurns(sessionId);
       expect(turns).toHaveLength(2);
-      expect(turns[0].user.content).toBe('Q1');
-      expect(turns[1].user.content).toBe('Q2');
+      expect(turnUserContent(turns[0])).toBe('Q1');
+      expect(turnUserContent(turns[1])).toBe('Q2');
     });
 
     it('getTurns() 空会话返回空数组', async () => {
@@ -207,7 +211,7 @@ describe('Storage (文件系统)', () => {
     it('saveTurn() 保存 reasoning_content 为空时正常', async () => {
       const { sessionId } = await setupSession(store);
       const turn = await saveTurn(store, sessionId, 'hi', 'hello', undefined);
-      expect(turn.assistant.reasoning_content).toBeUndefined();
+      expect(turnAssistantReasoning(turn)).toBe('');
     });
   });
 
@@ -269,7 +273,9 @@ describe('Storage (文件系统)', () => {
 
       const turns = await store.getTurns(sessionId);
       expect(turns).toHaveLength(50);
-      expect(turns[49].turn).toBe(50);
+      // v2：无 turn 字段，meta.turnCount 验证轮次数
+      const meta = await store.getSession(sessionId);
+      expect(meta!.meta.turnCount).toBe(50);
     });
 
     it('超长 content 正常存储', async () => {
@@ -277,8 +283,8 @@ describe('Storage (文件系统)', () => {
       const longContent = 'A'.repeat(50000);
 
       const turn = await saveTurn(store, sessionId, longContent, longContent);
-      expect(turn.user.content).toBe(longContent);
-      expect(turn.assistant.content).toBe(longContent);
+      expect(turnUserContent(turn)).toBe(longContent);
+      expect(turnAssistantContent(turn)).toBe(longContent);
     });
 
     it('特殊字符正常存储', async () => {
@@ -286,7 +292,7 @@ describe('Storage (文件系统)', () => {
       const special = '你好\n世界 🚀\n换行 "引号" \'单引号\' \\反斜杠';
 
       const turn = await saveTurn(store, sessionId, special, special);
-      expect(turn.user.content).toBe(special);
+      expect(turnUserContent(turn)).toBe(special);
     });
 
     it('会话隔离', async () => {
