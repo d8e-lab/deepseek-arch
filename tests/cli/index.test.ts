@@ -8,8 +8,13 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 const CLI_PATH = resolve(import.meta.dirname!, '..', '..', 'dist', 'cli', 'index.js');
+/** 从 package.json 读取当前版本（与 PACKAGE_VERSION 单一来源对齐） */
+const PACKAGE_VERSION: string = JSON.parse(
+  readFileSync(resolve(import.meta.dirname!, '..', '..', 'package.json'), 'utf-8'),
+).version;
 
 function run(args: string[]): { stdout: string; stderr: string; status: number | null } {
   try {
@@ -37,13 +42,13 @@ describe('CLI (e2e)', () => {
   describe('--version', () => {
     it('输出包含版本号', () => {
       const { stdout, status } = run(['--version']);
-      expect(stdout.trim()).toContain('1.2.0');
+      expect(stdout.trim()).toContain(PACKAGE_VERSION);
       expect(status).toBe(0);
     });
 
     it('-V 等价于 --version', () => {
       const { stdout, status } = run(['-V']);
-      expect(stdout.trim()).toContain('1.2.0');
+      expect(stdout.trim()).toContain(PACKAGE_VERSION);
       expect(status).toBe(0);
     });
   });
