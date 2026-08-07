@@ -1148,8 +1148,7 @@ export class TuiApp {
 	}
 
 	/** 原地刷新输入区域 */
-	private renderInput(): void {
-		const cols = getTermSize().cols;
+	private renderInput(): void {		const cols = getTermSize().cols;
 		// cols-1 为可用显示宽度（避免 auto-wrap），留 1 列余量给换行光标
 		const availWidth = cols - 1;
 		this.input.setWrapWidth(availWidth);
@@ -1223,6 +1222,49 @@ export class TuiApp {
 		showCursor();
 	}
 
+	// ─── Bug 1：流式输出期间输入区固定在底部 ──────
+
+	/**
+	 * 收起输入区：光标移到输入区起点，清到屏底。
+	 * 输出开始前/每条输出行前调用，使输出从原输入区位置开始写。
+	 */
+	private collapseInputArea(): void {
+		if (this.lastCursorDisplayRow > 0) {
+			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		}
+		process.stdout.write('\r');
+		process.stdout.write(CLEAR_TO_END);
+		this.lastVisibleInputRows = 1;
+		this.lastCursorDisplayRow = 0;
+	}
+
+	/**
+	 * 输出期间：从当前光标位置（输出区末尾）重绘输入区。
+	 * 与 IDLE 态 renderInput 不同：强制 lastCursorDisplayRow=0，不做上移回退，
+	 * 直接在光标下方绘制输入区，使其视觉上固定在屏幕底部。
+	 */
+	private renderInputDuringStream(): void {
+		this.lastCursorDisplayRow = 0;
+		this.renderInput();
+	}
+
+	/** 输出一行到 scrollback，并在底部重绘输入区（Bug 1） */
+	private writeOutputLine(line: string): void {
+		this.collapseInputArea();
+		process.stdout.write(line + '\r\n');
+		this.renderInputDuringStream();
+	}
+
+	/** 批量输出多行（减少逐行重绘闪烁） */
+	private writeOutputLines(lines: string[]): void {
+		if (lines.length === 0) return;
+		this.collapseInputArea();
+		for (const l of lines) {
+			process.stdout.write(l + '\r\n');
+		}
+		this.renderInputDuringStream();
+	}
+
 	/**
 	 * 渲染命令补全建议列表
 	 * @returns 绘制的行数
@@ -1291,13 +1333,15 @@ export class TuiApp {
 	private async sendMessageStream(content: string): Promise<void> {
 		this.setState(AppState.SENDING);
 		this.abortController = new AbortController();
+		// Bug 1：输出开始前收起输入区（光标移到输入区起点清屏），输出从原输入区位置开始写
+		this.collapseInputArea();
 
 		let reasoningStarted = false;
 		let contentStarted = false;
 		/** 追踪 reasoning 末尾是否有换行，用于 reasoning→content 过渡时决定是否加 \r\n */
 		let reasoningEndsWithNewline = true;
 
-		// 流式输出节流：累积 delta，30fps 批量写出
+		// 流式输出节流：累积 delta，30fps 批量写出（仅 reasoning 走 pending；content 走 mdRenderer 逐行）
 		const renderThrottle = new Throttle(30);
 		let pending = '';
 		let pendingIsReasoning = false;
@@ -1341,17 +1385,19 @@ export class TuiApp {
 							if (reasoningStarted && !contentStarted) {
 								flush(); // reasoning → content 过渡，写出剩余 reasoning
 								if (!reasoningEndsWithNewline) {
-									process.stdout.write('\r\n');
+									this.writeOutputLine(''); // 空行过渡（Bug 1：保持输入区在底部）
 								}
 								contentStarted = true;
 							}
 							if (!contentStarted && !reasoningStarted) {
-								process.stdout.write('\r\n\r\n');
+								this.writeOutputLine('');
+								this.writeOutputLine('');
 								contentStarted = true;
 							}
 							// 喂入表格渲染器，逐行写出（表格块内部行被暂存，结束时一次性渲染）
+							// Bug 1：每行输出后重绘输入区，输入框在回复期间保持可见
 							for (const line of mdRenderer.feed(event.text ?? '')) {
-								process.stdout.write(line + '\r\n');
+								this.writeOutputLine(line);
 							}
 							break;
 						case 'tool_call_start': {
@@ -1361,8 +1407,8 @@ export class TuiApp {
 							contentStarted = false;
 							reasoningEndsWithNewline = true;
 							const shortName = (event.toolName ?? '?').replace('execute_', '');
-							process.stdout.write(
-								cyan(`\r\n[T: ${shortName}] `) + dim(JSON.stringify(event.toolArgs ?? {})) + '\r\n',
+							this.writeOutputLine(
+								cyan(`[T: ${shortName}] `) + dim(JSON.stringify(event.toolArgs ?? {})),
 							);
 							break;
 						}
@@ -1374,9 +1420,7 @@ export class TuiApp {
 							// diff 预览 — 原生格式，仅着色，不加额外前缀
 							const preview = event.toolPreview ?? '';
 							if (preview) {
-								for (const line of preview.split('\n')) {
-									process.stdout.write(renderDiffLine(line, '') + '\r\n');
-								}
+								this.writeOutputLines(preview.split('\n').map((l) => renderDiffLine(l, '')));
 							}
 							break;
 						}
@@ -1384,30 +1428,32 @@ export class TuiApp {
 							// 实时 shell 输出：逐行渲染
 							const line = event.outputLine ?? '';
 							const stream = event.outputStream ?? 'stdout';
-							if (stream === 'stderr') {
-								process.stdout.write(yellow(' │ ') + dim(line) + '\r\n');
-							} else {
-								process.stdout.write(cyan(' │ ') + dim(line) + '\r\n');
-							}
+							this.writeOutputLine(
+								stream === 'stderr'
+									? yellow(' │ ') + dim(line)
+									: cyan(' │ ') + dim(line),
+							);
 							break;
 						}
 						case 'tool_result':
 							flush();
 							if (event.toolDenied) {
-								process.stdout.write(red('\r\n[Denied]\r\n'));
+								this.writeOutputLine(red('[Denied]'));
 							} else {
+								const outLines: string[] = [];
 								// 显示错误信息（如果有）
 								if (event.error) {
-									process.stdout.write(red(' ✖ ') + event.error.split('\n')[0] + '\r\n');
+									outLines.push(red(' ✖ ') + event.error.split('\n')[0]);
 								}
 								// 显示工具执行结果内容
 								const lines = (event.toolResult ?? '').split('\n').slice(0, 12);
 								for (const line of lines) {
-									process.stdout.write(cyan(' │ ') + dim(line) + '\r\n');
+									outLines.push(cyan(' │ ') + dim(line));
 								}
 								if ((event.toolResult ?? '').split('\n').length > 12) {
-									process.stdout.write(cyan(' │ ') + dim('...') + '\r\n');
+									outLines.push(cyan(' │ ') + dim('...'));
 								}
+								this.writeOutputLines(outLines);
 							}
 							break;
 						case 'review_verdict': {
@@ -1415,25 +1461,24 @@ export class TuiApp {
 							const v = event.verdict ?? 'completed';
 							const r = event.reviewReason ?? '';
 							if (event.autoContinue) {
-								process.stdout.write(dim(`\r\n[审查: ${v}] ${r}\r\n`));
-								process.stdout.write(dim('[审查: 自动续期继续执行...]\r\n'));
+								this.writeOutputLine(dim(`[审查: ${v}] ${r}`));
+								this.writeOutputLine(dim('[审查: 自动续期继续执行...]'));
 								// 重置 reasoning/content 追踪，使续期后的输出独立渲染
 								reasoningStarted = false;
 								contentStarted = false;
 								reasoningEndsWithNewline = true;
 							} else if (v === 'asking_user') {
-								process.stdout.write(dim(`\r\n[审查: 模型在询问用户，等待输入]\r\n`));
+								this.writeOutputLine(dim('[审查: 模型在询问用户，等待输入]'));
 							}
 							break;
 						}
 						case 'subagent_spawned': {
 							flush();
-							// tool_call_start 已输出 [T: subagent_spawn] 行并带 \r\n，
-							// 此处不用再加前导 \r\n 防止多余空行
+							// tool_call_start 已输出 [T: subagent_spawn] 行，此处直接输出状态行
 							const name = event.subagentName ?? '?';
 							const task = (event.subagentTask ?? '').slice(0, 60);
-							process.stdout.write(
-								cyan(`[Sub: ${name}] `) + dim(`⏳ ${task}${(event.subagentTask ?? '').length > 60 ? '...' : ''}`) + '\r\n',
+							this.writeOutputLine(
+								cyan(`[Sub: ${name}] `) + dim(`⏳ ${task}${(event.subagentTask ?? '').length > 60 ? '...' : ''}`),
 							);
 							break;
 						}
@@ -1453,8 +1498,8 @@ export class TuiApp {
 								: elapsed < 60000
 									? `${(elapsed / 1000).toFixed(1)}s`
 									: `${Math.floor(elapsed / 60000)}m ${Math.round((elapsed % 60000) / 1000)}s`;
-							process.stdout.write(
-								cyan(`\r\n[Sub: ${name}] `) + icon + dim(` ${elapsedStr}`) + '\r\n',
+							this.writeOutputLine(
+								cyan(`[Sub: ${name}] `) + icon + dim(` ${elapsedStr}`),
 							);
 							break;
 						}
@@ -1463,16 +1508,13 @@ export class TuiApp {
 							break;
 						case 'done':
 							flush();
-							// 刷出表格渲染器中暂存的剩余内容
-							for (const line of mdRenderer.flush()) {
-								process.stdout.write(line + '\r\n');
-							}
+							// 刷出表格渲染器中暂存的剩余内容（Bug 1：走统一输出收口）
+							this.writeOutputLines(mdRenderer.flush());
 							this.printUsage(event);
 							break;
 						case 'error':
 							flush();
-							process.stdout.write('\r\n');
-							process.stdout.write(red(`Error: ${event.error ?? 'unknown'}`) + '\r\n');
+							this.writeOutputLine(red(`Error: ${event.error ?? 'unknown'}`));
 							break;
 					}
 				},
@@ -1486,13 +1528,17 @@ export class TuiApp {
 			// F-5：catch 时进入 ERROR 状态（finally 恢复 IDLE）
 			this.setState(AppState.ERROR);
 			if (err?.name === 'AbortError') {
-				process.stdout.write(dim('\r\n[interrupted]\r\n'));
+				this.writeOutputLine(dim('[interrupted]'));
 			} else {
-				process.stdout.write(red(`\r\nError: ${err?.message ?? err}`) + '\r\n');
+				this.writeOutputLine(red(`Error: ${err?.message ?? err}`));
 			}
 		} finally {
 			this.stdinHandler = prevHandler;
 			this.abortController = null;
+			// Bug 1：收起输出期间绘制的输入区，使后续 printSeparator/drawInputArea 从输出末尾正常开始
+			this.collapseInputArea();
+			this.lastVisibleInputRows = 1;
+			this.lastCursorDisplayRow = 0;
 			this.setState(AppState.IDLE);
 		}
 	}
@@ -1504,7 +1550,7 @@ export class TuiApp {
 		if (u.prompt_tokens > 0) parts.push(`${u.prompt_tokens} in`);
 		if (u.completion_tokens > 0) parts.push(`${u.completion_tokens} out`);
 		if (parts.length > 0) {
-			process.stdout.write(dim(`--- token: ${parts.join(' + ')} ---`) + '\r\n');
+			this.writeOutputLine(dim(`--- token: ${parts.join(' + ')} ---`));
 		}
 	}
 
