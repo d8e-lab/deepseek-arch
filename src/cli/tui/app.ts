@@ -82,6 +82,8 @@ export class TuiApp {
 	private lastCursorDisplayRow = 0;
 	/** 命令补全建议列表的行数（用于清理） */
 	private suggestionLinesCount = 0;
+	/** 双工交互：流式输出期间用户 Enter 排入的待发送消息（中断当前输出后发送） */
+	private nextMessage: string | null = null;
 
 	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean) {
 		this.sessionMgr = sessionMgr;
@@ -1333,8 +1335,10 @@ export class TuiApp {
 	private async sendMessageStream(content: string): Promise<void> {
 		this.setState(AppState.SENDING);
 		this.abortController = new AbortController();
-		// Bug 1：输出开始前收起输入区（光标移到输入区起点清屏），输出从原输入区位置开始写
+		// Bug 1+2：输出开始前收起输入区；清空输入框（发送后显示空的可编辑输入框，而非上一轮内容）
 		this.collapseInputArea();
+		this.input.clear();
+		this.renderInputDuringStream();
 
 		let reasoningStarted = false;
 		let contentStarted = false;
@@ -1345,21 +1349,48 @@ export class TuiApp {
 		const renderThrottle = new Throttle(30);
 		let pending = '';
 		let pendingIsReasoning = false;
-		const flush = (): void => {
+		/**
+		 * 写出累积的 pending。
+		 * reasoning 按完整行输出（每行后重绘输入区——think 期间输入框可见），
+		 * 半行（无 \n 结尾）留在 pending 续写；force=true 时输出全部剩余（结束/过渡）。
+		 * 半行超过 60 字符时强制输出（防止超长思考段落长时间不可见）。
+		 */
+		const flush = (force = false): void => {
 			if (!pending) return;
-			process.stdout.write(pendingIsReasoning ? dim(pending) : pending);
-			pending = '';
+			if (pendingIsReasoning) {
+				const nlIdx = pending.lastIndexOf('\n');
+				const isLongHalfLine = !force && nlIdx < 0 && pending.length > 60;
+				const complete = (force || nlIdx >= 0 || isLongHalfLine) ? pending : '';
+				if (complete) {
+					pending = (force || nlIdx < 0) ? '' : pending.slice(nlIdx + 1);
+					for (const line of complete.split('\n')) {
+						this.writeOutputLine(dim(line));
+					}
+				}
+				// 非 force 且无完整行且不超长：半行留在 pending（输入区保持可见，不输出）
+			} else {
+				process.stdout.write(pending);
+				pending = '';
+			}
 		};
 
 		// 表格渲染器：检测 markdown 表格块并格式化为 box-drawing
 		const mdRenderer = new MarkdownTableRenderer();
 
-		// 流式期间的数据处理：只处理 Ctrl+C
+		// 双工交互：流式期间支持编辑输入框，Enter 中断当前输出并排队新消息（Bug 3）
 		const prevHandler = this.stdinHandler;
 		this.stdinHandler = (data: string) => {
-			if (data === '\x03') {
+			this.handleInputData(data, (content) => {
+				if (content === null) return; // Ctrl+C 已在 handleInputData 内处理（STREAMING 态 abort）
+				// 流式期间 Enter：/ 命令不可用（UI 状态冲突），普通文本排队发送
+				if (content.startsWith('/')) {
+					this.writeOutputLine(dim('(输出进行中，命令不可用，请等待完成后使用)'));
+					return;
+				}
+				// 中断当前输出，新消息在 finally 中发送
 				this.abortController?.abort();
-			}
+				this.nextMessage = content;
+			});
 		};
 
 		try {
@@ -1383,7 +1414,7 @@ export class TuiApp {
 						case 'content_delta':
 							this.setState(AppState.STREAMING);
 							if (reasoningStarted && !contentStarted) {
-								flush(); // reasoning → content 过渡，写出剩余 reasoning
+								flush(true); // reasoning → content 过渡，写出剩余 reasoning
 								if (!reasoningEndsWithNewline) {
 									this.writeOutputLine(''); // 空行过渡（Bug 1：保持输入区在底部）
 								}
@@ -1401,7 +1432,7 @@ export class TuiApp {
 							}
 							break;
 						case 'tool_call_start': {
-							flush();
+							flush(true);
 							// 重置 reasoning/content 追踪，使下一轮 agent loop 独立处理
 							reasoningStarted = false;
 							contentStarted = false;
@@ -1416,7 +1447,7 @@ export class TuiApp {
 							// tool call 参数增量（不渲染，静默累积）
 							break;
 						case 'tool_preview': {
-							flush();
+							flush(true);
 							// diff 预览 — 原生格式，仅着色，不加额外前缀
 							const preview = event.toolPreview ?? '';
 							if (preview) {
@@ -1436,7 +1467,7 @@ export class TuiApp {
 							break;
 						}
 						case 'tool_result':
-							flush();
+							flush(true);
 							if (event.toolDenied) {
 								this.writeOutputLine(red('[Denied]'));
 							} else {
@@ -1457,7 +1488,7 @@ export class TuiApp {
 							}
 							break;
 						case 'review_verdict': {
-							flush();
+							flush(true);
 							const v = event.verdict ?? 'completed';
 							const r = event.reviewReason ?? '';
 							if (event.autoContinue) {
@@ -1473,7 +1504,7 @@ export class TuiApp {
 							break;
 						}
 						case 'subagent_spawned': {
-							flush();
+							flush(true);
 							// tool_call_start 已输出 [T: subagent_spawn] 行，此处直接输出状态行
 							const name = event.subagentName ?? '?';
 							const task = (event.subagentTask ?? '').slice(0, 60);
@@ -1483,7 +1514,7 @@ export class TuiApp {
 							break;
 						}
 						case 'subagent_finished': {
-							flush();
+							flush(true);
 							// 重置 reasoning 追踪（内容已 flush），
 							// 保持 contentStarted 不让流式重起产生多余空行
 							reasoningStarted = false;
@@ -1507,13 +1538,13 @@ export class TuiApp {
 							// 增量更新（detail view 通过 store 自行拉取，此处不渲染）
 							break;
 						case 'done':
-							flush();
+							flush(true);
 							// 刷出表格渲染器中暂存的剩余内容（Bug 1：走统一输出收口）
 							this.writeOutputLines(mdRenderer.flush());
 							this.printUsage(event);
 							break;
 						case 'error':
-							flush();
+							flush(true);
 							this.writeOutputLine(red(`Error: ${event.error ?? 'unknown'}`));
 							break;
 					}
@@ -1540,6 +1571,14 @@ export class TuiApp {
 			this.lastVisibleInputRows = 1;
 			this.lastCursorDisplayRow = 0;
 			this.setState(AppState.IDLE);
+			// 双工交互（Bug 3）：输出期间用户 Enter 排入的新消息 → 中断后继续发送
+			const next = this.nextMessage;
+			this.nextMessage = null;
+			if (next) {
+				this.printSeparator();
+				process.stdout.write(green('[You] ') + next + '\r\n\r\n');
+				await this.sendMessageStream(next);
+			}
 		}
 	}
 
