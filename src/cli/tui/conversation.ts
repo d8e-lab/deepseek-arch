@@ -8,7 +8,7 @@
  */
 
 import type { TurnRecord, TokenUsage } from '../../types/index.js';
-import { strDisplayWidth, cyan, dim, green, red, renderDiffLine, stripAnsi } from './renderer.js';
+import { strDisplayWidth, cyan, dim, green, red, renderDiffLine, stripAnsi, formatToolCallSummary } from './renderer.js';
 import { MarkdownTableRenderer } from './markdown.js';
 import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../../utils/turn-utils.js';
 
@@ -129,15 +129,14 @@ export class ConversationView {
 				lines.push('');
 			}
 
-			// 工具调用记录
+			// 工具调用记录（紧凑格式：· run <tool> <摘要>）
 			const tcRecords = turn.tool_calls;
 			if (tcRecords && Array.isArray(tcRecords) && tcRecords.length > 0) {
 				for (const tcr of tcRecords) {
 					const shortName = tcr.name.replace('execute_', '');
-					const label = cyan(`[T: ${shortName}] `);
-					const labelWidth = strDisplayWidth(`[T: ${shortName}] `);
-					const argsStr = JSON.stringify(tcr.arguments);
-					lines.push(label + dim(`${argsStr}  (${tcr.duration_ms}ms)`));
+					const label = cyan(`· run ${shortName} `);
+					const summary = formatToolCallSummary(tcr.name, tcr.arguments ?? {});
+					lines.push(label + dim(summary) + dim(`  (${tcr.duration_ms}ms)`));
 
 					if (tcr.preview) {
 						for (const line of tcr.preview.split('\n')) {
@@ -146,7 +145,7 @@ export class ConversationView {
 					}
 					if (tcr.error) {
 						const errLabel = tcr.error === 'denied' ? '[Denied]' : `Error: ${tcr.error}`;
-						lines.push(' '.repeat(labelWidth) + red(errLabel));
+						lines.push(dim('  ') + red(errLabel));
 					}
 					if (tcr.result) {
 						const resultLines = tcr.result.split('\n').slice(0, 6);

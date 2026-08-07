@@ -36,6 +36,7 @@ import {
 	red,
 	padToWidth,
 	renderDiffLine,
+	formatToolCallSummary,
 } from './renderer.js';
 import { AppState } from './types.js';
 import type { TuiConfig, ScreenCapture, TurnCaptureInfo, ToolCallCaptureInfo, InputAreaCapture } from './types.js';
@@ -84,6 +85,16 @@ export class TuiApp {
 	private suggestionLinesCount = 0;
 	/** 双工交互：流式输出期间用户 Enter 排入的待发送消息（中断当前输出后发送） */
 	private nextMessage: string | null = null;
+	/** 当前轮完整 think 内容（Ctrl+O 查看完整思考用） */
+	private fullThink: string[] = [];
+	/** think 是否已折叠（超出可见行数） */
+	private thinkFolded = false;
+	/** think 折叠省略号动画定时器 */
+	private thinkAnimTimer: ReturnType<typeof setInterval> | null = null;
+	/** 省略号动画步进 */
+	private thinkAnimStep = 0;
+	/** think 最多实时显示行数（超出折叠） */
+	private readonly MAX_VISIBLE_THINK = 5;
 
 	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean) {
 		this.sessionMgr = sessionMgr;
@@ -854,6 +865,12 @@ export class TuiApp {
 	private pasteBuffer = '';
 
 	private handleInputData(data: string, resolve: (value: string | null) => void): void {
+		// Ctrl+O: 查看完整 think（流式期间和 IDLE 都可用）
+		if (data.includes('\x0f')) {
+			this.showFullThink();
+			return;
+		}
+
 		// Ctrl+T: toggle subagent detail view
 		if (data === '\x14') {
 			if (this.state === AppState.IDLE) {
@@ -1267,6 +1284,64 @@ export class TuiApp {
 		this.renderInputDuringStream();
 	}
 
+	// ─── think 折叠（节省显示空间，Ctrl+O 查看完整）──
+
+	/** 进入 think 折叠：显示折叠提示行 + 启动动态省略号动画 */
+	private enterThinkCollapse(): void {
+		if (this.thinkFolded) return;
+		this.thinkFolded = true;
+		this.thinkAnimStep = 0;
+		this.writeOutputLine(dim('[Think] 思考中 ·  (Ctrl+O 查看完整)'));
+		this.thinkAnimTimer = setInterval(() => {
+			this.thinkAnimStep = (this.thinkAnimStep % 3) + 1;
+			this.updateThinkCollapseLine();
+		}, 400);
+	}
+
+	/** 原地更新折叠提示行的省略号（动画） */
+	private updateThinkCollapseLine(): void {
+		if (!this.thinkFolded) return;
+		const dots = '·'.repeat(this.thinkAnimStep);
+		// 光标在输入区，上移到折叠提示行更新后移回
+		const up = (this.lastCursorDisplayRow ?? 0) + 1;
+		process.stdout.write(`\x1b[${up}A`);
+		process.stdout.write('\r');
+		clearLine();
+		process.stdout.write(dim(`[Think] 思考中 ${dots}  (Ctrl+O 查看完整)`));
+		process.stdout.write(`\x1b[${up}B`);
+		process.stdout.write('\r');
+	}
+
+	/** 定稿折叠行（think 阶段结束：content 过渡/工具调用/done 时调用） */
+	private finalizeThinkCollapse(): void {
+		if (!this.thinkFolded) return;
+		if (this.thinkAnimTimer) {
+			clearInterval(this.thinkAnimTimer);
+			this.thinkAnimTimer = null;
+		}
+		const foldedCount = Math.max(0, this.fullThink.length - this.MAX_VISIBLE_THINK);
+		const up = (this.lastCursorDisplayRow ?? 0) + 1;
+		process.stdout.write(`\x1b[${up}A`);
+		process.stdout.write('\r');
+		clearLine();
+		process.stdout.write(dim(`[Think] 已折叠 ${foldedCount} 行 (Ctrl+O 查看完整)`));
+		process.stdout.write('\r\n');
+		this.thinkFolded = false;
+		// 光标在折叠行下一行（输出末尾），后续 writeOutputLine 从这继续
+		this.lastVisibleInputRows = 1;
+		this.lastCursorDisplayRow = 0;
+	}
+
+	/** Ctrl+O：查看完整 think（输出折叠部分到 scrollback） */
+	private showFullThink(): void {
+		if (this.fullThink.length === 0) return;
+		if (this.thinkFolded) this.finalizeThinkCollapse();
+		const hidden = this.fullThink.slice(this.MAX_VISIBLE_THINK);
+		if (hidden.length > 0) {
+			this.writeOutputLines(hidden.map((l) => dim(l)));
+		}
+	}
+
 	/**
 	 * 渲染命令补全建议列表
 	 * @returns 绘制的行数
@@ -1339,6 +1414,13 @@ export class TuiApp {
 		this.collapseInputArea();
 		this.input.clear();
 		this.renderInputDuringStream();
+		// 重置 think 折叠状态（新一轮完整思考缓冲）
+		this.fullThink = [];
+		this.thinkFolded = false;
+		if (this.thinkAnimTimer) {
+			clearInterval(this.thinkAnimTimer);
+			this.thinkAnimTimer = null;
+		}
 
 		let reasoningStarted = false;
 		let contentStarted = false;
@@ -1363,8 +1445,20 @@ export class TuiApp {
 				const complete = (force || nlIdx >= 0 || isLongHalfLine) ? pending : '';
 				if (complete) {
 					pending = (force || nlIdx < 0) ? '' : pending.slice(nlIdx + 1);
-					for (const line of complete.split('\n')) {
-						this.writeOutputLine(dim(line));
+					// 去掉 split 产生的尾部伪空行（pending 以 \n 结尾时必有），保留中间真实空行
+					const lines = complete.split('\n');
+					if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+					for (const line of lines) {
+						// 累积完整 think 行（Ctrl+O 查看完整思考用）
+						this.fullThink.push(line);
+						// 实时显示前 MAX_VISIBLE_THINK 行，超出后折叠（节省显示空间）
+						if (this.fullThink.length <= this.MAX_VISIBLE_THINK) {
+							this.writeOutputLine(dim(line));
+						}
+					}
+					// 超过可见行数：进入折叠状态（动态省略号动画）
+					if (this.fullThink.length > this.MAX_VISIBLE_THINK) {
+						this.enterThinkCollapse();
 					}
 				}
 				// 非 force 且无完整行且不超长：半行留在 pending（输入区保持可见，不输出）
@@ -1415,6 +1509,8 @@ export class TuiApp {
 							this.setState(AppState.STREAMING);
 							if (reasoningStarted && !contentStarted) {
 								flush(true); // reasoning → content 过渡，写出剩余 reasoning
+
+								this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 								if (!reasoningEndsWithNewline) {
 									this.writeOutputLine(''); // 空行过渡（Bug 1：保持输入区在底部）
 								}
@@ -1433,13 +1529,18 @@ export class TuiApp {
 							break;
 						case 'tool_call_start': {
 							flush(true);
+
+							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							// 重置 reasoning/content 追踪，使下一轮 agent loop 独立处理
 							reasoningStarted = false;
 							contentStarted = false;
 							reasoningEndsWithNewline = true;
-							const shortName = (event.toolName ?? '?').replace('execute_', '');
+							// 紧凑展示：· run <tool> <摘要>（shell 显示命令、文件工具显示路径）
+							const toolName = event.toolName ?? '?';
+							const shortName = toolName.replace('execute_', '');
+							const summary = formatToolCallSummary(toolName, event.toolArgs ?? {});
 							this.writeOutputLine(
-								cyan(`[T: ${shortName}] `) + dim(JSON.stringify(event.toolArgs ?? {})),
+								cyan(`· run ${shortName}`) + (summary ? dim(` ${summary}`) : ''),
 							);
 							break;
 						}
@@ -1448,6 +1549,8 @@ export class TuiApp {
 							break;
 						case 'tool_preview': {
 							flush(true);
+
+							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							// diff 预览 — 原生格式，仅着色，不加额外前缀
 							const preview = event.toolPreview ?? '';
 							if (preview) {
@@ -1468,6 +1571,8 @@ export class TuiApp {
 						}
 						case 'tool_result':
 							flush(true);
+
+							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							if (event.toolDenied) {
 								this.writeOutputLine(red('[Denied]'));
 							} else {
@@ -1489,6 +1594,8 @@ export class TuiApp {
 							break;
 						case 'review_verdict': {
 							flush(true);
+
+							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							const v = event.verdict ?? 'completed';
 							const r = event.reviewReason ?? '';
 							if (event.autoContinue) {
@@ -1505,6 +1612,8 @@ export class TuiApp {
 						}
 						case 'subagent_spawned': {
 							flush(true);
+
+							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							// tool_call_start 已输出 [T: subagent_spawn] 行，此处直接输出状态行
 							const name = event.subagentName ?? '?';
 							const task = (event.subagentTask ?? '').slice(0, 60);
@@ -1515,6 +1624,8 @@ export class TuiApp {
 						}
 						case 'subagent_finished': {
 							flush(true);
+
+							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							// 重置 reasoning 追踪（内容已 flush），
 							// 保持 contentStarted 不让流式重起产生多余空行
 							reasoningStarted = false;
@@ -1539,12 +1650,16 @@ export class TuiApp {
 							break;
 						case 'done':
 							flush(true);
+
+							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							// 刷出表格渲染器中暂存的剩余内容（Bug 1：走统一输出收口）
 							this.writeOutputLines(mdRenderer.flush());
 							this.printUsage(event);
 							break;
 						case 'error':
 							flush(true);
+
+							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							this.writeOutputLine(red(`Error: ${event.error ?? 'unknown'}`));
 							break;
 					}

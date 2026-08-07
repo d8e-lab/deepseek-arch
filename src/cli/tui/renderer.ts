@@ -225,3 +225,29 @@ export function padToWidth(str: string, targetWidth: number): string {
 	if (current >= targetWidth) return str;
 	return str + ' '.repeat(targetWidth - current);
 }
+
+/**
+ * 工具调用紧凑摘要（节省显示空间，保留关键信息）：
+ * - execute_command：只显示命令本身（换行合并，超长截断）
+ * - write/edit/read 文件工具：显示文件路径
+ * - browser_navigate：显示 URL
+ * - search_content：显示 pattern
+ * - 其他工具：JSON 参数摘要（超长截断）
+ */
+export function formatToolCallSummary(toolName: string, args: Record<string, unknown>): string {
+	if (toolName === 'execute_command') {
+		const cmd = String(args.command ?? '').replace(/\s*\n\s*/g, ' ').trim();
+		return cmd.length > 100 ? cmd.slice(0, 97) + '...' : cmd;
+	}
+	if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'read_file') {
+		return String(args.path ?? '');
+	}
+	if (toolName === 'browser_navigate') {
+		return String(args.url ?? '');
+	}
+	if (toolName === 'search_content') {
+		return String(args.pattern ?? '');
+	}
+	const json = JSON.stringify(args);
+	return json.length > 80 ? json.slice(0, 77) + '...' : json;
+}

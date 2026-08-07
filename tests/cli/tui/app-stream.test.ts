@@ -179,4 +179,42 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		const out = writes.join('');
 		expect(out).toContain('第二轮输出');
 	});
+
+	it('think 超过可见行数后折叠（节省空间），Ctrl+O 查看完整', async () => {
+		// 发射 7 行思考（MAX_VISIBLE_THINK=5），前 5 行实时显示，后 2 行折叠
+		const events: StreamEvent[] = [
+			{ type: 'reasoning_delta', text: '思考第1行\n' },
+			{ type: 'reasoning_delta', text: '思考第2行\n' },
+			{ type: 'reasoning_delta', text: '思考第3行\n' },
+			{ type: 'reasoning_delta', text: '思考第4行\n' },
+			{ type: 'reasoning_delta', text: '思考第5行\n' },
+			{ type: 'reasoning_delta', text: '思考第6行\n' },
+			{ type: 'reasoning_delta', text: '思考第7行\n' },
+			{ type: 'content_delta', text: '回复\n' },
+			{ type: 'done', usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+		];
+		const app = makeApp(mockStreamSession(events));
+		const anyApp = app as unknown as {
+			sendMessageStream: (c: string) => Promise<void>;
+			showFullThink: () => void;
+		};
+		await anyApp.sendMessageStream('test');
+		const out = writes.join('');
+		// 前 5 行实时显示
+		for (let i = 1; i <= 5; i++) {
+			expect(out).toContain(`思考第${i}行`);
+		}
+		// 第 6/7 行不实时显示（折叠）
+		expect(out).not.toContain('思考第6行');
+		expect(out).not.toContain('思考第7行');
+		// 有折叠提示
+		expect(out).toContain('已折叠');
+
+		// Ctrl+O 查看完整：输出折叠部分（第 6/7 行）
+		writes.length = 0;
+		anyApp.showFullThink();
+		const out2 = writes.join('');
+		expect(out2).toContain('思考第6行');
+		expect(out2).toContain('思考第7行');
+	});
 });
