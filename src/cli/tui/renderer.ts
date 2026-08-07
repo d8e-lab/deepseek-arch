@@ -151,7 +151,7 @@ export function renderDiffLine(line: string, indent: string): string {
 
 /**
  * 判断字符是否为 CJK 宽字符（显示宽度 = 2）
- * 覆盖 CJK Unified Ideographs、CJK Symbols、全角形式等
+ * 覆盖 CJK Unified Ideographs、CJK Symbols、全角形式、emoji（F-7）
  */
 export function isWideChar(code: number): boolean {
 	return (
@@ -166,6 +166,7 @@ export function isWideChar(code: number): boolean {
 		(code >= 0xfe10 && code <= 0xfe6f) || // Vertical forms, CJK Compatibility Forms, Small Form Variants
 		(code >= 0xff01 && code <= 0xff60) || // Fullwidth Forms
 		(code >= 0xffe0 && code <= 0xffe6) || // Fullwidth Signs
+		(code >= 0x1f000 && code <= 0x1faff) || // Emoji（含部分符号/旗帜/补充符号，F-7）
 		(code >= 0x20000 && code <= 0x2ffff) || // CJK Unified Ideographs Extension B+
 		(code >= 0x30000 && code <= 0x3ffff) // CJK Unified Ideographs Extension G+
 	);

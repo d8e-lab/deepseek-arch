@@ -12,6 +12,9 @@
 
 import { charDisplayWidth, strDisplayWidth } from './renderer.js';
 
+/** 历史记录容量上限（F-8：防止长会话内存无限增长） */
+const MAX_HISTORY = 100;
+
 export class InputEditor {
 	/** 当前输入的文本行（硬行，\n 分隔） */
 	private lines: string[] = [''];
@@ -414,10 +417,13 @@ export class InputEditor {
 				return this.pasteContents[pasteIdx++] ?? '';
 			});
 		});
-		// 添加到历史
+		// 添加到历史（F-8：容量上限，防止长会话内存无限增长）
 		const content = parts.join('\n');
 		if (content.trim()) {
 			this.history.push(content);
+			if (this.history.length > MAX_HISTORY) {
+				this.history.splice(0, this.history.length - MAX_HISTORY);
+			}
 		}
 		return content;
 	}

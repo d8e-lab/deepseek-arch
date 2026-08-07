@@ -15,7 +15,7 @@ import { ConversationView, truncateThink } from './conversation.js';
 import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../../utils/turn-utils.js';
 import { InputEditor } from './input-editor.js';
 import { Throttle } from '../../utils/throttle.js';
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
 	getTermSize,
 	enableBracketedPaste,
@@ -346,9 +346,15 @@ export class TuiApp {
 			return;
 		}
 
-		// / 命令分派（现在 handleCommand 总是返回 true，未知命令也会显示错误）
+		// / 命令分派：handleCommand 返回 false（// 转义为普通文本）→ 作为普通消息发送
 		if (content.startsWith('/')) {
-			await this.handleCommand(content);
+			const handled = await this.handleCommand(content);
+			if (!handled) {
+				// F-9：// 前缀转义——去掉一个 / 后按普通消息发送（如 "//usr/bin 在哪" → "/usr/bin 在哪"）
+				const sendContent = content.startsWith('//') ? content.slice(1) : content;
+				process.stdout.write(green('[You] ') + sendContent + '\r\n\r\n');
+				await this.sendMessageStream(sendContent);
+			}
 			this.printSeparator();
 			return;
 		}
@@ -375,6 +381,11 @@ export class TuiApp {
 	 * 返回 false 表示未识别，作为普通消息发送。
 	 */
 	private async handleCommand(content: string): Promise<boolean> {
+		// F-9：// 前缀转义——以 // 开头的文本作为普通消息发送（调用方去掉一个 /）
+		if (content.startsWith('//')) {
+			return false;
+		}
+
 		if (content.startsWith('/model')) {
 			const arg = content.slice(6).trim();
 			if (arg && AVAILABLE_MODELS.includes(arg)) {
@@ -744,7 +755,7 @@ export class TuiApp {
 		this.shellMode = true;
 	}
 
-	/** 执行 shell 命令并收集输出 */
+	/** 执行 shell 命令并收集输出（F-4：异步 spawn，不阻塞事件循环——长命令期间 Ctrl+C 仍可响应） */
 	private executeShellCommand(cmd: string): void {
 		// 打印命令到 scrollback（cmd 已包含前导 !）
 		process.stdout.write(PINK_BG_START + cmd + PINK_BG_END + '\r\n');
@@ -761,22 +772,37 @@ export class TuiApp {
 
 		let stdout = '';
 		let stderr = '';
-		try {
-			stdout = execSync(shellCmd, {
-				cwd: process.cwd(),
-				encoding: 'utf-8',
-				timeout: 30000,
-				maxBuffer: 1024 * 1024,
-				stdio: ['pipe', 'pipe', 'pipe'],
-			});
-		} catch (err: any) {
-			stdout = err.stdout?.toString() ?? '';
-			stderr = err.stderr?.toString() ?? '';
-			if (!stdout && !stderr) {
-				stderr = err.message ?? String(err);
-			}
-		}
+		let timedOut = false;
 
+		// 使用系统默认 shell（与 execSync 行为一致，跨平台）
+		const child = spawn(shellCmd, {
+			cwd: process.cwd(),
+			shell: true,
+			stdio: ['ignore', 'pipe', 'pipe'] as const,
+		});
+
+		child.stdout?.on('data', (buf: Buffer) => { stdout += buf.toString(); });
+		child.stderr?.on('data', (buf: Buffer) => { stderr += buf.toString(); });
+
+		// 30s 超时（与原 execSync timeout 一致）
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			child.kill();
+		}, 30000);
+
+		child.on('error', (err: Error) => {
+			if (!stdout && !stderr) stderr = err.message;
+		});
+
+		child.on('close', () => {
+			clearTimeout(timeout);
+			if (timedOut && !stderr) stderr = '(timed out after 30s)';
+			this.finishShellCommand(cmd, stdout, stderr);
+		});
+	}
+
+	/** 收集 shell 输出完成：打印结果 + 构造隐藏上下文块 + 退出 shell 模式 */
+	private finishShellCommand(cmd: string, stdout: string, stderr: string): void {
 		// 输出 stdout 到 scrollback
 		if (stdout) {
 			const lines = stdout.split('\n');
@@ -1103,8 +1129,10 @@ export class TuiApp {
 				break;
 			case 'C': this.input.moveCursorRight(); break;
 			case 'D': this.input.moveCursorLeft(); break;
-			case 'H': this.input.moveToLineStart(); break;
-			case 'F': this.input.moveToLineEnd(); break;
+			case 'H':
+			case '1~': this.input.moveToLineStart(); break;
+			case 'F':
+			case '4~': this.input.moveToLineEnd(); break;
 			case '3~': this.input.deleteAfterCursor(); break;
 		}
 	}
@@ -1233,11 +1261,12 @@ export class TuiApp {
 
 	// ─── 流式发送 ──────────────────────────────────
 
-	/** 工具执行确认：在流式期间切换到 y/n 输入 */
+	/** 工具执行确认：在流式期间切换到 y/n 输入（F-5：进入 CONFIRMING 状态） */
 	private requestToolConfirm(
 		toolName: string,
 		params: Record<string, unknown>,
 	): Promise<boolean> {
+		this.setState(AppState.CONFIRMING);
 		return new Promise((resolve) => {
 			const command = String(params.command ?? '');
 			process.stdout.write(yellow(`\r\n[Confirm] ${command}\r\n`));
@@ -1454,6 +1483,8 @@ export class TuiApp {
 				this.yolo ? this.reviewModel : undefined,
 			);
 		} catch (err: any) {
+			// F-5：catch 时进入 ERROR 状态（finally 恢复 IDLE）
+			this.setState(AppState.ERROR);
 			if (err?.name === 'AbortError') {
 				process.stdout.write(dim('\r\n[interrupted]\r\n'));
 			} else {
