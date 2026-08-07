@@ -4,11 +4,11 @@
 
 // ─── 终端尺寸 ─────────────────────────────────────
 
-/** 获取终端尺寸 */
+/** 获取终端尺寸（columns/rows 为 0 或 undefined 时回退默认值，兼容非 TTY/PTY 环境） */
 export function getTermSize(): { rows: number; cols: number } {
 	return {
-		rows: process.stdout.rows ?? 24,
-		cols: process.stdout.columns ?? 80,
+		rows: process.stdout.rows || 24,
+		cols: process.stdout.columns || 80,
 	};
 }
 
