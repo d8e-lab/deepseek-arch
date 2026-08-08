@@ -116,6 +116,11 @@ export class TuiApp {
 	private viewerSearchInput = '';
 	/** 打开视图前的 stdinHandler（退出时恢复） */
 	private viewerPrevHandler: ((data: string) => void) | null = null;
+	/** 当前视图 handler 引用（退出时判断主循环是否已接管输入） */
+	private viewerHandler: ((data: string) => void) | null = null;
+	/** 视图关闭等待（inputCycle 在视图打开时等待，避免接管输入） */
+	private viewerClosedPromise: Promise<void> | null = null;
+	private viewerClosedResolve: (() => void) | null = null;
 	/** 打开视图时的 turns.length（退出时据此补渲染） */
 	private viewerOpenTurnCount = 0;
 	/** 打开视图时是否处于流式输出中 */
@@ -368,6 +373,11 @@ export class TuiApp {
 	// ─── 输入循环（单轮对话）───────────────────────
 
 	private async inputCycle(): Promise<void> {
+		// 视图打开中：等待视图关闭（不接管输入，避免覆盖 viewer handler）
+		if (this.viewerActive) {
+			await this.waitForViewerClose();
+			return;
+		}
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
 
@@ -399,6 +409,8 @@ export class TuiApp {
 				process.stdout.write(green('[You] ') + sendContent + '\r\n\r\n');
 				await this.sendMessageStream(sendContent);
 			}
+			// 视图可能在命令处理/输出期间打开：跳过 UI 收尾（视图接管）
+			if (this.viewerActive) return;
 			this.printSeparator();
 			return;
 		}
@@ -415,6 +427,8 @@ export class TuiApp {
 		// 发送并流式输出
 		await this.sendMessageStream(content);
 
+		// 视图可能在输出期间打开：跳过 UI 收尾（主循环等待视图关闭后重新进入）
+		if (this.viewerActive) return;
 		this.printSeparator();
 	}
 
@@ -1392,7 +1406,10 @@ export class TuiApp {
 		}
 		// 保存当前 stdinHandler，切换为视图 handler
 		this.viewerPrevHandler = this.stdinHandler;
-		this.stdinHandler = (data: string) => this.handleViewerInput(data);
+		this.viewerHandler = (data: string) => this.handleViewerInput(data);
+		this.stdinHandler = this.viewerHandler;
+		// 建立视图关闭等待（inputCycle 在视图打开时等待）
+		this.viewerClosedPromise = new Promise<void>((r) => { this.viewerClosedResolve = r; });
 		// 切换 alternate screen 并渲染
 		process.stdout.write('\x1b[?1049h');
 		this.buildViewerLines();
@@ -1404,11 +1421,21 @@ export class TuiApp {
 	private closeViewer(): void {
 		if (!this.viewerActive) return;
 		this.viewerActive = false;
+		// 恢复 stdinHandler：
+		// - 若主循环已接管（readUserInput 设置了新 handler），保持不变
+		// - 若仍持有视图 handler：sendMessageStream 还在跑 → 恢复双工 handler（流式继续）；
+		//   已结束 → 置空让主循环下一轮 inputCycle 重新建立
+		if (this.stdinHandler === this.viewerHandler) {
+			if (this.abortController) {
+				this.stdinHandler = this.viewerPrevHandler;
+			} else {
+				this.stdinHandler = null;
+			}
+		}
+		this.viewerHandler = null;
+		this.viewerPrevHandler = null;
 		// 恢复主 buffer（alternate screen 保存的主 TUI 内容还原）
 		process.stdout.write('\x1b[?1049l');
-		// 恢复 stdinHandler（流式双工 handler 或 IDLE handler）
-		this.stdinHandler = this.viewerPrevHandler;
-		this.viewerPrevHandler = null;
 		// 补渲染视图期间的静默输出
 		this.replayViewerOutput();
 		// 重建输入区
@@ -1418,6 +1445,29 @@ export class TuiApp {
 		this.drawInputArea();
 		process.stdout.write('\r');
 		this.renderInput();
+		// 输出已结束：恢复 IDLE 状态并发送视图期间/前排队的消息
+		if (!this.abortController) {
+			this.setState(AppState.IDLE);
+			const next = this.nextMessage;
+			this.nextMessage = null;
+			if (next) {
+				this.printSeparator();
+				process.stdout.write(green('[You] ') + next + '\r\n\r\n');
+				// fire-and-forget：sendMessageStream 内部处理异常与后续状态
+				void this.sendMessageStream(next);
+			}
+		}
+		// 通知等待中的 inputCycle：视图已关闭
+		this.viewerClosedResolve?.();
+		this.viewerClosedResolve = null;
+		this.viewerClosedPromise = null;
+	}
+
+	/** 等待视图关闭（inputCycle 在视图打开时调用，避免接管输入） */
+	private async waitForViewerClose(): Promise<void> {
+		if (this.viewerClosedPromise) {
+			await this.viewerClosedPromise;
+		}
 	}
 
 	/**
@@ -2026,21 +2076,26 @@ export class TuiApp {
 				this.writeOutputLine(red(`Error: ${err?.message ?? err}`));
 			}
 		} finally {
-			this.stdinHandler = prevHandler;
 			this.abortController = null;
-			// Bug 1：收起输出期间绘制的输入区，使后续 printSeparator/drawInputArea 从输出末尾正常开始
-			this.collapseInputArea();
-			this.lastVisibleInputRows = 1;
-			this.lastCursorDisplayRow = 0;
-			this.setState(AppState.IDLE);
-			// 双工交互（Bug 3）：输出期间用户 Enter 排入的新消息 → 中断后继续发送
-			const next = this.nextMessage;
-			this.nextMessage = null;
-			if (next) {
-				this.printSeparator();
-				process.stdout.write(green('[You] ') + next + '\r\n\r\n');
-				await this.sendMessageStream(next);
+			if (!this.viewerActive) {
+				// 正常路径（无视图打开）：恢复输入、UI 状态、nextMessage 链
+				this.stdinHandler = prevHandler;
+				// Bug 1：收起输出期间绘制的输入区，使后续 printSeparator/drawInputArea 从输出末尾正常开始
+				this.collapseInputArea();
+				this.lastVisibleInputRows = 1;
+				this.lastCursorDisplayRow = 0;
+				this.setState(AppState.IDLE);
+				// 双工交互（Bug 3）：输出期间用户 Enter 排入的新消息 → 中断后继续发送
+				const next = this.nextMessage;
+				this.nextMessage = null;
+				if (next) {
+					this.printSeparator();
+					process.stdout.write(green('[You] ') + next + '\r\n\r\n');
+					await this.sendMessageStream(next);
+				}
 			}
+			// viewerActive：跳过 UI/输入恢复（避免覆盖视图 handler、污染 alternate screen），
+			// 状态与 nextMessage 由 closeViewer 统一处理
 		}
 	}
 
