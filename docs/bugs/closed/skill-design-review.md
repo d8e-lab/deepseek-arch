@@ -1,5 +1,9 @@
 # Skill 设计审查 — release skill 不可达、更新策略缺陷、plan skill 与工具描述断裂
 
+> ⏳ **未解决 2026-08-08（v1.3.9）——全部待办已转 [open-issues.md](./open-issues.md)**
+> 用户明确暂不处理（2026-08-07 决策：Skill 机制本次不动，事后提醒）。
+> 待办：P0 release skill 加载/触发机制、P0 copyPlanSkill 更新策略、P1 恢复 fa02940 subagent 工具描述增强、P1 plan.skill 确认断点补 save_plan、P1 release.skill 步骤 5/6 顺序、P2 skill 元数据、P3 paste-retrospective 落实
+
 **类型**: Skill 设计审查（Skill Design Review）
 **发现日期**: 2026-08-06
 **当前基线**: `main` @ `68acdb7`（HEAD）

@@ -1,5 +1,12 @@
 # 提示词体系审查 — system prompt 缺漏/矛盾、tool description 不一致、subagent 提示词冲突
 
+> 🟡 **部分解决 2026-08-08（v1.3.9）——已解决项见下，剩余待办已转 [open-issues.md](./open-issues.md)**
+> ✅ 已解决：
+> - **S9/M-4**（agent loop 轮次上限死代码）：`b194bda` 删除 MAX_AGENT_ROUNDS 与截断逻辑（主 Agent 与子代理均无轮次上限）
+> - **A4**（子代理轮次上限）：随 S9 一并删除
+> - **A8 相关**（subagent 可观测性）：`24186ed` 恢复 SubagentStore 接线，子代理输出条目实时入 store
+> ⏳ 剩余待办（详见 open-issues.md）：S8 git reset --hard 矛盾、S1-S7 缺漏（工具确认/浏览器/subagent 总纲/agent loop 机制）、S10 主 prompt 与子代理环境冲突、A1-A3/A5-A7 子代理 prompt 重构、P4/P6 description 补充、P12 tts_speak 名存实亡、P15 agent.md 过时
+
 **类型**: 提示词审查（Prompt Review）
 **发现日期**: 2026-08-06
 **当前基线**: `main` @ `68acdb7`（HEAD）

@@ -1,5 +1,17 @@
 # TUI 前端评审报告
 
+> ✅ **已解决 2026-08-08（v1.3.9）**
+> - **Bug 1**（模型输出时输入框消失）：`0dba56e` writeOutputLine 统一收口 + 输出行后底部重绘输入区；`c6bce7a` 双工交互升级（think 逐行重绘、流式期间输入可编辑）
+> - **Bug 2**（subagent 无法查看）：随 M-1/M-5 接线恢复（`24186ed`），`/subagent` 与 Ctrl+T 有数据可显示
+> - **F-2**（captureScreen 读废弃字段）：`8bb24b7` 改用 turn-utils helper
+> - **F-3**（/subagent 不在命令模式列表）：`24186ed` AVAILABLE_COMMANDS 补全
+> - **F-4**（execSync 阻塞）：`b01d6c1` 改异步 spawn
+> - **F-5**（CONFIRMING/ERROR 死状态）：`b01d6c1` 状态机补全
+> - **F-6**（conversation.ts any 绕过）：`8bb24b7` 直接 turn.tool_calls
+> - **F-7~F-10**（emoji 宽度/历史上限/转义/Home·End）：`b01d6c1`
+> - 附带：`f886d71` getTermSize columns=0 崩溃修复；`1ad1747`/`7552c6a`/`b23407a` Ctrl+O 全屏视图与 handler 修复
+> - 测试：`tests/cli/tui/app-stream.test.ts`（7 用例）、`tests/cli/tui/renderer.test.ts`
+
 **类型**: 前端代码审查（Frontend Review）
 **发现日期**: 2026-08-06
 **当前基线**: `main` @ `def542a`

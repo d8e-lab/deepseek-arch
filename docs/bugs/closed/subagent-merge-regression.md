@@ -1,5 +1,14 @@
 # Subagent 模块功能回退 — 合并冲突丢失核心逻辑
 
+> ✅ **已解决 2026-08-08（v1.3.9，提交 `24186ed`）**
+> - **M-1**（SubagentStore 永不填充 + 持久化缺失）：runSubagent 接线 start/push/finish + saveSubagentRecord
+> - **M-2**（异步模式无状态块）：buildStatusBlock 拼 roundMessages 末尾（kv-cache 安全），删除静态提醒+强制 continue
+> - **M-3**（同步模式串行）：allDeferredSpawns 两阶段并行（Promise.all）
+> - **M-4/M-6**（轮次上限死代码/截断误触发）：已随 `b194bda` 删除（无轮次上限）
+> - **M-5**（subagent 事件从不发射）：async 模式发射 subagent_spawned/finished 紧凑事件
+> - **M-7**（subagent.ts 丢失输出条目发射）：恢复 SubagentCallbacks/onEntry（thinking/content/tool_call/tool_result）
+> - 测试：`tests/core/subagent.test.ts`（9 用例，含并行/取消/独立信号）
+
 **类型**: 功能回退（Merge Regression）
 **发现日期**: 2026-07-23
 **当前基线**: `main` @ `68acdb7`（HEAD）

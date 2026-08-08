@@ -1,5 +1,15 @@
 ---
 
+> ✅ **已解决 2026-08-08（v1.3.9）**——plan/remove-agent-loop-limit.md 实现检查
+> - **Bug 1**（同步模式顺序执行）：`24186ed` allDeferredSpawns 并行
+> - **Bug 2**（异步模式缺状态块）：`24186ed` buildStatusBlock 拼 roundMessages 末尾
+> - **Bug 3**（提醒消息推入 agentMessages）：随 Bug 2 一并解决（静态提醒删除，状态块不写 agentMessages）
+> - **Bug 4**（MAX_AGENT_ROUNDS 死代码）：`b194bda` 删除
+> - **Bug 5**（subagent_start/end 事件）：`24186ed` 发射 subagent_spawned/finished
+> - **Bug 6**（缺子代理测试）：`tests/core/subagent.test.ts`（9 用例）
+> - **Bug 7**（潜在死循环）：随 Bug 4 删除轮次上限后由模型自主决定结束（不再有 continue 强制重入）
+> - 测试：`tests/core/subagent.test.ts`
+
 ## 审查结果：plan/remove-agent-loop-limit.md 实现检查
 
 我对照计划文件和实际代码，发现以下设计偏差和 bug：

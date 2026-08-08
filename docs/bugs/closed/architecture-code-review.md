@@ -1,5 +1,13 @@
 # 架构与代码设计审查 — SessionManager God Object、文档脱节、依赖环
 
+> 🟡 **部分解决 2026-08-08（v1.3.9）——已解决项见下，剩余待办已转 [open-issues.md](./open-issues.md)**
+> ✅ 已解决：
+> - **C-1 修复后的内存/磁盘一致性**（`a7cc07c`）与**数据格式 v2**（`8bb24b7`，messages 恒存、删 turn/user/assistant）——缓解 storage 全量读写的结构性问题（原子写仍未做，见待办）
+> - **storage.ts 头注释脱节**（`8bb24b7` 修正为 turns.json 单文件）
+> - **getTermSize columns=0 崩溃**（`f886d71`）
+> - **documentation 部分更新**：架构文档中工具数量/依赖描述已随各功能提交更新（architecture.md/module-interaction.md 仍有残留，见待办）
+> ⏳ 剩余待办（详见 open-issues.md）：SessionManager 拆分、storage 原子写、StreamEvent 判别联合、setSubagentRunner 构造注入、PACKAGE_VERSION 注入、any 清理、setModel 收紧、文档脱节残留
+
 **类型**: 架构审查（Architecture Review）
 **发现日期**: 2026-08-06
 **当前基线**: `main` @ `68acdb7`（HEAD）

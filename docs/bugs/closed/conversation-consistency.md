@@ -1,5 +1,13 @@
 # 对话管理一致性审查 — 内存 turns 错位覆盖、userMsg 重复、cache.log 编号漂移
 
+> ✅ **已解决 2026-08-08（v1.3.9）**
+> - **C-1**（内存 turns 错位覆盖）：修复于 `a7cc07c`——首次 saveTurn 后立即 push 内存 turns，结束分支改为更新最后一项
+> - **C-2**（userMsg 重复两次）：修复于 `8bb24b7`（数据格式 v2）——storage 端不再二次拼接 userMessage，messages 恒存单一来源
+> - **C-3**（cache.log 编号漂移）：修复于 `a7cc07c` + `202f7ad`——用实际 turn 号替代 length+1 推断；cache.log 路径拼接 bug 一并修复
+> - **C-4**（内存 meta.turnCount 不同步）：随 C-1 修复自愈
+> - **C-5**（updateLastTurn 返回 null 未处理）：修复于 `8bb24b7`——对 null 判空，回退 saveTurn 兜底
+> - 回归测试：`tests/core/session.test.ts`（C-1 回归用例）、`tests/core/storage.test.ts`（v2 断言）
+
 **类型**: 一致性审查（Consistency Review）
 **发现日期**: 2026-08-06
 **当前基线**: `main` @ `68acdb7`（HEAD）

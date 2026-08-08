@@ -1,5 +1,11 @@
 # Subagent 中断与生命周期缺陷 — 用户中断时 subagent 被连坐杀死
 
+> ✅ **已解决 2026-08-08（v1.3.9，提交 `24186ed`）**
+> - **I-1**（用户中断连坐杀死 subagent）：runSubagent 内部创建独立 AbortController，不联动主 agent signal；pendingSubagents 提升 SessionManager 实例级（中断后子代理继续后台跑完，后续轮次可 wait/取消）
+> - **I-2**（被取消的 subagent 误标 completed）：状态机加 cancelled；runSubagentLoop 捕获 chatStream AbortError 统一返回 SUBAGENT_CANCELLED
+> - 配套：新增 `subagent_cancel` 工具（主代理侧）+ `/subagent_cancel` 命令（用户侧 Selector 列表含全部取消）
+> - 测试：`tests/core/subagent.test.ts` 覆盖取消路径与独立 signal 断言
+
 **类型**: 中断/生命周期（Signal 管理）
 **发现日期**: 2026-07-23
 **当前基线**: `main` @ `68acdb7`（HEAD）
