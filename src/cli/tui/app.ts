@@ -11,7 +11,7 @@ import { SessionManager } from '../../core/session.js';
 import type { StreamEvent } from '../../types/index.js';
 import type { Tool } from '../../tools/types.js';
 import { ConfigManager } from '../../core/config.js';
-import { ConversationView, truncateThink } from './conversation.js';
+import { ConversationView, truncateThink, wrapText } from './conversation.js';
 import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../../utils/turn-utils.js';
 import { InputEditor } from './input-editor.js';
 import { Throttle } from '../../utils/throttle.js';
@@ -37,6 +37,7 @@ import {
 	padToWidth,
 	renderDiffLine,
 	formatToolCallSummary,
+	stripAnsi,
 } from './renderer.js';
 import { AppState } from './types.js';
 import type { TuiConfig, ScreenCapture, TurnCaptureInfo, ToolCallCaptureInfo, InputAreaCapture } from './types.js';
@@ -95,6 +96,36 @@ export class TuiApp {
 	private thinkAnimStep = 0;
 	/** think 最多实时显示行数（超出折叠） */
 	private readonly MAX_VISIBLE_THINK = 5;
+	/** 全屏浏览视图是否激活（Ctrl+O） */
+	private viewerActive = false;
+	/** 视图滚动偏移（行） */
+	private viewerScrollOffset = 0;
+	/** 视图预渲染行 */
+	private viewerLines: string[] = [];
+	/** 每轮起始行号（左右键跳转用） */
+	private viewerTurnStartLines: number[] = [];
+	/** 搜索关键词 */
+	private viewerSearchQuery = '';
+	/** 搜索匹配行号 */
+	private viewerSearchMatches: number[] = [];
+	/** 当前搜索匹配索引 */
+	private viewerSearchIndex = -1;
+	/** 是否处于搜索输入模式 */
+	private viewerSearchActive = false;
+	/** 搜索输入缓冲 */
+	private viewerSearchInput = '';
+	/** 打开视图前的 stdinHandler（退出时恢复） */
+	private viewerPrevHandler: ((data: string) => void) | null = null;
+	/** 打开视图时的 turns.length（退出时据此补渲染） */
+	private viewerOpenTurnCount = 0;
+	/** 打开视图时是否处于流式输出中 */
+	private viewerOpenedDuringStream = false;
+	/** 打开时的进行中轮是否已完成（done） */
+	private viewerOpenedTurnDone = false;
+	/** 打开时的进行中轮在视图期间的输出行（done 时归档） */
+	private viewerOpenedTurnLines: string[] = [];
+	/** 视图期间当前轮的输出行缓冲（流式静默用） */
+	private streamLines: string[] = [];
 
 	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean) {
 		this.sessionMgr = sessionMgr;
@@ -865,9 +896,9 @@ export class TuiApp {
 	private pasteBuffer = '';
 
 	private handleInputData(data: string, resolve: (value: string | null) => void): void {
-		// Ctrl+O: 查看完整 think（流式期间和 IDLE 都可用）
+		// Ctrl+O: 打开全屏对话浏览视图（流式期间和 IDLE 都可用；流式时后台静默）
 		if (data.includes('\x0f')) {
-			this.showFullThink();
+			this.openViewer();
 			return;
 		}
 
@@ -1267,16 +1298,25 @@ export class TuiApp {
 		this.renderInput();
 	}
 
-	/** 输出一行到 scrollback，并在底部重绘输入区（Bug 1） */
+	/** 输出一行到 scrollback，并在底部重绘输入区（Bug 1）；视图打开时缓冲（流式静默） */
 	private writeOutputLine(line: string): void {
+		if (this.viewerActive) {
+			// 全屏视图打开：输出静默缓冲（退出视图后补渲染）
+			this.streamLines.push(line);
+			return;
+		}
 		this.collapseInputArea();
 		process.stdout.write(line + '\r\n');
 		this.renderInputDuringStream();
 	}
 
-	/** 批量输出多行（减少逐行重绘闪烁） */
+	/** 批量输出多行（减少逐行重绘闪烁）；视图打开时缓冲 */
 	private writeOutputLines(lines: string[]): void {
 		if (lines.length === 0) return;
+		if (this.viewerActive) {
+			this.streamLines.push(...lines);
+			return;
+		}
 		this.collapseInputArea();
 		for (const l of lines) {
 			process.stdout.write(l + '\r\n');
@@ -1332,14 +1372,314 @@ export class TuiApp {
 		this.lastCursorDisplayRow = 0;
 	}
 
-	/** Ctrl+O：查看完整 think（输出折叠部分到 scrollback） */
-	private showFullThink(): void {
-		if (this.fullThink.length === 0) return;
-		if (this.thinkFolded) this.finalizeThinkCollapse();
-		const hidden = this.fullThink.slice(this.MAX_VISIBLE_THINK);
-		if (hidden.length > 0) {
-			this.writeOutputLines(hidden.map((l) => dim(l)));
+	// ─── Ctrl+O 全屏对话浏览视图 ─────────────────────
+
+	/** 打开全屏浏览视图（alternate screen；流式期间打开则后台静默输出） */
+	private openViewer(): void {
+		if (this.viewerActive) return;
+		this.viewerActive = true;
+		// 记录打开时状态（退出时据此补渲染）
+		const session = this.sessionMgr.getSession();
+		this.viewerOpenTurnCount = session?.turns.length ?? 0;
+		this.viewerOpenedDuringStream = this.state !== AppState.IDLE;
+		this.viewerOpenedTurnDone = false;
+		this.viewerOpenedTurnLines = [];
+		this.streamLines = [];
+		// 暂停 think 折叠动画（其直接写 stdout，会污染主 buffer）
+		if (this.thinkAnimTimer) {
+			clearInterval(this.thinkAnimTimer);
+			this.thinkAnimTimer = null;
 		}
+		// 保存当前 stdinHandler，切换为视图 handler
+		this.viewerPrevHandler = this.stdinHandler;
+		this.stdinHandler = (data: string) => this.handleViewerInput(data);
+		// 切换 alternate screen 并渲染
+		process.stdout.write('\x1b[?1049h');
+		this.buildViewerLines();
+		this.viewerScrollOffset = 0;
+		this.renderViewer();
+	}
+
+	/** 退出全屏浏览视图：恢复主 buffer + 补渲染静默期输出 + 恢复输入 */
+	private closeViewer(): void {
+		if (!this.viewerActive) return;
+		this.viewerActive = false;
+		// 恢复主 buffer（alternate screen 保存的主 TUI 内容还原）
+		process.stdout.write('\x1b[?1049l');
+		// 恢复 stdinHandler（流式双工 handler 或 IDLE handler）
+		this.stdinHandler = this.viewerPrevHandler;
+		this.viewerPrevHandler = null;
+		// 补渲染视图期间的静默输出
+		this.replayViewerOutput();
+		// 重建输入区
+		this.printSeparator();
+		this.lastVisibleInputRows = 1;
+		this.lastCursorDisplayRow = 0;
+		this.drawInputArea();
+		process.stdout.write('\r');
+		this.renderInput();
+	}
+
+	/**
+	 * 补渲染视图期间的静默输出：
+	 *  - 完整轮次从 turns 补（resume 式）
+	 *  - 打开时进行中的轮补 viewerOpenedTurnLines + streamLines（视图期间增量）
+	 */
+	private replayViewerOutput(): void {
+		const session = this.sessionMgr.getSession();
+		const turns = session?.turns ?? [];
+		let from = this.viewerOpenTurnCount;
+		if (this.viewerOpenedDuringStream) {
+			if (this.viewerOpenedTurnDone) {
+				// 打开时的轮已完成：跳过它（前半已在主 buffer），渲染它之后完成的新轮
+				from = this.viewerOpenTurnCount + 1;
+			} else {
+				// 打开时的轮未完成：无新完成轮（turns 不含它），仅补增量
+				from = turns.length;
+			}
+		}
+		const newTurns = turns.slice(from);
+		if (newTurns.length > 0) {
+			const lines = this.conversation.render(newTurns, getTermSize().cols);
+			this.writeOutputLines(lines);
+		}
+		// 打开时进行中轮的视图期间增量
+		if (this.viewerOpenedTurnLines.length > 0) {
+			this.writeOutputLines(this.viewerOpenedTurnLines);
+			this.viewerOpenedTurnLines = [];
+		}
+		// 最新进行中轮的增量
+		if (this.streamLines.length > 0) {
+			this.writeOutputLines(this.streamLines);
+			this.streamLines = [];
+		}
+	}
+
+	/** 构建视图行（每轮：用户/think/工具/回复 + 轮次起始行记录） */
+	private buildViewerLines(): void {
+		this.viewerLines = [];
+		this.viewerTurnStartLines = [];
+		const session = this.sessionMgr.getSession();
+		const turns = session?.turns ?? [];
+		const { cols } = getTermSize();
+		const wrapWidth = Math.max(10, cols - 8);
+
+		turns.forEach((turn, i) => {
+			this.viewerTurnStartLines.push(this.viewerLines.length);
+			this.viewerLines.push(dim(`── 第 ${i + 1} 轮 ────────────────────────`));
+			// 用户提问（绿色）
+			const userText = turnUserContent(turn);
+			for (const l of wrapText(userText, wrapWidth)) {
+				this.viewerLines.push(green(`[You] ${l}`));
+			}
+			// think（灰色，完整显示）
+			const thinkText = turnAssistantReasoning(turn);
+			if (thinkText) {
+				for (const l of thinkText.split('\n')) {
+					this.viewerLines.push(dim(`[Think] ${l}`));
+				}
+			}
+			// 工具调用（● run + 摘要）
+			if (turn.tool_calls && turn.tool_calls.length > 0) {
+				for (const tcr of turn.tool_calls) {
+					const shortName = tcr.name.replace('execute_', '');
+					const summary = formatToolCallSummary(tcr.name, tcr.arguments ?? {});
+					this.viewerLines.push(cyan(`● run ${shortName} ${summary}`));
+				}
+			}
+			// 回复
+			const contentText = turnAssistantContent(turn);
+			if (contentText) {
+				for (const l of contentText.split('\n')) {
+					for (const w of wrapText(l, cols - 2)) {
+						this.viewerLines.push(w);
+					}
+				}
+			}
+			this.viewerLines.push('');
+		});
+		if (this.viewerLines.length === 0) {
+			this.viewerLines.push(dim('(暂无对话)'));
+		}
+	}
+
+	/** 渲染视图当前视口（顶部提示 + 内容窗口 + 底部状态） */
+	private renderViewer(): void {
+		const { rows, cols } = getTermSize();
+		const visible = Math.max(1, rows - 2);
+		process.stdout.write('\x1b[2J\x1b[H');
+		process.stdout.write(dim(` 对话浏览  ←→ 轮次  |  ↑↓ 滚动  |  PgUp/PgDn 翻页  |  / 搜索  |  q 退出`) + '\r\n');
+		for (let r = 0; r < visible; r++) {
+			const idx = this.viewerScrollOffset + r;
+			process.stdout.write('\r\x1b[2K');
+			if (idx < this.viewerLines.length) {
+				let line = this.viewerLines[idx];
+				// 搜索匹配行高亮（反转色）
+				if (this.viewerSearchQuery && this.viewerSearchMatches.includes(idx)) {
+					line = `\x1b[7m${stripAnsi(line)}\x1b[0m`;
+				}
+				process.stdout.write(line.slice(0, cols - 1));
+			}
+			if (r < visible - 1) process.stdout.write('\r\n');
+		}
+		// 底部状态行
+		process.stdout.write('\r\n\x1b[2K');
+		const total = this.viewerLines.length;
+		const pct = total > 0 ? Math.round(((this.viewerScrollOffset + visible) / total) * 100) : 0;
+		let status = dim(` ${Math.min(this.viewerScrollOffset + 1, total)}/${total} 行 (${pct}%)`);
+		if (this.viewerSearchQuery) {
+			const matchInfo = this.viewerSearchMatches.length > 0
+				? ` 匹配 ${this.viewerSearchIndex + 1}/${this.viewerSearchMatches.length}: "${this.viewerSearchQuery}" (n/N 下一个)`
+				: `  无匹配: "${this.viewerSearchQuery}"`;
+			status += dim(matchInfo);
+		} else if (this.viewerSearchActive) {
+			status += dim(`  搜索: ${this.viewerSearchInput}▌`);
+		}
+		process.stdout.write(status);
+	}
+
+	/** 视图输入处理（逐字符：方向键/翻页/搜索/退出） */
+	private handleViewerInput(data: string): void {
+		// 已在搜索输入模式：剩余字符全部交给搜索处理
+		if (this.viewerSearchActive) {
+			this.handleViewerSearchInput(data);
+			return;
+		}
+		for (let i = 0; i < data.length; i++) {
+			const ch = data[i];
+			// ESC 序列（方向键/PgUp/PgDn）
+			if (ch === '\x1b') {
+				if (data[i + 1] === '[') {
+					i += 2;
+					let seq = '';
+					while (i < data.length) {
+						const sc = data.charCodeAt(i);
+						if (sc >= 0x40 && sc <= 0x7e) { seq += data[i]; i++; break; }
+						seq += data[i];
+						i++;
+					}
+					i--;
+					this.handleViewerEscapeSeq(seq);
+				} else {
+					this.closeViewer(); // 单独 ESC 退出
+					return;
+				}
+				continue;
+			}
+			if (ch === 'q' || ch === 'Q') { this.closeViewer(); return; }
+			if (ch === '/') {
+				this.viewerSearchActive = true;
+				this.viewerSearchInput = '';
+				this.renderViewer();
+				// 同批到达的剩余字符（如 '/reply\r'）交给搜索输入处理
+				if (i + 1 < data.length) {
+					this.handleViewerSearchInput(data.slice(i + 1));
+				}
+				return;
+			}
+			if (ch === 'n') this.viewerJumpSearch(1);
+			if (ch === 'N') this.viewerJumpSearch(-1);
+		}
+	}
+
+	/** 视图 ESC 序列处理 */
+	private handleViewerEscapeSeq(seq: string): void {
+		if (seq === 'A') this.viewerScroll(-1);
+		else if (seq === 'B') this.viewerScroll(1);
+		else if (seq === 'C') this.viewerJumpTurn(1);
+		else if (seq === 'D') this.viewerJumpTurn(-1);
+		else if (seq === '5~') this.viewerPageScroll(-1);
+		else if (seq === '6~') this.viewerPageScroll(1);
+	}
+
+	/** 视图搜索输入模式（逐字符） */
+	private handleViewerSearchInput(data: string): void {
+		for (let i = 0; i < data.length; i++) {
+			const ch = data[i];
+			if (ch === '\x0d') {
+				// Enter 执行搜索
+				if (this.viewerSearchInput) this.viewerDoSearch(this.viewerSearchInput);
+				this.viewerSearchActive = false;
+				this.renderViewer();
+				continue;
+			}
+			if (ch === '\x1b') {
+				// Esc 取消搜索
+				this.viewerSearchInput = '';
+				this.viewerSearchActive = false;
+				this.renderViewer();
+				return;
+			}
+			if (ch === '\x7f' || ch === '\x08') {
+				this.viewerSearchInput = this.viewerSearchInput.slice(0, -1);
+				this.renderViewer();
+				continue;
+			}
+			// 普通字符追加（忽略控制字符）
+			if (ch >= ' ') {
+				this.viewerSearchInput += ch;
+				this.renderViewer();
+			}
+		}
+	}
+
+	/** 执行搜索：在视图行（纯文本）中查找匹配行 */
+	private viewerDoSearch(query: string): void {
+		this.viewerSearchQuery = query;
+		this.viewerSearchMatches = [];
+		this.viewerLines.forEach((line, i) => {
+			if (stripAnsi(line).toLowerCase().includes(query.toLowerCase())) {
+				this.viewerSearchMatches.push(i);
+			}
+		});
+		this.viewerSearchIndex = -1;
+		this.viewerJumpSearch(1);
+	}
+
+	/** 跳转到下一个/上一个搜索匹配（循环） */
+	private viewerJumpSearch(dir: 1 | -1): void {
+		if (this.viewerSearchMatches.length === 0) return;
+		this.viewerSearchIndex = (this.viewerSearchIndex + dir + this.viewerSearchMatches.length) % this.viewerSearchMatches.length;
+		const target = this.viewerSearchMatches[this.viewerSearchIndex];
+		this.viewerScrollTo(target);
+	}
+
+	/** 滚动视口到指定行 */
+	private viewerScrollTo(line: number): void {
+		const { rows } = getTermSize();
+		const visible = Math.max(1, rows - 2);
+		this.viewerScrollOffset = Math.max(0, Math.min(line, this.viewerLines.length - 1));
+		// 若目标行不在视口内，滚动到目标行
+		if (line < this.viewerScrollOffset || line >= this.viewerScrollOffset + visible) {
+			this.viewerScrollOffset = Math.max(0, line);
+		}
+		this.renderViewer();
+	}
+
+	/** 逐行滚动 */
+	private viewerScroll(dir: 1 | -1): void {
+		this.viewerScrollOffset = Math.max(0, Math.min(this.viewerScrollOffset + dir, this.viewerLines.length - 1));
+		this.renderViewer();
+	}
+
+	/** 翻页 */
+	private viewerPageScroll(dir: 1 | -1): void {
+		const { rows } = getTermSize();
+		const visible = Math.max(1, rows - 2);
+		this.viewerScrollOffset = Math.max(0, Math.min(this.viewerScrollOffset + dir * (visible - 1), this.viewerLines.length - 1));
+		this.renderViewer();
+	}
+
+	/** 左右键切换轮次（跳转到该轮顶部） */
+	private viewerJumpTurn(dir: 1 | -1): void {
+		if (this.viewerTurnStartLines.length === 0) return;
+		// 找到当前所在轮索引
+		let cur = this.viewerTurnStartLines.length - 1;
+		for (let i = 0; i < this.viewerTurnStartLines.length; i++) {
+			if (this.viewerScrollOffset < this.viewerTurnStartLines[i]) { cur = i - 1; break; }
+		}
+		const target = Math.max(0, Math.min(cur + dir, this.viewerTurnStartLines.length - 1));
+		this.viewerScrollTo(this.viewerTurnStartLines[target]);
 	}
 
 	/**
@@ -1535,12 +1875,12 @@ export class TuiApp {
 							reasoningStarted = false;
 							contentStarted = false;
 							reasoningEndsWithNewline = true;
-							// 紧凑展示：· run <tool> <摘要>（shell 显示命令、文件工具显示路径）
+							// 紧凑展示：● run <tool> <摘要>（shell 显示命令、文件工具显示路径）
 							const toolName = event.toolName ?? '?';
 							const shortName = toolName.replace('execute_', '');
 							const summary = formatToolCallSummary(toolName, event.toolArgs ?? {});
 							this.writeOutputLine(
-								cyan(`· run ${shortName}`) + (summary ? dim(` ${summary}`) : ''),
+								cyan(`● run ${shortName}`) + (summary ? dim(` ${summary}`) : ''),
 							);
 							break;
 						}
@@ -1652,6 +1992,13 @@ export class TuiApp {
 							flush(true);
 
 							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
+							// 视图打开时的轮已完成：归档该轮视图期间增量（退出时补渲染），
+							// 之后完成的新轮增量清空（退出时从 turns 补渲染完整轮）
+							if (this.viewerActive && this.viewerOpenedDuringStream && !this.viewerOpenedTurnDone) {
+								this.viewerOpenedTurnDone = true;
+								this.viewerOpenedTurnLines = this.streamLines;
+							}
+							this.streamLines = [];
 							// 刷出表格渲染器中暂存的剩余内容（Bug 1：走统一输出收口）
 							this.writeOutputLines(mdRenderer.flush());
 							this.printUsage(event);

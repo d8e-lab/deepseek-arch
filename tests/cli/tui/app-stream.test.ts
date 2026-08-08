@@ -15,7 +15,7 @@ import { TuiApp } from '../../../src/cli/tui/app.js';
 import type { SessionManager } from '../../../src/core/session.js';
 import type { StreamEvent } from '../../../src/types/index.js';
 import type { TuiConfig } from '../../../src/cli/tui/types.js';
-import { GRAY_BG_START } from '../../../src/cli/tui/renderer.js';
+import { GRAY_BG_START, stripAnsi } from '../../../src/cli/tui/renderer.js';
 
 /** 与 app.ts 中定义的 CLEAR_TO_END 一致（从光标处清除到屏幕底） */
 const CLEAR_TO_END = '\x1b[0J';
@@ -36,11 +36,36 @@ function makeApp(sessionMgr?: Partial<SessionManager>): TuiApp {
 	return new TuiApp(mgr, config);
 }
 
-/** mock 输出事件序列的 sessionMgr */
+/** mock 输出事件序列的 sessionMgr（维护 turns 供 viewer 渲染） */
 function mockStreamSession(events: StreamEvent[]): Partial<SessionManager> {
+	const turns: import('../../../src/types/index.js').TurnRecord[] = [];
 	return {
-		sendMessageStream: vi.fn(async (_content: string, onEvent: (e: StreamEvent) => void) => {
+		getSession: () => ({
+			meta: { id: 'mock', title: '', created_at: '', updated_at: '', turnCount: turns.length, totalCost: 0 },
+			turns,
+			systemPrompt: undefined,
+		}),
+		sendMessageStream: vi.fn(async (content: string, onEvent: (e: StreamEvent) => void) => {
 			for (const e of events) onEvent(e);
+			// 简化：把本轮加入 turns（viewer 渲染用；reasoning 从事件文本提取）
+			const reasoning = events
+				.filter((e) => e.type === 'reasoning_delta' && e.text)
+				.map((e) => e.text)
+				.join('');
+			const reply = events
+				.filter((e) => e.type === 'content_delta' && e.text)
+				.map((e) => e.text)
+				.join('');
+			turns.push({
+				version: 2,
+				messages: [
+					{ role: 'user', content },
+					{ role: 'assistant', content: reply, reasoning_content: reasoning || undefined },
+				],
+				cost_rmb: 0,
+				created_at: new Date().toISOString(),
+				usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+			});
 			return null;
 		}) as unknown as SessionManager['sendMessageStream'],
 	};
@@ -180,7 +205,7 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		expect(out).toContain('第二轮输出');
 	});
 
-	it('think 超过可见行数后折叠（节省空间），Ctrl+O 查看完整', async () => {
+	it('think 超过可见行数后折叠（节省空间），Ctrl+O 全屏视图可查看完整', async () => {
 		// 发射 7 行思考（MAX_VISIBLE_THINK=5），前 5 行实时显示，后 2 行折叠
 		const events: StreamEvent[] = [
 			{ type: 'reasoning_delta', text: '思考第1行\n' },
@@ -196,7 +221,10 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		const app = makeApp(mockStreamSession(events));
 		const anyApp = app as unknown as {
 			sendMessageStream: (c: string) => Promise<void>;
-			showFullThink: () => void;
+			openViewer: () => void;
+			viewerLines: string[];
+			viewerActive: boolean;
+			closeViewer: () => void;
 		};
 		await anyApp.sendMessageStream('test');
 		const out = writes.join('');
@@ -210,11 +238,14 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		// 有折叠提示
 		expect(out).toContain('已折叠');
 
-		// Ctrl+O 查看完整：输出折叠部分（第 6/7 行）
-		writes.length = 0;
-		anyApp.showFullThink();
-		const out2 = writes.join('');
-		expect(out2).toContain('思考第6行');
-		expect(out2).toContain('思考第7行');
+		// Ctrl+O 全屏视图：viewerLines 含完整 think（第 6/7 行可见）
+		anyApp.openViewer();
+		expect(anyApp.viewerActive).toBe(true);
+		const viewerText = stripAnsi(anyApp.viewerLines.join('\n'));
+		expect(viewerText).toContain('思考第6行');
+		expect(viewerText).toContain('思考第7行');
+		// 退出视图
+		anyApp.closeViewer();
+		expect(anyApp.viewerActive).toBe(false);
 	});
 });

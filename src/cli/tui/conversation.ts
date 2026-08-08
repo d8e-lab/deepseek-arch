@@ -129,12 +129,12 @@ export class ConversationView {
 				lines.push('');
 			}
 
-			// 工具调用记录（紧凑格式：· run <tool> <摘要>）
+			// 工具调用记录（紧凑格式：● run <tool> <摘要>）
 			const tcRecords = turn.tool_calls;
 			if (tcRecords && Array.isArray(tcRecords) && tcRecords.length > 0) {
 				for (const tcr of tcRecords) {
 					const shortName = tcr.name.replace('execute_', '');
-					const label = cyan(`· run ${shortName} `);
+					const label = cyan(`● run ${shortName} `);
 					const summary = formatToolCallSummary(tcr.name, tcr.arguments ?? {});
 					lines.push(label + dim(summary) + dim(`  (${tcr.duration_ms}ms)`));
 
