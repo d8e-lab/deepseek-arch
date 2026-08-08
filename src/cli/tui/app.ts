@@ -1423,10 +1423,14 @@ export class TuiApp {
 		this.viewerActive = false;
 		// 恢复 stdinHandler：
 		// - 若主循环已接管（readUserInput 设置了新 handler），保持不变
-		// - 若仍持有视图 handler：sendMessageStream 还在跑 → 恢复双工 handler（流式继续）；
-		//   已结束 → 置空让主循环下一轮 inputCycle 重新建立
+		// - 若仍持有视图 handler，按打开场景区分：
+		//   * IDLE 打开（无流式）：恢复 readUserInput 的 handler（inputCycle 仍在 await 它）
+		//   * 流式打开：输出还在跑 → 恢复双工 handler（流式继续）；
+		//               已结束 → 置空让主循环 inputCycle 接管
 		if (this.stdinHandler === this.viewerHandler) {
-			if (this.abortController) {
+			if (!this.viewerOpenedDuringStream) {
+				this.stdinHandler = this.viewerPrevHandler;
+			} else if (this.abortController) {
 				this.stdinHandler = this.viewerPrevHandler;
 			} else {
 				this.stdinHandler = null;
