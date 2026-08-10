@@ -573,4 +573,122 @@ describe('SessionManager', () => {
       expect(turnAssistantContent(diskTurns[0])).toBe(joined);
     });
   });
+
+  describe('compactContext（上下文压缩）', () => {
+    function cchunk(overrides?: Partial<StreamChunk>): StreamChunk {
+      return {
+        id: 'chatcmpl-compact-001',
+        object: 'chat.completion.chunk',
+        created: 1234567890,
+        model: 'deepseek-v4-pro',
+        choices: [{ index: 0, delta: { content: '' }, finish_reason: null }],
+        ...overrides,
+      };
+    }
+
+    function cusage(usage: TokenUsage): StreamChunk {
+      return {
+        id: 'chatcmpl-compact-001',
+        object: 'chat.completion.chunk',
+        created: 1234567890,
+        model: 'deepseek-v4-pro',
+        choices: [{ index: 0, delta: { content: '' }, finish_reason: 'stop' }],
+        usage,
+      };
+    }
+
+    /** 双能力 client：chat 供 compactContext 摘要生成，chatStream 供 sendMessageStream */
+    function makeDualClient(captured: { messages: Message[] }) {
+      return {
+        chat: async () => makeResponse({
+          choices: [{
+            index: 0,
+            message: { role: 'assistant', content: '【压缩摘要】用户目标与决策...' },
+            finish_reason: 'stop',
+          }],
+        }),
+        chatStream: async function* gen(messages: Message[]): AsyncGenerator<StreamChunk> {
+          captured.messages = messages;
+          yield cchunk({ choices: [{ index: 0, delta: { content: '回复' }, finish_reason: null }] });
+          yield cusage({ prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 });
+        },
+      } as unknown as ModelProvider;
+    }
+
+    it('compact 后请求上下文 = 摘要 + 后续轮次（旧轮次不再进入）', async () => {
+      const captured: { messages: Message[] } = { messages: [] };
+      const client = makeDualClient(captured);
+      const mgr = new SessionManager(storage, client);
+      await mgr.startNewSession('compact 集成测试');
+      mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+      // 第一轮（将被压缩）
+      await mgr.sendMessageStream('第一轮问题', () => {});
+
+      // 执行 compact
+      const result = await mgr.compactContext();
+      expect(result.gen).toBe(1);
+      expect(result.compressedTurns).toBe(1);
+
+      // 磁盘：turn_1.json 含摘要轮
+      const gens = await storage.listGenerations(mgr.getSessionId()!);
+      expect(gens).toEqual([0, 1]);
+      const gen1 = await storage.loadGeneration(mgr.getSessionId()!, 1);
+      expect(gen1).toHaveLength(1);
+      expect(gen1[0].type).toBe('compact');
+      expect(gen1[0].summary).toContain('【压缩摘要】');
+
+      // 第二轮（compact 之后）：请求上下文从摘要轮开始，旧轮次被压缩掉
+      captured.messages = [];
+      await mgr.sendMessageStream('第二轮问题', () => {});
+      const userMsgs = captured.messages.filter((m) => m.role === 'user').map((m) => m.content);
+      expect(userMsgs[0]).toContain('[Compacted Context Summary]');
+      expect(userMsgs).not.toContain('第一轮问题');
+      expect(userMsgs[userMsgs.length - 1]).toBe('第二轮问题');
+    });
+
+    it('resume 分代会话时 buildMessages 从最后一个摘要轮开始', async () => {
+      // 直接构造分代存储：turn_0 两轮 + turn_1 [摘要轮, 轮次]
+      const meta = await storage.createSession('resume compact');
+      const userMsg1: Message = { role: 'user', content: '旧轮次A' };
+      const userMsg2: Message = { role: 'user', content: '旧轮次B' };
+      await storage.saveTurn(meta.id, userMsg1, { id: 'x1', role: 'assistant', content: '旧回复A' }, { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }, 0);
+      await storage.saveTurn(meta.id, userMsg2, { id: 'x2', role: 'assistant', content: '旧回复B' }, { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }, 0);
+      await storage.newGeneration(meta.id, {
+        type: 'compact',
+        version: 2,
+        summary: '摘要内容',
+        messages: [{ role: 'user', content: '[Compacted Context Summary]\n摘要内容' }],
+        cost_rmb: 0,
+        created_at: new Date().toISOString(),
+      });
+      // 摘要轮后的真实轮次（最新代内）
+      await storage.saveTurn(meta.id, { role: 'user', content: '保留轮次' }, { id: 'x3', role: 'assistant', content: '保留回复' }, { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }, 0);
+
+      const captured: { messages: Message[] } = { messages: [] };
+      const client = makeDualClient(captured);
+      const mgr = new SessionManager(storage, client);
+      await mgr.resumeSession(meta.id);
+
+      // getSession 返回合并全量（含旧轮次，供 TUI 显示）
+      const session = mgr.getSession();
+      expect(session!.turns).toHaveLength(4); // 2 旧 + 1 摘要 + 1 保留
+
+      await mgr.sendMessageStream('新问题', () => {});
+      const userMsgs = captured.messages.filter((m) => m.role === 'user').map((m) => m.content);
+      // 请求上下文：从摘要轮开始 → 摘要 + 保留轮次 + 新问题；旧轮次不进入
+      expect(userMsgs[0]).toContain('[Compacted Context Summary]');
+      expect(userMsgs).not.toContain('旧轮次A');
+      expect(userMsgs).not.toContain('旧轮次B');
+      expect(userMsgs).toContain('保留轮次');
+      expect(userMsgs[userMsgs.length - 1]).toBe('新问题');
+    });
+
+    it('会话为空时 compact 抛错', async () => {
+      const captured: { messages: Message[] } = { messages: [] };
+      const mgr = new SessionManager(storage, makeDualClient(captured));
+      await mgr.startNewSession('空会话');
+      await expect(mgr.compactContext()).rejects.toThrow('会话为空');
+    });
+  });
 });

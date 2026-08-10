@@ -67,6 +67,21 @@ export class Storage {
 		return join(this.sessionDir(id), TURNS_FILE);
 	}
 
+	/** 获取分代文件路径（turn_{gen}.json） */
+	private generationPath(id: string, gen: number): string {
+		return join(this.sessionDir(id), `turn_${gen}.json`);
+	}
+
+	/** 会话是否为分代格式（目录存在 turn_0.json） */
+	private async hasGenerationFormat(sessionId: string): Promise<boolean> {
+		try {
+			await access(this.generationPath(sessionId, 0));
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	/** 读取 JSON 文件 */
 	private async readJSON<T>(path: string): Promise<T | null> {
 		try {
@@ -99,11 +114,14 @@ export class Storage {
 			updated_at: now,
 			turnCount: 0,
 			totalCost: 0,
+			currentGen: 0, // 新格式：初始分代 0
 		};
 
 		const dir = this.sessionDir(id);
 		await mkdir(dir, { mode: 0o700 });
 		await this.writeJSON(this.metaPath(id), meta);
+		// 初始化分代文件 turn_0.json（空数组）
+		await this.writeJSON(this.generationPath(id, 0), []);
 
 		return meta;
 	}
@@ -113,12 +131,25 @@ export class Storage {
 		const meta = await this.readJSON<SessionMeta>(this.metaPath(id));
 		if (!meta) return null;
 
-		const turns = await this.loadTurns(id);
+		let turns: TurnRecord[];
+		let allTurns: TurnRecord[] | undefined;
+		if (await this.hasGenerationFormat(id)) {
+			// 分代格式：合并所有分代（compact 边界由摘要轮 type='compact' 隐式标记）
+			allTurns = [];
+			for (const g of await this.listGenerations(id)) {
+				allTurns.push(...(await this.loadGeneration(id, g)));
+			}
+			turns = allTurns;
+		} else {
+			// 旧 turns.json 格式
+			turns = await this.loadTurns(id);
+			allTurns = turns;
+		}
 
-		// 同步元数据中的计数字段
-		if (meta.turnCount !== turns.length) {
-			meta.turnCount = turns.length;
-			meta.totalCost = turns.reduce((sum, t) => sum + t.cost_rmb, 0);
+		// 同步元数据中的计数字段（基于全量轮次）
+		if (meta.turnCount !== allTurns.length) {
+			meta.turnCount = allTurns.length;
+			meta.totalCost = allTurns.reduce((sum, t) => sum + t.cost_rmb, 0);
 		}
 
 		// 读取持久化的 system prompt（用于 resume 时恢复，命中 KV cache）
@@ -129,7 +160,7 @@ export class Storage {
 			// 旧会话可能没有此文件，忽略
 		}
 
-		return { meta, turns, systemPrompt };
+		return { meta, turns, allTurns, systemPrompt };
 	}
 
 	/** 按标题精确匹配会话 */
@@ -234,8 +265,16 @@ export class Storage {
 			throw new Error(`会话不存在: ${sessionId}`);
 		}
 
-		// 读取现有轮次（单文件 turns.json）
-		const existingTurns = await this.loadTurns(sessionId);
+		// 读取现有轮次（分代格式 → 最新分代文件；旧格式 → turns.json）
+		let existingTurns: TurnRecord[];
+		let gen = -1;
+		if (await this.hasGenerationFormat(sessionId)) {
+			gen = await this.getCurrentGen(sessionId);
+			if (gen < 0) gen = 0;
+			existingTurns = await this.loadGeneration(sessionId, gen);
+		} else {
+			existingTurns = await this.loadTurns(sessionId);
+		}
 		const turnNumber = existingTurns.length + 1;
 
 		// v2：messages 恒存（唯一事实源），顶层不再存 turn/user/assistant。
@@ -271,9 +310,13 @@ export class Storage {
 			turn.round_usage = roundUsages;
 		}
 
-		// 将所有轮次写入单个 turns.json
+		// 将所有轮次写入（分代格式 → 当前分代文件；旧格式 → turns.json）
 		const allTurns = [...existingTurns, turn as unknown as TurnRecord];
-		await this.writeJSON(this.turnsPath(sessionId), allTurns);
+		if (gen >= 0) {
+			await this.writeJSON(this.generationPath(sessionId, gen), allTurns);
+		} else {
+			await this.writeJSON(this.turnsPath(sessionId), allTurns);
+		}
 
 		// 更新元数据
 		const totalCost = existingTurns.reduce((sum, t) => sum + t.cost_rmb, 0) + costRmb;
@@ -290,8 +333,12 @@ export class Storage {
 		return turn as unknown as TurnRecord;
 	}
 
-	/** 加载会话的所有轮次 */
+	/** 加载会话的所有轮次（分代格式 = 最新分代；旧格式 = turns.json） */
 	async getTurns(sessionId: string): Promise<TurnRecord[]> {
+		if (await this.hasGenerationFormat(sessionId)) {
+			const latest = await this.loadLatestGeneration(sessionId);
+			return latest?.turns ?? [];
+		}
 		return this.loadTurns(sessionId);
 	}
 
@@ -312,12 +359,21 @@ export class Storage {
 			lastBrowserUrl?: string;
 		},
 	): Promise<TurnRecord | null> {
-		const turns = await this.loadTurns(sessionId);
+		// 分代格式 → 最新分代文件；旧格式 → turns.json
+		let turns: TurnRecord[];
+		let gen = -1;
+		if (await this.hasGenerationFormat(sessionId)) {
+			gen = await this.getCurrentGen(sessionId);
+			if (gen < 0) gen = 0;
+			turns = await this.loadGeneration(sessionId, gen);
+		} else {
+			turns = await this.loadTurns(sessionId);
+		}
 		if (turns.length === 0) return null;
 
 		const last = turns[turns.length - 1] as unknown as Record<string, unknown>;
 
-		if (patch.assistant) Object.assign(last.assistant as object, patch.assistant);
+		if (patch.assistant && last.assistant) Object.assign(last.assistant as object, patch.assistant);
 		if (patch.toolCalls !== undefined) last.tool_calls = patch.toolCalls;
 		if (patch.messages !== undefined) last.messages = patch.messages;
 		if (patch.usage !== undefined) last.usage = patch.usage;
@@ -330,8 +386,66 @@ export class Storage {
 			await this.updateMeta(sessionId, { lastBrowserUrl: patch.lastBrowserUrl });
 		}
 
-		await this.writeJSON(this.turnsPath(sessionId), turns);
+		if (gen >= 0) {
+			await this.writeJSON(this.generationPath(sessionId, gen), turns);
+		} else {
+			await this.writeJSON(this.turnsPath(sessionId), turns);
+		}
 		return turns[turns.length - 1] as TurnRecord;
+	}
+
+	// ─── Generations（compact 分代存储）────────────────
+
+	/** 获取当前分代 id（分代格式；旧格式返回 -1） */
+	async getCurrentGen(sessionId: string): Promise<number> {
+		const meta = await this.readJSON<SessionMeta>(this.metaPath(sessionId));
+		return meta?.currentGen ?? -1;
+	}
+
+	/** 列出所有分代 id（升序）。非分代格式返回空数组 */
+	async listGenerations(sessionId: string): Promise<number[]> {
+		try {
+			const entries = await readdir(this.sessionDir(sessionId));
+			const gens = entries
+				.filter((f) => /^turn_\d+\.json$/.test(f))
+				.map((f) => parseInt(f.slice('turn_'.length, -'.json'.length), 10))
+				.filter((n) => Number.isFinite(n))
+				.sort((a, b) => a - b);
+			return gens;
+		} catch {
+			return [];
+		}
+	}
+
+	/** 加载指定分代的轮次（不存在返回空数组） */
+	async loadGeneration(sessionId: string, gen: number): Promise<TurnRecord[]> {
+		return (await this.readJSON<TurnRecord[]>(this.generationPath(sessionId, gen))) ?? [];
+	}
+
+	/** 加载最新分代的轮次（非分代格式返回 null） */
+	async loadLatestGeneration(sessionId: string): Promise<{ gen: number; turns: TurnRecord[] } | null> {
+		const gens = await this.listGenerations(sessionId);
+		if (gens.length === 0) return null;
+		const gen = gens[gens.length - 1];
+		return { gen, turns: await this.loadGeneration(sessionId, gen) };
+	}
+
+	/**
+	 * 开启新分代（compact 时调用）：genId+1，写入摘要轮，返回新 gen id。
+	 * 旧 turns.json 会话首次调用时：将现有轮次迁移为 gen 0（保留原 turns.json 不动）。
+	 */
+	async newGeneration(sessionId: string, summaryTurn: TurnRecord): Promise<number> {
+		let current = await this.getCurrentGen(sessionId);
+		if (current < 0) {
+			// 旧格式会话首次 compact：迁移现有 turns 为 gen 0
+			const existing = await this.loadTurns(sessionId);
+			await this.writeJSON(this.generationPath(sessionId, 0), existing);
+			current = 0;
+		}
+		const next = current + 1;
+		await this.writeJSON(this.generationPath(sessionId, next), [summaryTurn]);
+		await this.updateMeta(sessionId, { currentGen: next });
+		return next;
 	}
 
 	/** 内部：从 turns.json 加载轮次（兼容旧的 turn-NNN.json 格式） */

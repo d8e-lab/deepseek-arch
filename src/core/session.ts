@@ -38,6 +38,16 @@ import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
 import { runSubagentLoop, SUBAGENT_CANCELLED } from './subagent.js';
 import { SubagentStore } from './subagent-store.js';
+import {
+	MAX_RESTORE_FILES,
+	buildCompactMessages,
+	buildCompactTurn,
+	buildFileRestoreBlock,
+	buildPlanBlock,
+	buildSkillsBlock,
+	extractReadFiles,
+	generateSummary,
+} from './compact.js';
 
 
 /** 子代理 System Prompt 追加内容（行为约束） */
@@ -178,6 +188,63 @@ export class SessionManager {
 	/** 获取子代理存储（用于 /subagent 命令查看详情） */
 	getSubagentStore(): SubagentStore {
 		return this.subagentStore;
+	}
+
+	/**
+	 * 执行上下文压缩（compact）。
+	 *
+	 * 流程：等待 subagent 结束 → 生成结构化摘要（独立模型调用）→
+	 * 构建文件/plan/skills 重注入块 → 开启新分代写入摘要轮 → 更新内存状态。
+	 *
+	 * compact 后 master agent 请求上下文 = 摘要 + 重注入块 + 后续轮次；
+	 * 磁盘分代文件保留全部历史（用户视角可回查）。
+	 */
+	async compactContext(): Promise<{
+		gen: number;
+		compressedTurns: number;
+		restoredFiles: number;
+		restoredTokens: number;
+		summaryPreview: string;
+	}> {
+		if (!this.session) throw new Error('无活动会话');
+		const turns = this.session.turns;
+		if (turns.length === 0) throw new Error('会话为空，无需压缩');
+
+		// Phase 1：等待所有 subagent 结束（compact 前必须收敛后台任务）
+		const pending = [...this.pendingSubagents.values()];
+		if (pending.length > 0) {
+			await Promise.all(pending.map((s) => s.promise));
+		}
+
+		const cwd = process.env.DEEPSEEK_ARCH_SESSION_CWD ?? process.cwd();
+
+		// Phase 2：生成结构化摘要（独立非流式调用，失败有 fallback）
+		const summary = await generateSummary(this.provider, turns);
+
+		// Phase 3：构建重注入块（文件 / plan / skills）
+		const readFiles = extractReadFiles(turns);
+		const restore = await buildFileRestoreBlock(readFiles, cwd);
+		const plan = await buildPlanBlock(turns, cwd);
+		const skills = await buildSkillsBlock(turns);
+
+		// 组装消息序列并开启新分代
+		const messages = buildCompactMessages(summary, restore.text, plan.text, skills.text);
+		const compactTurn = buildCompactTurn(summary, messages);
+		const gen = await this.storage.newGeneration(this.session.meta.id, compactTurn);
+
+		// 更新内存状态（追加摘要轮，后续 buildMessages 自动从它开始）
+		this.session.turns.push(compactTurn);
+		this.session.meta.turnCount = this.session.turns.length;
+		this.session.meta.totalCost = this.session.turns.reduce((s, t) => s + t.cost_rmb, 0);
+		this.session.meta.currentGen = gen;
+
+		return {
+			gen,
+			compressedTurns: turns.filter((t) => t.type !== 'compact').length,
+			restoredFiles: Math.min(readFiles.length, MAX_RESTORE_FILES),
+			restoredTokens: restore.tokenCount,
+			summaryPreview: summary.length > 120 ? `${summary.slice(0, 120)}…` : summary,
+		};
 	}
 
 	/**
@@ -1158,7 +1225,18 @@ export class SessionManager {
 		}
 
 		// 2. 历史轮次
-		for (const turn of this.session!.turns) {
+		const turns = this.session!.turns;
+		// compact 边界：从最后一个摘要轮（type='compact'）开始平铺。
+		// 其之前的轮次已被压缩进摘要，不再进入请求上下文（磁盘全量保留供 TUI 回查）。
+		let startIdx = 0;
+		for (let i = turns.length - 1; i >= 0; i--) {
+			if (turns[i].type === 'compact') {
+				startIdx = i;
+				break;
+			}
+		}
+		for (let i = startIdx; i < turns.length; i++) {
+			const turn = turns[i];
 			if (turn.interrupted) {
 				// 中断轮次：保留用户消息 + 已完成的工具交互，但不包含截断的 assistant 最终回复
 				if (turn.messages && turn.messages.length > 0) {

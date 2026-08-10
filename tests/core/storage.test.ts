@@ -306,4 +306,132 @@ describe('Storage (文件系统)', () => {
       expect(await store.getTurns(s2.sessionId)).toHaveLength(1);
     });
   });
+
+  describe('Generations（compact 分代存储）', () => {
+    it('createSession 初始化 turn_0.json 与 meta.currentGen=0', async () => {
+      const { sessionId, meta } = await setupSession(store);
+      expect(meta.currentGen).toBe(0);
+      expect(await store.getCurrentGen(sessionId)).toBe(0);
+      expect(await store.listGenerations(sessionId)).toEqual([0]);
+      expect(await store.loadGeneration(sessionId, 0)).toEqual([]);
+    });
+
+    it('saveTurn 追加到最新分代文件（turn_0.json）', async () => {
+      const { sessionId } = await setupSession(store);
+      await saveTurn(store, sessionId, 'Q1', 'A1');
+      await saveTurn(store, sessionId, 'Q2', 'A2');
+
+      expect(await store.loadGeneration(sessionId, 0)).toHaveLength(2);
+      expect(await store.listGenerations(sessionId)).toEqual([0]);
+    });
+
+    it('newGeneration 开启新分代：gen+1，写入摘要轮，后续 saveTurn 追加到新代', async () => {
+      const { sessionId } = await setupSession(store);
+      await saveTurn(store, sessionId, 'Q1', 'A1');
+
+      const gen = await store.newGeneration(sessionId, {
+        type: 'compact',
+        version: 2,
+        summary: '历史摘要',
+        messages: [{ role: 'user', content: '[Compacted Context Summary]\n历史摘要' }],
+        cost_rmb: 0,
+        created_at: new Date().toISOString(),
+      });
+      expect(gen).toBe(1);
+      expect(await store.getCurrentGen(sessionId)).toBe(1);
+      expect(await store.listGenerations(sessionId)).toEqual([0, 1]);
+      expect(await store.loadGeneration(sessionId, 1)).toHaveLength(1);
+      expect((await store.loadGeneration(sessionId, 1))[0].type).toBe('compact');
+
+      // compact 后的新轮次追加到新代
+      await saveTurn(store, sessionId, 'Q2', 'A2');
+      expect(await store.loadGeneration(sessionId, 1)).toHaveLength(2);
+      // 旧代不受影响
+      expect(await store.loadGeneration(sessionId, 0)).toHaveLength(1);
+    });
+
+    it('getSession 分代格式合并所有分代（含摘要轮）', async () => {
+      const { sessionId } = await setupSession(store);
+      await saveTurn(store, sessionId, 'Q1', 'A1');
+      await store.newGeneration(sessionId, {
+        type: 'compact',
+        version: 2,
+        summary: '摘要',
+        messages: [{ role: 'user', content: '[Compacted Context Summary]\n摘要' }],
+        cost_rmb: 0,
+        created_at: new Date().toISOString(),
+      });
+      await saveTurn(store, sessionId, 'Q2', 'A2');
+
+      const session = await store.getSession(sessionId);
+      expect(session).not.toBeNull();
+      expect(session!.turns).toHaveLength(3); // Q1 + 摘要轮 + Q2
+      expect(session!.allTurns).toHaveLength(3);
+      expect(session!.turns[1].type).toBe('compact');
+      expect(session!.meta.currentGen).toBe(1);
+      expect(session!.meta.turnCount).toBe(3);
+    });
+
+    it('updateLastTurn 分代格式更新最新代的最后一条', async () => {
+      const { sessionId } = await setupSession(store);
+      await saveTurn(store, sessionId, 'Q1', 'A1');
+      await saveTurn(store, sessionId, 'Q2', 'A2');
+
+      const updated = await store.updateLastTurn(sessionId, {
+        messages: [
+          { role: 'user', content: 'Q2' },
+          { role: 'assistant', content: 'A2-updated' },
+        ],
+      });
+      expect(updated).not.toBeNull();
+      expect(turnAssistantContent(updated!)).toBe('A2-updated');
+      expect(await store.loadGeneration(sessionId, 0)).toHaveLength(2);
+    });
+
+    it('兼容旧 turns.json 格式：无 turn_0.json 时按旧逻辑读写', async () => {
+      // 手工构造旧格式会话（meta 无 currentGen + turns.json）
+      const { writeFile: write } = await import('node:fs/promises');
+      const { sessionId } = await setupSession(store);
+      const meta = await store.getSession(sessionId);
+      const dir = join(testDir, sessionId);
+      // 删除新格式文件，改造成旧格式
+      const { rm: rmFile } = await import('node:fs/promises');
+      await rmFile(join(dir, 'turn_0.json'));
+      await write(
+        join(dir, 'meta.json'),
+        JSON.stringify({ ...meta!.meta, currentGen: undefined }) + '\n',
+      );
+      await write(
+        join(dir, 'turns.json'),
+        JSON.stringify([{
+          version: 2,
+          messages: [
+            { role: 'user', content: 'Q1' },
+            { role: 'assistant', content: 'A1' },
+          ],
+          cost_rmb: 0.001,
+          created_at: new Date().toISOString(),
+        }]),
+      );
+
+      // 旧格式：getTurns 读 turns.json
+      expect(await store.getTurns(sessionId)).toHaveLength(1);
+      const session = await store.getSession(sessionId);
+      expect(session!.turns).toHaveLength(1);
+      expect(session!.meta.currentGen).toBeUndefined();
+
+      // 旧格式会话首次 newGeneration：迁移现有 turns 为 gen 0，再开 gen 1
+      const gen = await store.newGeneration(sessionId, {
+        type: 'compact',
+        version: 2,
+        summary: '摘要',
+        messages: [{ role: 'user', content: '[Compacted Context Summary]\n摘要' }],
+        cost_rmb: 0,
+        created_at: new Date().toISOString(),
+      });
+      expect(gen).toBe(1);
+      expect(await store.listGenerations(sessionId)).toEqual([0, 1]);
+      expect(await store.loadGeneration(sessionId, 0)).toHaveLength(1); // 迁移的旧轮次
+    });
+  });
 });

@@ -88,6 +88,24 @@ export class ConversationView {
 			const turn = turns[ti];
 			if (ti > 0) lines.push('');
 
+			// compact 摘要轮：渲染为折叠标记（不渲染重注入 user 消息）
+			if (turn.type === 'compact') {
+				const summary = turn.summary
+					?? turnUserContent(turn).replace(/^\[Compacted Context Summary\]\s*/, '');
+				const label = dim('📦 [Compact] 已压缩历史上下文');
+				lines.push(label);
+				for (const line of wrapText(summary, termWidth - 2)) {
+					lines.push(dim('  ') + dim(line));
+				}
+				const restoreCount = (turn.messages ?? []).filter(
+					(m) => m.role === 'user' && m.content?.startsWith('[Compact File Restore Block]'),
+				).length;
+				if (restoreCount > 0) {
+					lines.push(dim(`  (含 ${restoreCount} 条文件重注入，原始轮次见磁盘分代文件)`));
+				}
+				continue;
+			}
+
 			// 用户消息（绿色）（v2：顶层无 user，走 turn-utils 推导）
 			const userLabel = green('[You] ');
 			const userLabelWidth = strDisplayWidth('[You] ');

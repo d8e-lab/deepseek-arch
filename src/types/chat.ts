@@ -31,6 +31,10 @@ export interface Message {
 
 /** 一轮对话（v2：messages 恒存，唯一事实源） */
 export interface TurnRecord {
+	/** 轮次类型：'compact' = 摘要轮（compact 产生的上下文压缩标记，非真实对话轮次） */
+	type?: 'compact';
+	/** 摘要文本（type='compact' 时，供 TUI 显示与调试） */
+	summary?: string;
 	/**
 	 * schema 版本（v2 起写入）。
 	 * v2：messages 恒存；顶层不再持久化 turn/user/assistant

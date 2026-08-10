@@ -53,7 +53,7 @@ const MAX_INPUT_ROWS = 5;
 const AVAILABLE_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
 /** 可用命令列表 */
-const AVAILABLE_COMMANDS = ['/model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/exit'];
+const AVAILABLE_COMMANDS = ['/model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/compact', '/exit'];
 
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
@@ -494,6 +494,10 @@ export class TuiApp {
 			return this.showSubagentDetail(arg);
 		}
 
+		if (content === '/compact') {
+			return await this.compactSession();
+		}
+
 		if (content === '/exit') {
 			process.stdout.write(green('Goodbye!') + '\r\n');
 			this.running = false;
@@ -534,6 +538,7 @@ export class TuiApp {
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
 			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
 			['/subagent_cancel','Cancel subagent(s) via interactive list'],
+			['/compact',       'Compact session context (summarize + restore read files)'],
 			['/help',          'Show this command list'],
 			['/context',       'Show session context & token usage'],
 			['/exit  |  Ctrl+C', 'Exit the session'],
@@ -605,6 +610,31 @@ export class TuiApp {
 			process.stdout.write(`  Total cost:  ¥${meta.totalCost.toFixed(4)}\r\n`);
 		}
 
+		return true;
+	}
+
+	/** /compact — 压缩会话上下文（摘要 + 文件重注入，开启新分代） */
+	private async compactSession(): Promise<boolean> {
+		process.stdout.write(dim('Compacting session context...') + '\r\n');
+		try {
+			const result = await this.sessionMgr.compactContext();
+			process.stdout.write(
+				green(`[Compacted] → 新分代 #${result.gen}，压缩 ${result.compressedTurns} 轮，重注入 ${result.restoredFiles} 个文件 (${result.restoredTokens} tokens)`) + '\r\n',
+			);
+			if (result.summaryPreview) {
+				process.stdout.write(dim(`  summary: ${result.summaryPreview}`) + '\r\n');
+			}
+			// 刷新对话显示（含摘要轮折叠块）
+			const session = this.sessionMgr.getSession();
+			if (session) {
+				this.printConversation(session.turns);
+				this.printSeparator();
+			}
+		} catch (err) {
+			process.stdout.write(
+				red(`[Compact failed] ${err instanceof Error ? err.message : String(err)}`) + '\r\n',
+			);
+		}
 		return true;
 	}
 
