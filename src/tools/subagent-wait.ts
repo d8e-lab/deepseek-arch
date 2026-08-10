@@ -11,20 +11,25 @@ import type { Tool, ToolResult } from './types.js';
 export const waitTool: Tool = {
 	name: 'wait',
 	description:
-		'Wait for a specific subagent to complete and retrieve its result. ' +
-		'If the subagent is still running, this blocks until it finishes. ' +
-		'If the subagent has already completed but the result hasn\'t been retrieved yet, returns immediately. ' +
+		'Wait for one or more subagents to complete and retrieve their results. ' +
+		'Pass a single name to wait for one subagent; an array of names to wait for all of them; ' +
+		'or omit subagent_name to wait for every pending subagent. ' +
+		'If a subagent is still running, this blocks until it finishes. ' +
+		'If it has already completed but the result hasn\'t been retrieved yet, returns immediately. ' +
 		'Use list_subagents to check which subagents are running/completed before calling wait. ' +
 		'Each subagent result can only be retrieved once.',
 	parameters: {
 		type: 'object',
 		properties: {
 			subagent_name: {
-				type: 'string',
-				description: 'Name of the subagent to wait for (from subagent_spawn).',
+				type: ['string', 'array'],
+				items: { type: 'string' },
+				description:
+					'Name(s) of subagent(s) to wait for (from subagent_spawn). ' +
+					'Omit to wait for every pending subagent.',
 			},
 		},
-		required: ['subagent_name'],
+		required: [],
 	},
 	requiresConfirm: false,
 

@@ -139,6 +139,27 @@ function spawnCall(name: string, task: string): { id: string; function: { name: 
 	};
 }
 
+function waitCall(name: string): { id: string; function: { name: string; arguments: string } } {
+	return {
+		id: `call-wait-${name}`,
+		function: { name: 'wait', arguments: JSON.stringify({ subagent_name: name }) },
+	};
+}
+
+function waitCallMany(names: string[]): { id: string; function: { name: string; arguments: string } } {
+	return {
+		id: 'call-wait-many',
+		function: { name: 'wait', arguments: JSON.stringify({ subagent_name: names }) },
+	};
+}
+
+function waitCallAll(): { id: string; function: { name: string; arguments: string } } {
+	return {
+		id: 'call-wait-all',
+		function: { name: 'wait', arguments: '{}' },
+	};
+}
+
 // ─── runSubagentLoop 单元测试 ───────────────────────
 
 describe('runSubagentLoop', () => {
@@ -365,5 +386,188 @@ describe('SessionManager subagent 集成', () => {
 		expect(subOrder).toContain('B:start');
 		// A 超时结束（cancelled），B 正常完成
 		expect(mgr.getSubagentStore().get('B')?.status).toBe('completed');
+	});
+
+	// ─── wait 多参数模式 ────────────────────────────
+
+	/** 从事件流中提取 wait 工具的 tool_result 事件 */
+	function findWaitEvent(events: import('../../src/types/index.js').StreamEvent[]) {
+		return events.find((e) => e.type === 'tool_result' && e.toolName === 'wait');
+	}
+
+	it('wait(单参数)：取回单个已完成子代理结果（回归兼容）', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task')] },
+				{ content: '', toolCalls: [waitCall('sub1')] },
+				{ content: 'done' },
+			],
+			() => ({ content: 'sub1 result' }),
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('wait 单参数测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('spawn 并 wait', (e) => events.push(e));
+
+		const ev = findWaitEvent(events);
+		expect(ev).toBeDefined();
+		expect(ev!.toolResult).toContain('=== sub1 ===');
+		expect(ev!.toolResult).toContain('sub1 result');
+		expect(ev!.error).toBeUndefined();
+	});
+
+	it('wait(数组)：等全部指定子代理完成后才返回，结果汇总', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('a', 'task a'), spawnCall('b', 'task b')] },
+				{ content: '', toolCalls: [waitCallMany(['a', 'b'])] },
+				{ content: 'done' },
+			],
+			(messages) => {
+				const task = messages[1]?.content ?? '';
+				// a 立即完成；b 挂起 200ms（超时后 cancelled）→ 验证 wait 等 b 完成才返回
+				if (task.includes('task b')) return 'hang';
+				return { content: 'A done' };
+			},
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('wait 数组测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('spawn two and wait both', (e) => events.push(e));
+
+		const waitIdx = events.findIndex((e) => e.type === 'tool_result' && e.toolName === 'wait');
+		const bFinishedIdx = events.findIndex(
+			(e) => e.type === 'subagent_finished' && e.subagentName === 'b',
+		);
+		// wait 的 tool_result 必须排在 b 完成事件之后 → 证明等全部结束才返回
+		expect(bFinishedIdx).toBeGreaterThan(-1);
+		expect(waitIdx).toBeGreaterThan(bFinishedIdx);
+
+		const ev = findWaitEvent(events);
+		expect(ev!.toolResult).toContain('=== a ===');
+		expect(ev!.toolResult).toContain('A done');
+		expect(ev!.toolResult).toContain('=== b ===');
+		// b 被挂起超时 → cancelled，wait 带 subagent_failed 标记
+		expect(ev!.error).toBe('subagent_failed');
+	});
+
+	it('wait(无参数)：等待所有未取回的子代理', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('a', 'task a'), spawnCall('b', 'task b')] },
+				{ content: '', toolCalls: [waitCallAll()] },
+				{ content: 'done' },
+			],
+			(messages) => {
+				const task = messages[1]?.content ?? '';
+				return { content: task.includes('task a') ? 'A done' : 'B done' };
+			},
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('wait 无参数测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('spawn two and wait all', (e) => events.push(e));
+
+		const ev = findWaitEvent(events);
+		expect(ev!.toolResult).toContain('=== a ===');
+		expect(ev!.toolResult).toContain('=== b ===');
+		expect(ev!.toolResult).toContain('A done');
+		expect(ev!.toolResult).toContain('B done');
+		expect(ev!.error).toBeUndefined();
+	});
+
+	it('wait(不存在的名字)：返回 not_found 错误', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [waitCall('nope')] },
+				{ content: 'done' },
+			],
+			() => ({ content: 'unused' }),
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('wait not_found 测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('wait missing', (e) => events.push(e));
+
+		const ev = findWaitEvent(events);
+		expect(ev!.error).toBe('not_found');
+		expect(ev!.toolResult).toContain('nope');
+	});
+
+	it('wait(已取走的子代理)：返回 already_retrieved 错误', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task')] },
+				{ content: '', toolCalls: [waitCall('sub1')] },
+				{ content: '', toolCalls: [waitCall('sub1')] },
+				{ content: 'done' },
+			],
+			() => ({ content: 'sub1 result' }),
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('wait already_retrieved 测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('wait twice', (e) => events.push(e));
+
+		const waitEvents = events.filter((e) => e.type === 'tool_result' && e.toolName === 'wait');
+		expect(waitEvents).toHaveLength(2);
+		expect(waitEvents[0].error).toBeUndefined(); // 第一次取走成功
+		expect(waitEvents[1].error).toBe('already_retrieved');
+	});
+
+	it('wait(空数组)：返回 invalid_params 错误', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [waitCallMany([])] },
+				{ content: 'done' },
+			],
+			() => ({ content: 'unused' }),
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('wait 空数组测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('wait empty array', (e) => events.push(e));
+
+		const ev = findWaitEvent(events);
+		expect(ev!.error).toBe('invalid_params');
+		expect(ev!.toolResult).toContain('array is empty');
+	});
+
+	it('wait(无参数) 且无 pending 子代理：返回提示', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [waitCallAll()] },
+				{ content: 'done' },
+			],
+			() => ({ content: 'unused' }),
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('wait 无 pending 测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('wait no pending', (e) => events.push(e));
+
+		const ev = findWaitEvent(events);
+		expect(ev!.toolResult).toContain('No pending subagents to wait for');
 	});
 });

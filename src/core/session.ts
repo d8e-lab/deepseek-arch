@@ -567,35 +567,68 @@ export class SessionManager {
 				}
 
 				case 'wait': {
-					const name = (args.subagent_name as string) || '';
-					if (!name) {
-						pushResult('Error: "subagent_name" is required.', 'invalid_params');
+					const raw = args.subagent_name;
+					let names: string[];
+					if (raw === undefined || raw === null || raw === '') {
+						// 无参数：等待所有尚未取回的 subagent
+						names = [...this.pendingSubagents.keys()].filter(
+							(n) => !this.retrievedSubagents.has(n),
+						);
+						if (names.length === 0) {
+							pushResult('No pending subagents to wait for. Use list_subagents to check.');
+							return true;
+						}
+					} else if (typeof raw === 'string') {
+						names = [raw];
+					} else if (Array.isArray(raw)) {
+						names = raw.map((n) => String(n)).filter(Boolean);
+						if (names.length === 0) {
+							pushResult('Error: "subagent_name" array is empty.', 'invalid_params');
+							return true;
+						}
+					} else {
+						pushResult(
+							'Error: "subagent_name" must be a string, an array of strings, or omitted.',
+							'invalid_params',
+						);
 						return true;
 					}
-					const sub = this.pendingSubagents.get(name);
-					if (!sub) {
+
+					const missing = names.filter((n) => !this.pendingSubagents.has(n));
+					if (missing.length > 0) {
 						pushResult(
-							`Subagent "${name}" not found. It may have already been retrieved or never existed. Use list_subagents to check.`,
+							`Subagent(s) not found: ${missing.join(', ')}. Use list_subagents to check.`,
 							'not_found',
 						);
 						return true;
 					}
-					if (this.retrievedSubagents.has(name)) {
+					const already = names.filter((n) => this.retrievedSubagents.has(n));
+					if (already.length > 0) {
 						pushResult(
-							`Subagent "${name}" result was already retrieved and cannot be retrieved again.`,
+							`Subagent(s) result already retrieved: ${already.join(', ')}. Each result can only be retrieved once.`,
 							'already_retrieved',
 						);
 						return true;
 					}
 
+					// 等待所有指定 subagent 完成（并行等待，全部结束后才继续）
 					const startMs = Date.now();
-					const result = await sub.promise;
+					const results = await Promise.all(
+						names.map((n) => this.pendingSubagents.get(n)!.promise),
+					);
 					const elapsed = Date.now() - startMs;
+					for (const n of names) this.retrievedSubagents.add(n);
 
-					this.retrievedSubagents.add(name);
+					const anyFailed = names.some((n) => {
+						const s = this.pendingSubagents.get(n);
+						return s?.status === 'failed' || s?.status === 'cancelled';
+					});
+					const body = names
+						.map((n, i) => `=== ${n} ===\n${results[i]}`)
+						.join('\n\n');
 					pushResult(
-						`Subagent "${name}" result:\n\n${result}`,
-						sub.status === 'failed' || sub.status === 'cancelled' ? 'subagent_failed' : undefined,
+						`Subagent result(s):\n\n${body}`,
+						anyFailed ? 'subagent_failed' : undefined,
 						elapsed,
 					);
 					return true;
