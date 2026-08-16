@@ -140,6 +140,7 @@ when_to_use: 用户自定义发版流程时
 		expect(names).toContain('custom'); // 用户自定义
 		expect(names).toContain('plan'); // 项目自带
 		expect(names).toContain('release');
+		expect(names).toContain('research'); // fork 示例
 	});
 
 	it('user 目录优先（findSkill 返回用户版）', async () => {
@@ -156,6 +157,10 @@ when_to_use: 用户自定义发版流程时
 		expect(plan).toBeDefined();
 		expect(plan!.whenToUse).toBeDefined();
 		expect(plan!.context).toBe('inline');
+		// fork 示例：context 解析为 fork
+		const research = skills.find((s) => s.name === 'research');
+		expect(research).toBeDefined();
+		expect(research!.context).toBe('fork');
 	});
 
 	it('不存在的目录返回空（不崩溃）', async () => {
