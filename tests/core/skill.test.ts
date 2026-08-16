@@ -21,6 +21,10 @@ import {
 	findSkill,
 	buildSkillListing,
 	getSkillContent,
+	activateSkillsForPaths,
+	getConditionalSkillCount,
+	globToRegExp,
+	extractPathsFromToolCall,
 	SKILL_LISTING_BUDGET,
 } from '../../src/core/skill.js';
 
@@ -239,6 +243,81 @@ describe('buildSkillListing', () => {
 		const skills = Array.from({ length: 20 }, (_, i) => mk(`s${i}`, 'd'.repeat(100)));
 		const listing = buildSkillListing(skills);
 		expect(listing.length).toBeLessThanOrEqual(SKILL_LISTING_BUDGET);
+	});
+});
+
+// ─── 条件激活（paths frontmatter）──────────────────
+
+describe('条件激活（paths）', () => {
+	let tmpDir: string;
+	beforeAll(async () => {
+		tmpDir = await mkdtemp(join(tmpdir(), 'skill-cond-'));
+		await writeFile(
+			join(tmpDir, 'cond.skill.md'),
+			`---
+name: cond
+description: 条件技能
+paths: docs/**, CHANGELOG.md
+---
+条件正文`,
+			'utf-8',
+		);
+	});
+	afterAll(async () => {
+		await rm(tmpDir, { recursive: true, force: true });
+		clearSkillCache();
+	});
+
+	it('带 paths 的 skill 不进入初始加载结果', async () => {
+		clearSkillCache();
+		const skills = await loadSkillsFromDirs(tmpDir, '/nonexistent');
+		expect(skills.find((s) => s.name === 'cond')).toBeUndefined();
+		expect(getConditionalSkillCount()).toBe(1);
+	});
+
+	it('触碰匹配文件后激活并进入可用集', async () => {
+		clearSkillCache();
+		await loadSkillsFromDirs(tmpDir, '/nonexistent');
+		const activated = activateSkillsForPaths(['docs/guide.md'], '/proj');
+		expect(activated).toHaveLength(1);
+		expect(activated[0]!.name).toBe('cond');
+		// 激活后重新加载包含该 skill
+		const skills = await loadSkillsFromDirs(tmpDir, '/nonexistent');
+		expect(skills.find((s) => s.name === 'cond')).toBeDefined();
+		expect(getConditionalSkillCount()).toBe(0);
+	});
+
+	it('不匹配路径不激活', async () => {
+		clearSkillCache();
+		await loadSkillsFromDirs(tmpDir, '/nonexistent');
+		const activated = activateSkillsForPaths(['src/main.ts'], '/proj');
+		expect(activated).toHaveLength(0);
+		expect(getConditionalSkillCount()).toBe(1);
+	});
+
+	it('绝对路径相对化后匹配', async () => {
+		clearSkillCache();
+		await loadSkillsFromDirs(tmpDir, '/nonexistent');
+		const activated = activateSkillsForPaths(['/proj/docs/a/b.md'], '/proj');
+		expect(activated).toHaveLength(1);
+	});
+
+	it('glob 匹配规则', () => {
+		expect(globToRegExp('docs/**').test('docs/a/b/c.md')).toBe(true);
+		expect(globToRegExp('docs/**').test('docs/x.md')).toBe(true);
+		expect(globToRegExp('docs/**').test('src/x.md')).toBe(false);
+		expect(globToRegExp('*.md').test('README.md')).toBe(true);
+		expect(globToRegExp('*.md').test('docs/README.md')).toBe(false);
+		expect(globToRegExp('src/*.{ts,tsx}').test('src/main.ts')).toBe(true);
+		expect(globToRegExp('src/*.{ts,tsx}').test('src/main.js')).toBe(false);
+		expect(globToRegExp('CHANGELOG.md').test('CHANGELOG.md')).toBe(true);
+	});
+
+	it('extractPathsFromToolCall 提取路径参数', () => {
+		expect(extractPathsFromToolCall('read_file', { path: 'src/a.ts' })).toEqual(['src/a.ts']);
+		expect(extractPathsFromToolCall('edit_file', { path: 'x.ts', content: 'y' })).toEqual(['x.ts']);
+		expect(extractPathsFromToolCall('shell', { command: 'ls' })).toEqual([]);
+		expect(extractPathsFromToolCall('unknown_tool', { path: 'a.ts' })).toEqual([]);
 	});
 });
 

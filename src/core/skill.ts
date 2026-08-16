@@ -1,5 +1,5 @@
 /**
- * Skill 核心引擎 — 加载、解析、发现、查找
+ * Skill 核心引擎 — 加载、解析、发现、查找、条件激活
  *
  * 职责：
  *   1. 解析 skill 文件（YAML frontmatter + Markdown 正文）
@@ -7,18 +7,20 @@
  *   3. 构建模型可见的 skill listing（预算化：总预算 + 单条截断）
  *   4. 按名称/别名查找 skill
  *   5. 生成调用时的正文（参数替换 $ARGUMENTS / ${SKILL_DIR}）
+ *   6. 条件 skill（paths frontmatter）：触碰匹配文件后激活并注入可用集
  *
  * 文件格式约定：skill/<name>.skill.md
  *   frontmatter 字段（均为可选，description 缺失时取正文首行）：
  *     name / description / when_to_use / aliases / argument-hint /
- *     context(inline|fork) / allowed-tools / model / requires-confirm / version
+ *     context(inline|fork) / allowed-tools / model / requires-confirm /
+ *     paths / version
  *
  * 无第三方 YAML 依赖：frontmatter 为简单键值，手写轻量解析
  * （含特殊字符引号 fallback，参考 Claude Code 的 quoteProblematicValues 思路）。
  */
 
 import { readFile, readdir, realpath } from 'node:fs/promises';
-import { dirname, resolve, basename } from 'node:path';
+import { dirname, resolve, basename, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { DEFAULT_CONFIG_DIR } from './config.js';
@@ -28,7 +30,7 @@ import { DEFAULT_CONFIG_DIR } from './config.js';
 /** skill 来源：用户配置目录 / 项目 skill/ 目录 */
 export type SkillSource = 'user' | 'project';
 
-/** 执行模型：inline = 内容展开进当前对话；fork = 隔离子代理执行（第二期） */
+/** 执行模型：inline = 内容展开进当前对话；fork = 隔离子代理执行 */
 export type SkillContext = 'inline' | 'fork';
 
 /** 解析后的 skill 元信息 */
@@ -47,12 +49,17 @@ export interface Skill {
 	allowedTools?: string[];
 	/** 模型覆盖（预留） */
 	model?: string;
-	/** 调用前是否需要用户确认（预留，第二期） */
+	/** 调用前是否需要用户确认 */
 	requiresConfirm?: boolean;
 	/** 参数提示（UI 用） */
 	argumentHint?: string;
 	/** 版本号 */
 	version?: string;
+	/**
+	 * 条件激活 glob（gitignore 风格，相对项目根）。
+	 * 设置了 paths 的 skill 启动时不暴露，模型触碰匹配文件后才激活。
+	 */
+	paths?: string[];
 	/** 文件真实路径 */
 	skillPath: string;
 	/** 来源 */
@@ -78,7 +85,7 @@ export const MAX_SKILL_DESC_CHARS = 200;
 export const FRONTMATTER_REGEX = /^---\s*\n([\s\S]*?)---\s*\n?/;
 
 /** 解析为数组的字段（逗号分隔 / [a, b] 形式） */
-const ARRAY_FIELDS = new Set(['aliases', 'allowed-tools']);
+const ARRAY_FIELDS = new Set(['aliases', 'allowed-tools', 'paths']);
 
 /** 值含这些字符时视为"不安全"，需要引号保护（glob 等场景） */
 const SPECIAL_CHARS = /[{}\[\]*#!|>%@`]|: /;
@@ -209,6 +216,7 @@ export function parseSkillFrontmatter(
 			allowedTools: Array.isArray(raw['allowed-tools'])
 				? raw['allowed-tools']
 				: undefined,
+			paths: Array.isArray(raw.paths) ? raw.paths : undefined,
 			model:
 				typeof raw.model === 'string' && raw.model.trim()
 					? raw.model.trim()
@@ -291,11 +299,136 @@ async function dedupeSkills(skills: Skill[]): Promise<Skill[]> {
 	return [...seen.values()];
 }
 
+// ─── 条件 skill（paths frontmatter）────────────────
+
+/** 未激活的条件 skill（带 paths 且尚未匹配到文件） */
+const conditionalSkills = new Map<string, Skill>();
+/** 已激活的条件 skill 名（会话内保留，即使缓存被清除） */
+const activatedConditionalNames = new Set<string>();
+
+/**
+ * glob 模式 → 正则（gitignore 风格）：
+ *   `**` 后跟 `/` → 任意层级目录前缀（如 "docs/**" 匹配 docs 下任意深度）
+ *   `**`        → 任意字符（含斜杠）
+ *   `*`         → 任意非斜杠字符
+ *   `?`         → 单个非斜杠字符
+ *   `{a,b}`     → a 或 b
+ */
+export function globToRegExp(pattern: string): RegExp {
+	let re = '';
+	for (let i = 0; i < pattern.length; i++) {
+		const c = pattern[i]!;
+		if (c === '*') {
+			if (pattern[i + 1] === '*') {
+				if (pattern[i + 2] === '/') {
+					re += '(?:.*/)?';
+					i += 2;
+				} else {
+					re += '.*';
+					i += 1;
+				}
+			} else {
+				re += '[^/]*';
+			}
+		} else if (c === '?') {
+			re += '[^/]';
+		} else if (c === '{') {
+			const end = pattern.indexOf('}', i);
+			if (end > i) {
+				const options = pattern
+					.slice(i + 1, end)
+					.split(',')
+					.map((s) => s.trim());
+				re += `(?:${options.join('|')})`;
+				i = end;
+			} else {
+				re += '\\{';
+			}
+		} else {
+			re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+		}
+	}
+	return new RegExp(`^${re}$`);
+}
+
+/** 判断文件相对路径是否匹配任一 glob 模式 */
+function matchesAnyPattern(patterns: string[], relPath: string): boolean {
+	return patterns.some((p) => {
+		const normalized = p.replace(/\/+$/, '');
+		return globToRegExp(normalized).test(relPath);
+	});
+}
+
+/**
+ * 从工具调用参数提取触碰的文件路径（用于条件 skill 激活）。
+ * 已知文件工具的路径参数映射；未知工具返回空。
+ */
+const TOOL_PATH_PARAMS: Record<string, string[]> = {
+	read_file: ['path'],
+	write_file: ['path'],
+	edit_file: ['path'],
+	search_content: ['path'],
+	glob: ['pattern'],
+};
+
+export function extractPathsFromToolCall(
+	toolName: string,
+	args: Record<string, unknown>,
+): string[] {
+	const params = TOOL_PATH_PARAMS[toolName];
+	if (!params) return [];
+	const paths: string[] = [];
+	for (const key of params) {
+		const v = args[key];
+		if (typeof v === 'string' && v.trim()) paths.push(v.trim());
+	}
+	return paths;
+}
+
+/**
+ * 激活匹配路径的条件 skill。
+ * 相对路径（相对 cwd）与 skill.paths glob 做 gitignore 风格匹配。
+ * 返回本次新激活的 skill（含元信息，调用方可拼通知）；激活后立即对 loadSkills() 可见。
+ */
+export function activateSkillsForPaths(
+	filePaths: string[],
+	cwd: string,
+): Skill[] {
+	if (conditionalSkills.size === 0 || filePaths.length === 0) return [];
+
+	const activated: Skill[] = [];
+	for (const [name, skill] of conditionalSkills) {
+		if (activatedConditionalNames.has(name)) continue;
+		const relPaths = filePaths.map((p) =>
+			p.startsWith('/') ? relative(cwd, p) : p,
+		);
+		const hit = relPaths.some(
+			(rp) => rp && !rp.startsWith('..') && matchesAnyPattern(skill.paths ?? [], rp),
+		);
+		if (hit) {
+			activatedConditionalNames.add(name);
+			conditionalSkills.delete(name);
+			// 让已 memoize 的 loadSkills 结果立即包含新 skill
+			skillsCachePromise =
+				skillsCachePromise?.then((prev) => [...prev, skill]) ??
+				Promise.resolve([skill]);
+			activated.push(skill);
+		}
+	}
+	return activated;
+}
+
+/** 未激活的条件 skill 数量（测试/调试用） */
+export function getConditionalSkillCount(): number {
+	return conditionalSkills.size;
+}
+
 let skillsCachePromise: Promise<Skill[]> | null = null;
 
 /**
  * 从指定目录加载 skill（可注入目录，供测试与多环境使用）。
  * userDir（优先）→ projectDir，realpath 去重。
+ * 条件 skill（带 paths 且未激活）不返回，存入 conditionalSkills。
  */
 export async function loadSkillsFromDirs(
 	userDir: string,
@@ -305,7 +438,14 @@ export async function loadSkillsFromDirs(
 		loadSkillsFromDir(userDir, 'user'),
 		loadSkillsFromDir(projectDir, 'project'),
 	]);
-	return dedupeSkills([...userSkills, ...projectSkills]);
+	const all = await dedupeSkills([...userSkills, ...projectSkills]);
+	return all.filter((s) => {
+		if (s.paths && s.paths.length > 0 && !activatedConditionalNames.has(s.name)) {
+			conditionalSkills.set(s.name, s);
+			return false;
+		}
+		return true;
+	});
 }
 
 /**
@@ -322,6 +462,8 @@ export function loadSkills(): Promise<Skill[]> {
 /** 清空 skill 缓存（测试与热重载用） */
 export function clearSkillCache(): void {
 	skillsCachePromise = null;
+	conditionalSkills.clear();
+	activatedConditionalNames.clear();
 }
 
 // ─── 查找 ──────────────────────────────────────────

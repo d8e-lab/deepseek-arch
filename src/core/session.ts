@@ -37,6 +37,7 @@ import type { Tool, ToolCallRecord } from '../tools/types.js';
 import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
 import { runSubagentLoop, SUBAGENT_CANCELLED } from './subagent.js';
+import { activateSkillsForPaths, extractPathsFromToolCall } from './skill.js';
 import { SubagentStore } from './subagent-store.js';
 import {
 	MAX_RESTORE_FILES,
@@ -967,6 +968,28 @@ export class SessionManager {
 							);
 							toolResult = r.content;
 							toolError = r.error;
+
+							// 条件 skill 激活：文件工具触碰匹配路径后，激活并通知模型
+							if (!toolError) {
+								const touched = extractPathsFromToolCall(tc.function.name, args);
+								if (touched.length > 0) {
+									const cwd = process.env.DEEPSEEK_ARCH_SESSION_CWD ?? process.cwd();
+									const activated = activateSkillsForPaths(touched, cwd);
+									if (activated.length > 0) {
+										const lines = activated.map(
+											(s) =>
+												`- ${s.name}: ${s.description}${s.whenToUse ? ` - when to use: ${s.whenToUse}` : ''}`,
+										);
+										agentMessages.push({
+											role: 'user',
+											content:
+												`<system-reminder>\nNew skill(s) now available — invoke with the "skill" tool:\n` +
+												lines.join('\n') +
+												'\n</system-reminder>',
+										});
+									}
+								}
+							}
 						} catch (err: unknown) {
 							if (err instanceof Error && err.name === 'AbortError') {
 								// 用户 Ctrl+C 中断工具执行，与拒绝对齐：设 userDenied，走同样的 skip+break 路径
