@@ -13,7 +13,7 @@
  *   const apiKey = cfg.get("providers.deepseek.api_key");
  */
 
-import { readFile, writeFile, mkdir, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, access, readdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -64,32 +64,45 @@ const DEFAULT_PRICING: PricingConfig = {
 };
 
 /**
- * 从项目根 `skill/plan.skill.md` 复制到配置目录下。
+ * 从项目根 `skill/` 目录复制全部 skill 文件到配置目录。
  * 定位方式与 readDefaultSystemPrompt 一致。
- * 文件已存在时跳过（用户可能自定义了）。
+ * 已存在的文件跳过（用户可能自定义了）。
  */
-async function copyPlanSkill(configDir: string): Promise<void> {
+async function copySkillDir(configDir: string): Promise<void> {
 	const __filename = fileURLToPath(import.meta.url);
 	const __dirname = dirname(__filename);
 	const projectRoot = resolve(__dirname, '..', '..');
-	const srcPath = resolve(projectRoot, 'skill', 'plan.skill.md');
+	const srcDir = resolve(projectRoot, 'skill');
 
-	const destDir = resolve(configDir, 'skill');
-	const destPath = resolve(destDir, 'plan.skill.md');
-
+	let entries: string[];
 	try {
-		await access(destPath); // 已存在 → 跳过
-		return;
+		entries = await readdir(srcDir);
 	} catch {
-		// 不存在，继续
+		return; // 项目无 skill 目录（npm 包剥离了非代码文件）→ 静默跳过
 	}
 
+	const destDir = resolve(configDir, 'skill');
 	try {
-		const content = await readFile(srcPath, 'utf-8');
 		await mkdir(destDir, { recursive: true, mode: 0o700 });
-		await writeFile(destPath, content, { mode: 0o600 });
 	} catch {
-		// skill 文件不存在于项目目录（如 npm 包剥离了非代码文件）→ 静默跳过
+		return;
+	}
+
+	for (const entry of entries) {
+		if (!/\.skill\.md$/i.test(entry)) continue;
+		const destPath = resolve(destDir, entry);
+		try {
+			await access(destPath); // 已存在 → 跳过（用户自定义优先）
+			continue;
+		} catch {
+			// 不存在，继续
+		}
+		try {
+			const content = await readFile(resolve(srcDir, entry), 'utf-8');
+			await writeFile(destPath, content, { mode: 0o600 });
+		} catch {
+			// 单个文件复制失败不影响其他
+		}
 	}
 }
 
@@ -210,7 +223,7 @@ export class ConfigManager {
 				defaultSystemPrompts as unknown as Record<string, unknown>,
 			);
 			// 复制 skill 文件到配置目录（首次运行）
-			await copyPlanSkill(this.configDir);
+			await copySkillDir(this.configDir);
 			appConfig = DEFAULT_MAIN_CONFIG;
 		}
 

@@ -1,3 +1,12 @@
+---
+name: plan
+description: 编码任务规划与自检框架（复杂度评估 → 理解需求 → 定位调用链 → 决策拆解 → 计划自检 → 用户确认 → 执行 → 验证）
+when_to_use: 接到编码任务、需要拆解方案、用户要求先出方案或涉及多文件/核心接口变更时
+aliases: [planning, plan-task, planner]
+argument-hint: "[任务描述]"
+context: inline
+version: 1.0.0
+---
 # Plan Skill — 编码任务规划与自检框架
 
 > 每次接到编码任务时自动激活。

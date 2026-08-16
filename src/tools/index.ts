@@ -7,7 +7,7 @@
  *   3. 无需修改其他文件
  *
  * getAllTools() 支持过滤：主代理传 { includeSubagent: true }，
- * 子代理传 {} 或省略（不含 spawn/wait/list_subagents/plan/save_plan）。
+ * 子代理传 {} 或省略（不含 spawn/wait/list_subagents/skill/save_plan）。
  */
 
 import type { Tool } from './types.js';
@@ -17,7 +17,8 @@ export { readFileTool } from './read-file.js';
 export { searchContentTool } from './search-content.js';
 export { writeFileTool } from './write-file.js';
 export { editFileTool } from './edit-file.js';
-export { planOnTool } from './plan.js';
+export { skillTool, setSkillForkRunner } from './skill.js';
+export type { SkillForkRunner } from './skill.js';
 export { savePlanTool } from './save-plan.js';
 export { browserNavigateTool } from './browser-navigate.js';
 export { browserSnapshotTool } from './browser-snapshot.js';
@@ -47,7 +48,7 @@ import { readFileTool } from './read-file.js';
 import { searchContentTool } from './search-content.js';
 import { writeFileTool } from './write-file.js';
 import { editFileTool } from './edit-file.js';
-import { planOnTool } from './plan.js';
+import { skillTool } from './skill.js';
 import { savePlanTool } from './save-plan.js';
 import { browserNavigateTool } from './browser-navigate.js';
 import { browserSnapshotTool } from './browser-snapshot.js';
@@ -75,7 +76,7 @@ const ALL_TOOLS: Tool[] = [
 	searchContentTool,
 	writeFileTool,
 	editFileTool,
-	planOnTool,
+	skillTool,
 	savePlanTool,
 	browserNavigateTool,
 	browserSnapshotTool,

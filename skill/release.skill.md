@@ -1,3 +1,12 @@
+---
+name: release
+description: 版本发布全流程（前置检查 → 版本号更新 → 构建打包 → AUR 更新 → Git Tag → GitHub Release → 发布后验证）
+when_to_use: 用户要求发版、打 tag、发布 release、打包、生成 Release Notes 时
+aliases: [publish, release-version, tag]
+argument-hint: "[版本号，如 1.4.0]"
+context: inline
+version: 1.0.0
+---
 # Release Skill — 版本发布流程
 
 > 当用户要求"发版""打 tag""发布 release""打包"等操作时激活。

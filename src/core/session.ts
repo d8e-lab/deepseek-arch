@@ -60,7 +60,7 @@ You are running as a subagent delegated by a master agent. Key constraints:
 - You have access to shell, file, and browser tools.
 - Do NOT ask the user questions — there is no interactive user in this context.
 - Do NOT spawn sub-subagents, use wait, or list_subagents (these tools are not available to you).
-- Do NOT use plan_on or save_plan (not available).
+- Do NOT use the skill tool or save_plan (not available to subagents).
 - If you cannot complete the task, explain why and return what you have.
 - Keep output focused: the master agent needs your result, not a conversation.`;
 

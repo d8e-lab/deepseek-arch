@@ -200,7 +200,7 @@ describe('buildFileRestoreBlock', () => {
 });
 
 describe('extractSkills / extractPlanNames', () => {
-  it('extractSkills 提取 plan_on 调用并去重', () => {
+  it('extractSkills 提取旧版 plan_on 调用并去重', () => {
     const turns = [
       makeTurn('q1', 'a1', [{ name: 'plan_on', args: {} }], '2026-01-01T00:00:00Z'),
       makeTurn('q2', 'a2', [{ name: 'execute_command', args: {} }], '2026-01-02T00:00:00Z'),
@@ -208,6 +208,29 @@ describe('extractSkills / extractPlanNames', () => {
     const skills = extractSkills(turns);
     expect(skills).toHaveLength(1);
     expect(skills[0].name).toBe('plan.skill.md');
+  });
+
+  it('extractSkills 识别新版 skill 工具调用（读 arguments.skill）', () => {
+    const turns = [
+      makeTurn('q1', 'a1', [{ name: 'skill', args: { skill: 'plan' } }], '2026-01-01T00:00:00Z'),
+      makeTurn('q2', 'a2', [
+        { name: 'skill', args: { skill: 'release', args: '1.4.0' } },
+        { name: 'read_file', args: { path: 'x.ts' } },
+      ], '2026-01-02T00:00:00Z'),
+    ];
+    const skills = extractSkills(turns);
+    expect(skills).toHaveLength(2);
+    expect(skills[0].name).toBe('release.skill.md'); // 最近调用优先
+    expect(skills[1].name).toBe('plan.skill.md');
+  });
+
+  it('extractSkills 支持 skill 带前导斜杠与已带 .skill.md 后缀', () => {
+    const turns = [
+      makeTurn('q1', 'a1', [{ name: 'skill', args: { skill: '/plan' } }], '2026-01-01T00:00:00Z'),
+      makeTurn('q2', 'a2', [{ name: 'skill', args: { skill: 'release.skill.md' } }], '2026-01-02T00:00:00Z'),
+    ];
+    const skills = extractSkills(turns);
+    expect(skills.map((s) => s.name).sort()).toEqual(['plan.skill.md', 'release.skill.md']);
   });
 
   it('extractPlanNames 提取 save_plan 文件名（从新到旧去重）', () => {

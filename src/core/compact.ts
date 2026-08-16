@@ -16,6 +16,7 @@ import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { ModelProvider } from './model-provider.js';
 import type { TurnRecord, Message } from '../types/index.js';
+import type { ToolCallRecord } from '../tools/types.js';
 import { turnUserContent, turnAssistantContent } from '../utils/turn-utils.js';
 
 // ─── 常量（后续可配置化）───────────────────────────
@@ -38,10 +39,26 @@ export const PLAN_MAX_TOKENS = 5_000;
 /** 排除路径前缀：plan 文件 / memory 预留（后续 memory 机制接入） */
 const EXCLUDED_PREFIXES = ['.plans/', 'memory/', '.memory/'];
 
-/** 工具名 → skill 文件映射（后续 compact 工具可扩展） */
+/** 工具名 → skill 文件映射（旧版兼容：plan_on 工具） */
 const SKILL_MAP: Record<string, string> = {
 	plan_on: 'plan.skill.md',
 };
+
+/**
+ * 从工具调用记录解析 skill 文件名。
+ * 新机制：skill 工具调用，skill 名在 arguments.skill（可能带别名/前导斜杠）。
+ * 旧机制：硬编码工具名映射（SKILL_MAP 兼容）。
+ */
+function skillFileNameFromCall(tcr: ToolCallRecord): string | undefined {
+	if (tcr.name === 'skill') {
+		const arg = (tcr.arguments as Record<string, unknown> | undefined)?.skill;
+		if (typeof arg === 'string' && arg.trim()) {
+			const base = arg.trim().replace(/^\/+/, '');
+			return base.endsWith('.skill.md') ? base : `${base}.skill.md`;
+		}
+	}
+	return SKILL_MAP[tcr.name];
+}
 
 // ─── 工具函数 ──────────────────────────────────────
 
@@ -177,7 +194,7 @@ export function extractSkills(turns: TurnRecord[]): SkillRecord[] {
 	for (const turn of turns) {
 		const t = new Date(turn.created_at).getTime() || 0;
 		for (const tcr of turn.tool_calls ?? []) {
-			const name = SKILL_MAP[tcr.name];
+			const name = skillFileNameFromCall(tcr);
 			if (!name) continue;
 			const rec: SkillRecord = { name, lastCallMs: t, seq };
 			const prev = byName.get(name);

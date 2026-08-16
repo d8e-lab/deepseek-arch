@@ -17,10 +17,11 @@ import { SessionManager } from '../core/session.js';
 import { Storage } from '../core/storage.js';
 import { TuiApp } from './tui/app.js';
 import type { TuiConfig } from './tui/types.js';
-import { getAllTools, setSubagentRunner, setCaptureFn } from '../tools/index.js';
+import { getAllTools, setSubagentRunner, setCaptureFn, setSkillForkRunner } from '../tools/index.js';
 import type { SubagentRunner } from '../tools/index.js';
 import type { Tool } from '../tools/types.js';
 import { buildSystemPromptContext } from '../core/system-info.js';
+import { loadSkills, buildSkillListing } from '../core/skill.js';
 import { configureBrowser } from '../tools/browser-state.js';
 import { startApiMonitor } from '../core/api-monitor.js';
 
@@ -66,6 +67,9 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	// 注入子代理执行器（懒绑定，解决循环依赖）
 	setSubagentRunner((name, task) => sessionMgr.runSubagent(name, task));
 
+	// 注入 skill fork 执行器（frontmatter context: fork 的 skill 走子代理）
+	setSkillForkRunner((name, task) => sessionMgr.runSubagent(name, task));
+
 	// 设置子代理异步模式
 	sessionMgr.setSubagentAsync(asyncMode);
 
@@ -75,7 +79,16 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	if (sysContent) {
 		// 收集系统与环境信息，注入到 system prompt
 		const envContext = await buildSystemPromptContext();
-		sessionMgr.setSystemPrompt({ role: 'system', content: sysContent + '\n' + envContext });
+		// 注入 skill listing：让模型知道有哪些可用 skill（预算化，见 core/skill.ts）
+		const skills = await loadSkills();
+		const skillListing = buildSkillListing(skills);
+		const listingSection = skillListing
+			? `\n\n<skill_listing>\n${skillListing}\n</skill_listing>`
+			: '';
+		sessionMgr.setSystemPrompt({
+			role: 'system',
+			content: sysContent + '\n' + envContext + listingSection,
+		});
 	}
 
 	return sessionMgr;

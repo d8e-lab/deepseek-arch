@@ -29,7 +29,7 @@ Before writing any code, assess the task. The depth of your preparation should m
 2. **Assess complexity.** Judge whether the task is simple or complex:
    - Simple: a single-file fix, a well-defined addition with one clear approach, or a change where the scope is obvious. Proceed directly.
    - Complex: spans multiple files, involves architectural decisions, has multiple valid approaches with different trade-offs, or the requirements are ambiguous.
-     If you judge the task complex, call `plan_on` to activate the structured planning framework.
+     If you judge the task complex, call the `skill` tool with `{"skill": "plan"}` to activate the structured planning framework. Available skills and their trigger conditions are listed in the `<skill_listing>` section of this prompt.
 
 3. **For complex tasks — decompose first:**
    - Break the task into verifiable steps. Identify the dependency graph: which steps must complete before others can start, and which steps are independent and can be done in parallel. Order the list topologically — dependencies before dependents. Note parallelism explicitly (e.g., "Step 2 and Step 3 can run in parallel").
