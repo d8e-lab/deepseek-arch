@@ -35,7 +35,7 @@ function loadMasterTools(debug = false) {
 	return tools;
 }
 
-const PACKAGE_VERSION = "1.3.9";
+const PACKAGE_VERSION = "1.4.0";
 
 async function createTuiConfig(): Promise<TuiConfig> {
 	const cfg = await ConfigManager.getInstance().load();
