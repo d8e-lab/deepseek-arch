@@ -466,6 +466,94 @@ describe('SessionManager', () => {
       expect(toolMsgs[0].content).toContain('Error: Something went wrong');
     });
 
+    it('confirmRequiredFor 动态确认：用户拒绝时工具被拒（denied）', async () => {
+      // 工具：静态 requiresConfirm: false，但动态 confirmRequiredFor 返回 true
+      const dynamicConfirmTool: Tool = {
+        name: 'test_dynamic_confirm',
+        description: 'requires dynamic confirmation',
+        parameters: { type: 'object', properties: {}, required: [] },
+        requiresConfirm: false,
+        confirmRequiredFor: async () => true,
+        async execute(): Promise<ToolResult> {
+          return { content: 'should not execute' };
+        },
+      };
+
+      let round = 0;
+      async function* oneRoundStream(
+        _messages: Message[],
+        _options?: any,
+      ): AsyncGenerator<StreamChunk> {
+        if (round === 0) {
+          round++;
+          yield {
+            id: 'call-1',
+            object: 'chat.completion.chunk',
+            created: 123,
+            model: 'test',
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: 'call_dyn',
+                  type: 'function',
+                  function: { name: 'test_dynamic_confirm', arguments: '{}' },
+                }],
+              },
+              finish_reason: null,
+            }],
+          };
+          yield {
+            id: 'call-1',
+            object: 'chat.completion.chunk',
+            created: 123,
+            model: 'test',
+            choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          };
+        } else {
+          yield {
+            id: 'call-2',
+            object: 'chat.completion.chunk',
+            created: 123,
+            model: 'test',
+            choices: [{ index: 0, delta: { content: 'ok, not executing' }, finish_reason: null }],
+          };
+          yield {
+            id: 'call-2',
+            object: 'chat.completion.chunk',
+            created: 123,
+            model: 'test',
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+          };
+        }
+      }
+
+      const streamClient = { chatStream: oneRoundStream } as unknown as ModelProvider;
+      const mgr = new SessionManager(storage, streamClient, [dynamicConfirmTool]);
+      mgr.setSystemPrompt({ role: 'system', content: '你是一个测试助手。' });
+      await mgr.startNewSession('动态确认测试');
+
+      const events: StreamEvent[] = [];
+      // onConfirm 返回 false → 拒绝执行
+      const result = await mgr.sendMessageStream('请执行', (e) => events.push(e), undefined, async () => false);
+
+      // 验证：tool 被拒且未执行
+      expect(result!.tool_calls).toHaveLength(1);
+      expect(result!.tool_calls![0].error).toBe('denied');
+      expect(result!.tool_calls![0].result).toContain('rejected');
+
+      // 验证：tool_result 事件带 toolDenied
+      const deniedEvents = events.filter((e) => e.type === 'tool_result' && e.toolDenied === true);
+      expect(deniedEvents).toHaveLength(1);
+
+      // 验证：静态 requiresConfirm: false 的工具因动态确认被拦截 → execute 未执行
+      const executed = result!.tool_calls![0].result;
+      expect(executed).not.toContain('should not execute');
+    });
+
     it('C-1 回归：同一实例连续两轮工具调用后内存 turns 完整、上下文不丢失', async () => {
       // provider：call 1/3 返回 tool_calls（触发工具执行），call 2/4 返回文本（结束轮次）
       // 不使用真实工具——SessionManager 会记录 "Unknown tool" 结果，足以触发 turnSaved 路径

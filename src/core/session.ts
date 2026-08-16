@@ -929,10 +929,14 @@ export class SessionManager {
 						}
 					}
 
-					// 需要用户确认的工具：通过 onConfirm 回调确认（diff 已渲染在屏幕上）
+					// 需要用户确认的工具：静态 requiresConfirm 或动态 confirmRequiredFor 任一命中
+					// 通过 onConfirm 回调确认（diff 已渲染在屏幕上）
 					let denied = false;
 					const isStalePreview = previewText?.startsWith('[STALE]');
-					if (tool?.requiresConfirm && onConfirm && !isStalePreview) {
+					const dynamicConfirm = tool?.confirmRequiredFor
+						? await tool.confirmRequiredFor(args)
+						: false;
+					if ((tool?.requiresConfirm || dynamicConfirm) && onConfirm && !isStalePreview) {
 						const approved = await onConfirm(tc.function.name, args);
 						if (!approved) {
 							denied = true;

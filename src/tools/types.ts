@@ -37,6 +37,13 @@ export interface Tool {
 	/** 是否需要用户确认后才执行（shell 等危险操作需要） */
 	requiresConfirm: boolean;
 	/**
+	 * 按参数动态判断是否需要用户确认（可选）。
+	 * 与 requiresConfirm 为 OR 关系：任一为 true 即触发确认流程。
+	 * 设计用于参数敏感的确认（如按 skill 的 requires-confirm frontmatter），
+	 * 可返回 Promise（如需要异步加载元数据）。
+	 */
+	confirmRequiredFor?(params: Record<string, unknown>): boolean | Promise<boolean>;
+	/**
 	 * 生成执行前的 diff 预览（可选，如文件修改工具）。
 	 * 返回 null 表示无预览（session.ts 跳过预览步骤）。
 	 */

@@ -44,6 +44,15 @@ export const skillTool: Tool = {
 	},
 	requiresConfirm: false,
 
+	/** 按 skill frontmatter requires-confirm 动态决定是否需用户确认 */
+	async confirmRequiredFor(params): Promise<boolean> {
+		const skillName = typeof params.skill === 'string' ? params.skill.trim() : '';
+		if (!skillName) return false;
+		const skills = await loadSkills();
+		const skill = findSkill(skillName, skills);
+		return skill?.requiresConfirm === true;
+	},
+
 	async execute(params): Promise<ToolResult> {
 		const skillName = typeof params.skill === 'string' ? params.skill.trim() : '';
 		const args = typeof params.args === 'string' ? params.args : '';
