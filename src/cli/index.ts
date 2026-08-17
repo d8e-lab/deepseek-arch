@@ -26,8 +26,8 @@ import { configureBrowser } from '../tools/browser-state.js';
 import { startApiMonitor } from '../core/api-monitor.js';
 
 /** 获取主代理工具集（含 subagent_spawn/wait/list_subagents） */
-function loadMasterTools(debug = false) {
-	const tools = getAllTools({ includeSubagent: true });
+function loadMasterTools(debug = false, selfInteraction = false) {
+	const tools = getAllTools({ includeSubagent: true, selfInteraction });
 	if (!debug) {
 		// 非 debug 模式不暴露 TUI 调试工具
 		return tools.filter(t => t.name !== 'tui_capture' && t.name !== 'tui_render_preview');
@@ -112,8 +112,9 @@ program
 	.option('--cdp <url>', 'connect to host browser via CDP (e.g. http://127.0.0.1:9222)')
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
+	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; monitor?: string }) => {
+	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; monitor?: string }) => {
 		try {
 			const asyncMode = options.async ?? false;
 			const debug = options.debug ?? false;
@@ -134,7 +135,7 @@ program
 			}
 
 			// 主代理工具集（debug 模式才含 tui_capture / tui_render_preview）
-			const tools = loadMasterTools(debug);
+			const tools = loadMasterTools(debug, options.selfInteraction);
 
 			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl);
 
@@ -151,6 +152,9 @@ program
 				}
 				await sessionMgr.resumeSession(session.meta.id);
 				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo);
+				if (options.selfInteraction) {
+					app.setSelfInteraction(true);
+				}
 				if (debug) {
 					setCaptureFn(() => app.captureScreen());
 				}
@@ -160,6 +164,9 @@ program
 
 			// 新会话
 			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo);
+			if (options.selfInteraction) {
+				app.setSelfInteraction(true);
+			}
 			if (debug) {
 				setCaptureFn(() => app.captureScreen());
 			}
@@ -213,8 +220,9 @@ program
 	.option('--cdp <url>', 'connect to host browser via CDP')
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
+	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; monitor?: string }) => {
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; monitor?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
@@ -239,11 +247,14 @@ program
 				const tuiConfig = await createTuiConfig();
 				const asyncMode = options?.async ?? false;
 				const debug = options?.debug ?? false;
-				const tools = loadMasterTools(debug);
+				const tools = loadMasterTools(debug, options?.selfInteraction);
 				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl);
 				await sessionMgr.resumeSession(session.meta.id);
 
 				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance());
+				if (options?.selfInteraction) {
+					app.setSelfInteraction(true);
+				}
 				if (debug) {
 					setCaptureFn(() => app.captureScreen());
 				}
@@ -299,11 +310,14 @@ program
 
 			const tuiConfig = await createTuiConfig();
 			const debug = options?.debug ?? false;
-			const tools = loadMasterTools(debug);
+			const tools = loadMasterTools(debug, options?.selfInteraction);
 			const sessionMgr = await createSessionManager(tuiConfig, tools, undefined, monitorUrl);
 			await sessionMgr.resumeSession(session.meta.id);
 
 			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance());
+			if (options?.selfInteraction) {
+				app.setSelfInteraction(true);
+			}
 			if (debug) {
 				setCaptureFn(() => app.captureScreen());
 			}
