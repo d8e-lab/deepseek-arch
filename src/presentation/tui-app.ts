@@ -80,6 +80,8 @@ export class TuiApp {
 	private shellMode = false;
 	/** 自我交互模式（可启动子 TUI 实例） */
 	private selfInteraction = false;
+	/** mock 模式（使用 MockProvider） */
+	private mockMode = false;
 	/** 待发送的 shell 上下文（[shell_start]...[shell_end] 块） */
 	private pendingShellContext: string[] = [];
 	/** 上次渲染的可见行数（用于缩小时清理残留行） */
@@ -136,12 +138,13 @@ export class TuiApp {
 	/** 视图期间当前轮的输出行缓冲（流式静默用） */
 	private streamLines: string[] = [];
 
-	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean) {
+	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean, mock?: boolean) {
 		this.sessionMgr = sessionMgr;
 		this.config = config;
 		this.configMgr = configMgr ?? null;
 		this.tools = tools ?? [];
 		this.yolo = yolo ?? false;
+		this.mockMode = mock ?? false;
 		this.reviewModel = config.reviewModel;
 		this.asyncMode = sessionMgr.getSubagentAsync();
 		this.conversation = new ConversationView();
@@ -189,6 +192,7 @@ export class TuiApp {
 
 		const modeTags: string[] = [];
 		if (this.selfInteraction) modeTags.push('SELF-INTERACTION');
+		if (this.mockMode) modeTags.push('MOCK');
 		const modeStr = modeTags.length > 0 ? `  |  [${modeTags.join(', ')}]` : '';
 
 		process.stdout.write(

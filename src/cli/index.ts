@@ -13,6 +13,7 @@ import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { ConfigManager, DEFAULT_CONFIG_DIR } from '../core/config.js';
 import { ApiClient } from '../core/api.js';
+import { MockProvider } from '../core/mock-provider.js';
 import { SessionManager } from '../core/session.js';
 import { Storage } from '../core/storage.js';
 import { TuiApp } from '../presentation/tui-app.js';
@@ -56,13 +57,15 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	};
 }
 
-async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false, monitorUrl?: string): Promise<SessionManager> {
-	const apiClient = new ApiClient(config.baseUrl, config.apiKey, config.model, monitorUrl);
+async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false, monitorUrl?: string, mock = false): Promise<SessionManager> {
+	const provider = mock
+		? new MockProvider('mock-chat', 50)
+		: new ApiClient(config.baseUrl, config.apiKey, config.model, monitorUrl);
 	const cfg = ConfigManager.getInstance();
 	const sessionsDir = cfg.getSessionsDir();
 	const storage = new Storage(sessionsDir);
 
-	const sessionMgr = new SessionManager(storage, apiClient, tools);
+	const sessionMgr = new SessionManager(storage, provider, tools);
 
 	// 注入子代理执行器（懒绑定，解决循环依赖）
 	setSubagentRunner((name, task) => sessionMgr.runSubagent(name, task));
@@ -113,8 +116,9 @@ program
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
 	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
+	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; monitor?: string }) => {
+	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			const asyncMode = options.async ?? false;
 			const debug = options.debug ?? false;
@@ -137,7 +141,7 @@ program
 			// 主代理工具集（debug 模式才含 tui_capture / tui_render_preview）
 			const tools = loadMasterTools(debug, options.selfInteraction);
 
-			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl);
+			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options.mock);
 
 			if (options.resume) {
 				// 按 ID 或名称查找会话
@@ -151,7 +155,7 @@ program
 					process.exit(1);
 				}
 				await sessionMgr.resumeSession(session.meta.id);
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo);
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo, options.mock);
 				if (options.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -163,7 +167,7 @@ program
 			}
 
 			// 新会话
-			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo);
+			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo, options.mock);
 			if (options.selfInteraction) {
 				app.setSelfInteraction(true);
 			}
@@ -221,8 +225,9 @@ program
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
 	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
+	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; monitor?: string }) => {
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
@@ -248,10 +253,10 @@ program
 				const asyncMode = options?.async ?? false;
 				const debug = options?.debug ?? false;
 				const tools = loadMasterTools(debug, options?.selfInteraction);
-				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl);
+				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
 				await sessionMgr.resumeSession(session.meta.id);
 
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance());
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), undefined, options?.mock);
 				if (options?.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -311,10 +316,10 @@ program
 			const tuiConfig = await createTuiConfig();
 			const debug = options?.debug ?? false;
 			const tools = loadMasterTools(debug, options?.selfInteraction);
-			const sessionMgr = await createSessionManager(tuiConfig, tools, undefined, monitorUrl);
+			const sessionMgr = await createSessionManager(tuiConfig, tools, undefined, monitorUrl, options?.mock);
 			await sessionMgr.resumeSession(session.meta.id);
 
-			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance());
+			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), undefined, options?.mock);
 			if (options?.selfInteraction) {
 				app.setSelfInteraction(true);
 			}
