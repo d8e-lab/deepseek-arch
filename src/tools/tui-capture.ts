@@ -9,7 +9,7 @@
  */
 
 import type { Tool, ToolResult } from './types.js';
-import type { ScreenCapture } from '../cli/tui/types.js';
+import type { ScreenCapture } from '../render/types.js';
 
 /** TUI 屏幕捕获函数类型 */
 export type CaptureFn = () => ScreenCapture | null;

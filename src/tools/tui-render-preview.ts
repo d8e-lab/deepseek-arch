@@ -11,8 +11,8 @@
  */
 
 import type { Tool, ToolResult } from './types.js';
-import { ConversationView, wrapText } from '../cli/tui/conversation.js';
-import { stripAnsi, dim, green, strDisplayWidth } from '../cli/tui/renderer.js';
+import { ConversationView, wrapText } from '../render/conversation.js';
+import { stripAnsi, dim, green, strDisplayWidth } from '../render/ansi.js';
 import { readFile } from 'node:fs/promises';
 
 /** 尝试从路径读取 JSON 并解析为 turns 数组 */

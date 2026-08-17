@@ -9,7 +9,7 @@ import type { Tool, ToolResult } from './types.js';
 import { sessionManager } from './tui-session-manager.js';
 
 /** 将 ScreenCapture 格式化为文本报告（复用 tui-capture 的格式） */
-function formatCapture(cap: import('../cli/tui/types.js').ScreenCapture): string {
+function formatCapture(cap: import('../render/types.js').ScreenCapture): string {
 	const lines: string[] = [];
 
 	lines.push('=== TUI Session Screen Capture ===');

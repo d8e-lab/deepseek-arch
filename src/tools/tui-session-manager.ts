@@ -7,8 +7,8 @@
 
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
-import { stripAnsi } from '../cli/tui/renderer.js';
-import type { ScreenCapture, TurnCaptureInfo, ToolCallCaptureInfo, InputAreaCapture } from '../cli/tui/types.js';
+import { stripAnsi } from '../render/ansi.js';
+import type { ScreenCapture, TurnCaptureInfo, ToolCallCaptureInfo, InputAreaCapture } from '../render/types.js';
 
 // ─── 类型 ───────────────────────────────────────────
 
