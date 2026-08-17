@@ -11,11 +11,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { TuiApp } from '../../../src/cli/tui/app.js';
+import { TuiApp } from '../../../src/presentation/tui-app.js';
 import type { SessionManager } from '../../../src/core/session.js';
 import type { StreamEvent } from '../../../src/types/index.js';
-import type { TuiConfig } from '../../../src/cli/tui/types.js';
-import { GRAY_BG_START, stripAnsi } from '../../../src/cli/tui/renderer.js';
+import type { TuiConfig } from '../../../src/presentation/types.js';
+import { GRAY_BG_START, stripAnsi } from '../../../src/render/ansi.js';
 
 /** 与 app.ts 中定义的 CLEAR_TO_END 一致（从光标处清除到屏幕底） */
 const CLEAR_TO_END = '\x1b[0J';

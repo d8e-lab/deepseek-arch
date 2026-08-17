@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { InputEditor } from '../../src/cli/tui/input-editor.js';
+import { InputEditor } from '../../src/render/input-editor.js';
 
 describe('InputEditor 粘贴', () => {
 	let editor: InputEditor;

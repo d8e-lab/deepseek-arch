@@ -2,7 +2,7 @@
  * renderer 纯函数测试
  */
 import { describe, it, expect } from 'vitest';
-import { stripAnsi, strDisplayWidth, isWideChar, charDisplayWidth, truncateByWidth, formatToolCallSummary } from '../../../src/cli/tui/renderer.js';
+import { stripAnsi, strDisplayWidth, isWideChar, charDisplayWidth, truncateByWidth, formatToolCallSummary } from '../../../src/render/ansi.js';
 
 describe('stripAnsi', () => {
 	it('should strip simple color codes', () => {
