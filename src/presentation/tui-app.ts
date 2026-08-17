@@ -1784,15 +1784,29 @@ export class TuiApp {
 		const maxDisplay = Math.min(suggestions.length, 8); // 最多显示 8 条
 		const lines: string[] = [];
 
-		for (let i = 0; i < maxDisplay; i++) {
+		// 滚动窗口：保证 selectedIdx 始终在可见窗口内（↓ 下移时窗口下滑，逐条展开后续项）
+		let start = 0;
+		if (selectedIdx >= maxDisplay) {
+			start = selectedIdx - maxDisplay + 1;
+		}
+		const end = Math.min(start + maxDisplay, suggestions.length);
+
+		// 窗口前有被折叠的项
+		if (start > 0) {
+			lines.push(dim(`  ... ${start} more`));
+		}
+
+		for (let i = start; i < end; i++) {
 			const isSelected = i === selectedIdx;
 			const prefix = isSelected ? '▸ ' : '  ';
 			const text = prefix + suggestions[i];
 			const padded = padToWidth(text, availWidth);
 			lines.push(isSelected ? cyan(padded) : dim(padded));
 		}
-		if (suggestions.length > maxDisplay) {
-			lines.push(dim(`  ... and ${suggestions.length - maxDisplay} more`));
+		// 窗口后还有未显示的项
+		const remainingAfter = suggestions.length - end;
+		if (remainingAfter > 0) {
+			lines.push(dim(`  ... and ${remainingAfter} more`));
 		}
 
 		// 从输入行的下一行开始绘制（避免 \r+clearLine 覆盖输入行）
