@@ -19,7 +19,7 @@ const VERDICT_PATH = resolve(FRAMES_DIR, 'verdict.json');
 describe('流式 PTY 渲染', () => {
 	beforeAll(() => {
 		// 确保 dist/ 已构建
-		const distExists = existsSync(resolve(__dirname, '../../dist/index.js'));
+		const distExists = existsSync(resolve(__dirname, '../../dist/cli/index.js'));
 		if (!distExists) {
 			throw new Error('dist/ 未构建，请先执行 npm run build');
 		}

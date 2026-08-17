@@ -1,0 +1,7 @@
+[?2004hdeepseek-arch v1.4.0  |  Provider: deepseek  |  Model: deepseek-v4-flash  |  [MOCK]
+
+Session: 1cc08e9d...  |  Turns: 0
+
+───────────────────────────────────────────────────────────────────────────────
+
+                                                                               

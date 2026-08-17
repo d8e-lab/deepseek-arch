@@ -36,7 +36,7 @@ import termios
 # ─── 配置 ─────────────────────────────────────────────
 
 FRAMES_DIR = os.path.join(os.path.dirname(__file__), 'frames')
-CMD = ['node', 'dist/index.js', 'chat', '--mock']
+CMD = ['node', 'dist/cli/index.js', 'chat', '--mock']
 
 # 消息内容（含 #stream 触发逐字符流式输出）
 MESSAGE = 'hello #stream'
@@ -45,6 +45,8 @@ MESSAGE = 'hello #stream'
 
 ANSI_PATTERN = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 CR_PATTERN = re.compile(r'\r\n?')
+# TUI 输入区灰色背景序列（render/ansi.ts GRAY_BG_START）
+GRAY_BG_SEQ = '\x1b[48;5;238m'
 
 def strip_ansi(text: str) -> str:
     text = ANSI_PATTERN.sub('', text)
@@ -105,10 +107,11 @@ def wait_child(pid, timeout=3):
 def last_full_draw_region(text: str) -> str:
     """
     从 stripped 文本中提取最后一次完整 fullDraw 的内容区域。
-    fullDraw 以 'DeepSeek Arch' 开头（紧接在 CLEAR_SCREEN 后），
-    我们找最后一个 'DeepSeek Arch' 出现位置到结尾的内容。
+    fullDraw 以 'deepseek-arch v' 开头（紧接在 CLEAR_SCREEN 后），
+    我们找最后一个 'deepseek-arch v' 出现位置到结尾的内容。
+    当前 TUI 为 inline 渲染（无 alternate screen），找不到时返回全文。
     """
-    idx = text.rfind('DeepSeek Arch')
+    idx = text.rfind('deepseek-arch v')
     if idx == -1:
         return text
     return text[idx:]
@@ -152,9 +155,9 @@ def main():
         clean = save_frame(buf, 'frame-00-initial')
 
         checks = {
-            'startup_header': 'DeepSeek Arch' in clean,
+            'startup_header': 'deepseek-arch v' in clean,
             'mock_mode': '[MOCK]' in clean,
-            'input_prompt': '>' in clean,
+            'input_prompt': GRAY_BG_SEQ in buf.decode('utf-8', errors='replace'),
         }
         results['frame-00-initial'] = checks
         print(f'[阶段0] 初始: header={checks["startup_header"]}, '
