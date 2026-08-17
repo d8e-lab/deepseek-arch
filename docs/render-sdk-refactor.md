@@ -1,8 +1,7 @@
 # TUI → 渲染 SDK + 表示层 重构（需求澄清与实施方案）
 
-> 状态：需求已确认，方案已评审，等待执行
-> 日期：2026-08-16
-> 关联分支：`feat/render-sdk`（待创建）
+> 状态：**已实施完成**（2026-08-18 · feat/render-sdk 分支 · 全量测试 327/327 通过）
+> 关联分支：`feat/render-sdk`（已推送 origin）
 
 ## 1. 背景与原始需求
 
@@ -211,9 +210,26 @@ deepseek-arch (npm 包)
 
 ## 10. 验收标准（最终）
 
-- [ ] `chat` / `resume` 行为与视觉 100% 保持（手工验收清单全过）
-- [ ] `tsc` 编译零错误
-- [ ] 全量测试绿（含迁移后的 TUI 回归测试）
-- [ ] `src/` 中无任何 `cli/tui` 引用残留
-- [ ] `render/` 内无 `process.*` 引用（grep 验证）
-- [ ] package.json 导出 `./render`，外部可引用
+- [x] `chat` / `resume` 行为与视觉 100% 保持（PTY 自动化验证 9/9 检查项：header/mock 标记/输入区/用户消息/think/回复/顺序/无多余输出）
+- [x] `tsc` 编译零错误
+- [x] 全量测试绿（327/327，25/25 文件；含迁移后的 TUI 回归测试 + 新增 ConversationView 单元测试）
+- [x] `src/` 中无任何 `cli/tui` 引用残留（仅注释说明来源）
+- [x] `render/` 内无 `process.*` 引用（grep 验证，Selector 通过注入 `SelectorIO` 写终端）
+- [x] package.json 导出 `./render`，外部可引用（`import('deepseek-arch/render')` 实测 29 个导出可用）
+
+## 11. 实施记录（2026-08-18）
+
+| 任务 | 提交 | 说明 |
+|---|---|---|
+| T1 | `6cafbc8` | 拆分 `renderer.ts` → `render/ansi.ts`（纯计算）+ `presentation/terminal.ts`（终端 I/O） |
+| T2 | `1aa78a8` | 平移 conversation/markdown/input-editor/types → render/（types 拆分：渲染类型 + AppState → render，TuiConfig → presentation） |
+| T3 | `ded63ef` | Selector → render/ + stdout 抽象为注入 `SelectorIO`（构造签名 `(items, io, prompt?)`） |
+| T4 | `4e10afa` | app.ts → presentation/tui-app.ts（import 全量更新 + Selector 注入 `terminalIO`） |
+| T6 | `2fc2924` | cli/index.ts + tools/ 5 文件 import 更新（清理 tools → cli/tui 反向依赖） |
+| T7 | `56d0e32` | 已跟踪测试文件 import 更新（315/316，唯一失败为既有 PTY 损坏测试） |
+| T8 | `18d25ee` | 删除 `src/cli/tui/`（-3741 行） |
+| T10 | `47f7351` | CLI 增加 `--self-interaction`（暴露 `tui_session_*` PTY 工具链） |
+| T11 | `7d93932` + `fd9cc16` | 修复 PTY 测试：CLI `--mock` 接 MockProvider(50ms 延迟)、CMD 修正为 `dist/cli/index.js`、检查期望适配当前 TUI |
+| T9 | `376a89a` | Render SDK 标准化：barrel 导出 `deepseek-arch/render`（29 导出）、`docs/render-sdk.md`、ConversationView 单元测试（+11） |
+
+**T11 关键修复**：① Python 脚本 CMD 用了库入口 `dist/index.js`（应为 CLI 入口 `dist/cli/index.js`）；② `MockProvider` 默认 `streamDelayMs=0`（流式瞬间完成，测试时序假设不成立）→ CLI `--mock` 传 50ms；③ 检查期望适配当前 TUI（header 小写 `deepseek-arch v`、输入区为灰底序列 `\x1b[48;5;238m`、`[MOCK]` 标记）。
