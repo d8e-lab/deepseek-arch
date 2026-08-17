@@ -79,6 +79,16 @@
 | 5 | `TuiConfig` 只被表示层消费 | 归 `presentation/types.ts` |
 | 6 | `app-stream.test.ts` mock stdout 验证流式渲染行为 | 迁移后必须继续通过 = 行为保持的自动验证资产 |
 
+### 3.4 agent 自主验证前端展示能力链现状（2026-08-16 盘点）
+
+| 链路 | 工具 | 状态 |
+|---|---|---|
+| 主会话内验证（`--debug`） | `tui_capture` / `tui_render_preview` | ✅ 可用（capture 要求 IDLE，设计如此） |
+| 子会话 PTY 验证 | `tui_session_start`/`send`/`read`/`capture`/`stop`/`list` | ⚠️ 代码完整但**不可达**：仅注册进 `SELF_INTERACTION_TOOLS`（`getAllTools({ selfInteraction: true })` 才注入），而 CLI 无 `--self-interaction` 入口、`TuiApp.setSelfInteraction()` 无调用方 |
+| PTY 端到端测试 | `tests/pty/streaming.test.ts` | ❌ 损坏：依赖已删除的 `--mock` 参数和 `dist/index.js` 路径（见 open-issues 测试遗留 #1） |
+
+→ 重构保留该能力链主体（5 个工具文件的 import 更新已在 T6 覆盖），T10/T11 负责补齐"不可达/损坏"部分。
+
 ## 4. 目标架构
 
 ```
@@ -172,8 +182,10 @@ deepseek-arch (npm 包)
 | T6 | 更新 `src/cli/index.ts` + `src/tools/` 5 文件 import | 无 `cli/tui` 引用 | 可委派 subagent |
 | T7 | 更新 `tests/` 5 文件 import | 全量测试绿 | 可委派 subagent |
 | T8 | 删除 `src/cli/tui/`；tsc + 全量测试 + 手工验收 | 编译零错误；测试全绿 | 自己做 |
+| T10 | CLI 增加 `--self-interaction` 选项：`loadMasterTools` 传 `{ selfInteraction: true }`，`TuiApp.setSelfInteraction(true)` | `tui_session_*`（PTY 子会话工具链）可被模型调用 | 可委派 subagent |
+| T11 | 修复 `tests/pty/streaming.test.ts`（给 CLI 接 MockProvider 后重建 PTY 测试） | PTY 测试绿 | 可委派 subagent |
 
-**里程碑 M1**：结构重构完成，行为 100% 保持。
+**里程碑 M1**：结构重构完成，行为 100% 保持；**agent 自主验证前端展示能力链补齐**（主会话内 + PTY 子会话双链路可达）。
 
 ### Phase 2 — SDK 标准化
 
