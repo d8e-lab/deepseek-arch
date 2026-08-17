@@ -6,6 +6,8 @@
  * - 纯计算样式/文本工具见 src/render/ansi.ts
  */
 
+import type { SelectorIO } from '../render/selector.js';
+
 // ─── 终端尺寸 ─────────────────────────────────────
 
 /** 获取终端尺寸（columns/rows 为 0 或 undefined 时回退默认值，兼容非 TTY/PTY 环境） */
@@ -81,3 +83,11 @@ export function clearLine(): void {
 export function clearLineToEnd(): void {
 	process.stdout.write('\x1b[0K');
 }
+
+// ─── Selector 适配（表示层注入 render/selector）───
+
+/** Selector 终端输出适配（表示层注入，SDK 保持无 I/O） */
+export const terminalIO: SelectorIO = {
+	write: (s: string) => process.stdout.write(s),
+	getCols: () => getTermSize().cols,
+};
