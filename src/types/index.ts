@@ -60,3 +60,9 @@ export type {
 	TokenUsage,
 	CostBreakdown,
 } from './token.js';
+
+// ─── subagent ────────────────────────────────────────
+export type {
+	SubagentRoundEntry,
+	SubagentRecord,
+} from './subagent.js';

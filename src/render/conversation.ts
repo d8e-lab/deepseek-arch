@@ -76,12 +76,50 @@ function formatCost(costRmb: number): string {
 	return `CNY ${costRmb.toFixed(4)}`;
 }
 
+// ─── 工具调用渲染（主会话对话与子代理详情共用）─────────
+
+/**
+ * 渲染工具调用行：● run <name> <摘要> (Nms)
+ * 主会话对话与 SubagentRecordView 共用同一格式。
+ */
+export function renderToolCallLine(
+	name: string,
+	args: Record<string, unknown>,
+	durationMs?: number,
+): string {
+	const shortName = name.replace('execute_', '');
+	const label = cyan(`● run ${shortName} `);
+	const summary = formatToolCallSummary(name, args);
+	const duration = durationMs !== undefined ? dim(`  (${durationMs}ms)`) : '';
+	return label + dim(summary) + duration;
+}
+
+/** 渲染工具结果行（│ 竖线 + dim，最多 6 行，超出以 ... 折叠） */
+export function renderToolResultLines(result: string): string[] {
+	const resultLines = result.split('\n').slice(0, 6);
+	const out: string[] = [];
+	for (const rl of resultLines) {
+		out.push(cyan(' │ ') + dim(rl));
+	}
+	if (result.split('\n').length > 6) {
+		out.push(cyan(' │ ') + dim('...'));
+	}
+	return out;
+}
+
+/** 渲染工具错误行（[Denied] / Error: xxx） */
+export function renderToolError(error: string): string {
+	const errLabel = error === 'denied' ? '[Denied]' : `Error: ${error}`;
+	return dim('  ') + red(errLabel);
+}
+
 export class ConversationView {
 	/**
 	 * 渲染全部对话轮次为行数组
 	 * 调用方负责根据终端高度决定显示哪些行（从底部截取）
+	 * @param opts.fullThink true 时 think 完整显示（Ctrl+O 全屏视图用），默认截断 4 行
 	 */
-	render(turns: TurnRecord[], termWidth: number): string[] {
+	render(turns: TurnRecord[], termWidth: number, opts?: { fullThink?: boolean }): string[] {
 		const lines: string[] = [];
 
 		for (let ti = 0; ti < turns.length; ti++) {
@@ -124,7 +162,9 @@ export class ConversationView {
 			// 方案 C：content/reasoning 可能不在顶层（有 messages 时由 messages 推导）
 			const reasoning = turnAssistantReasoning(turn);
 			if (reasoning) {
-				const { display, isTruncated } = truncateThink(reasoning);
+				const { display, isTruncated } = opts?.fullThink
+					? { display: reasoning, isTruncated: false }
+					: truncateThink(reasoning);
 				const thinkLabel = dim('[Think] ');
 				const thinkLabelWidth = strDisplayWidth('[Think] ');
 				const thinkLines = display.split('\n');
@@ -151,10 +191,7 @@ export class ConversationView {
 			const tcRecords = turn.tool_calls;
 			if (tcRecords && Array.isArray(tcRecords) && tcRecords.length > 0) {
 				for (const tcr of tcRecords) {
-					const shortName = tcr.name.replace('execute_', '');
-					const label = cyan(`● run ${shortName} `);
-					const summary = formatToolCallSummary(tcr.name, tcr.arguments ?? {});
-					lines.push(label + dim(summary) + dim(`  (${tcr.duration_ms}ms)`));
+					lines.push(renderToolCallLine(tcr.name, tcr.arguments ?? {}, tcr.duration_ms));
 
 					if (tcr.preview) {
 						for (const line of tcr.preview.split('\n')) {
@@ -162,17 +199,10 @@ export class ConversationView {
 						}
 					}
 					if (tcr.error) {
-						const errLabel = tcr.error === 'denied' ? '[Denied]' : `Error: ${tcr.error}`;
-						lines.push(dim('  ') + red(errLabel));
+						lines.push(renderToolError(tcr.error));
 					}
 					if (tcr.result) {
-						const resultLines = tcr.result.split('\n').slice(0, 6);
-						for (const rl of resultLines) {
-							lines.push(cyan(' │ ') + dim(rl));
-						}
-						if (tcr.result.split('\n').length > 6) {
-							lines.push(cyan(' │ ') + dim('...'));
-						}
+						lines.push(...renderToolResultLines(tcr.result));
 					}
 				}
 				lines.push('');

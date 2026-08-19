@@ -12,6 +12,8 @@ import type { StreamEvent } from '../types/index.js';
 import type { Tool } from '../tools/types.js';
 import { ConfigManager } from '../core/config.js';
 import { ConversationView, truncateThink, wrapText } from '../render/conversation.js';
+import { SubagentRecordView } from '../render/subagent-record-view.js';
+import type { SubagentRecord } from '../types/index.js';
 import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../utils/turn-utils.js';
 import { InputEditor } from '../render/input-editor.js';
 import { Throttle } from '../utils/throttle.js';
@@ -785,63 +787,12 @@ export class TuiApp {
 	}
 
 	/** 打印子代理完整记录 */
-	private printSubagentRecord(record: import('../core/subagent-store.js').SubagentRecord): void {
-		const icon = record.status === 'running' ? '⏳'
-			: record.status === 'completed' ? '✓'
-			: '✗';
-		const elapsed = record.endMs
-			? `${((record.endMs - record.startMs) / 1000).toFixed(1)}s`
-			: `${((Date.now() - record.startMs) / 1000).toFixed(1)}s`;
-
-		process.stdout.write(yellow(`\r\n═══ Subagent: ${record.name} ${icon} ${dim(elapsed)} ═══`) + '\r\n');
-		process.stdout.write(dim(`Task: ${record.task}`) + '\r\n');
-		process.stdout.write(dim('─'.repeat(60)) + '\r\n');
-
-		for (const entry of record.entries) {
-			switch (entry.type) {
-				case 'thinking':
-					// thinking 不渲染（太冗长），跳过
-					break;
-				case 'content': {
-					const lines = entry.content.split('\n');
-					for (const line of lines) {
-						process.stdout.write('  ' + line + '\r\n');
-					}
-					break;
-				}
-				case 'tool_call':
-					process.stdout.write(
-						cyan(`\r\n  [T: ${entry.toolName ?? '?'}] `) + dim(JSON.stringify(entry.toolArgs ?? {})) + '\r\n',
-					);
-					break;
-				case 'tool_result': {
-					const lines = entry.content.split('\n');
-					for (const line of lines) {
-						process.stdout.write(cyan('  │ ') + dim(line) + '\r\n');
-					}
-					if (entry.toolError) {
-						process.stdout.write(red(`  ✖ ${entry.toolError}`) + '\r\n');
-					}
-					break;
-				}
-				case 'tool_output': {
-					const stream = entry.outputStream ?? 'stdout';
-					if (stream === 'stderr') {
-						process.stdout.write(yellow('  │ ') + dim(entry.content) + '\r\n');
-					} else {
-						process.stdout.write(cyan('  │ ') + dim(entry.content) + '\r\n');
-					}
-					break;
-				}
-			}
+	private printSubagentRecord(record: SubagentRecord): void {
+		const view = new SubagentRecordView();
+		const { cols } = getTermSize();
+		for (const line of view.render(record, cols)) {
+			process.stdout.write(line + '\r\n');
 		}
-
-		if (record.result) {
-			process.stdout.write(dim('\r\n── Final Result ──') + '\r\n');
-			process.stdout.write(record.result + '\r\n');
-		}
-
-		process.stdout.write(dim('─'.repeat(60)) + '\r\n');
 	}
 
 	// ─── shell 命令模式 ────────────────────────────
@@ -1547,48 +1498,20 @@ export class TuiApp {
 		}
 	}
 
-	/** 构建视图行（每轮：用户/think/工具/回复 + 轮次起始行记录） */
+	/** 构建视图行（每轮复用 ConversationView 渲染 + 轮次起始行记录） */
 	private buildViewerLines(): void {
 		this.viewerLines = [];
 		this.viewerTurnStartLines = [];
 		const session = this.sessionMgr.getSession();
 		const turns = session?.turns ?? [];
 		const { cols } = getTermSize();
-		const wrapWidth = Math.max(10, cols - 8);
 
 		turns.forEach((turn, i) => {
 			this.viewerTurnStartLines.push(this.viewerLines.length);
+			// 轮次标题（保留左右键跳转标记）
 			this.viewerLines.push(dim(`── 第 ${i + 1} 轮 ────────────────────────`));
-			// 用户提问（绿色）
-			const userText = turnUserContent(turn);
-			for (const l of wrapText(userText, wrapWidth)) {
-				this.viewerLines.push(green(`[You] ${l}`));
-			}
-			// think（灰色，完整显示）
-			const thinkText = turnAssistantReasoning(turn);
-			if (thinkText) {
-				for (const l of thinkText.split('\n')) {
-					this.viewerLines.push(dim(`[Think] ${l}`));
-				}
-			}
-			// 工具调用（● run + 摘要）
-			if (turn.tool_calls && turn.tool_calls.length > 0) {
-				for (const tcr of turn.tool_calls) {
-					const shortName = tcr.name.replace('execute_', '');
-					const summary = formatToolCallSummary(tcr.name, tcr.arguments ?? {});
-					this.viewerLines.push(cyan(`● run ${shortName} ${summary}`));
-				}
-			}
-			// 回复
-			const contentText = turnAssistantContent(turn);
-			if (contentText) {
-				for (const l of contentText.split('\n')) {
-					for (const w of wrapText(l, cols - 2)) {
-						this.viewerLines.push(w);
-					}
-				}
-			}
-			this.viewerLines.push('');
+			// 复用 ConversationView 渲染单轮（与主会话对话格式一致，think 完整显示）
+			this.viewerLines.push(...this.conversation.render([turn], cols, { fullThink: true }));
 		});
 		if (this.viewerLines.length === 0) {
 			this.viewerLines.push(dim('(暂无对话)'));
