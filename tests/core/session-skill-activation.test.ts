@@ -133,15 +133,17 @@ version: 1.0.0
 		const toolIdx = secondRound.findIndex((m) => m.role === 'tool' && (m as any).tool_call_id === 'call_read');
 		expect(toolIdx).toBeGreaterThanOrEqual(0);
 
-		// 断言 2：存在 skill 激活的 system-reminder
-		const reminderIdx = secondRound.findIndex(
+		// 断言 2：system-reminder 注入在 tool 消息的 content 里（而非独立 user 消息），原始工具结果保留
+		const toolContent = secondRound[toolIdx]!.content;
+		expect(toolContent).toContain('system-reminder');
+		expect(toolContent).toContain('docs');
+		expect(toolContent).toContain('file content');
+
+		// 断言 3：不存在 user 形式的 system-reminder（中间无 user 消息插入）
+		const userReminder = secondRound.find(
 			(m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('system-reminder'),
 		);
-		expect(reminderIdx).toBeGreaterThanOrEqual(0);
-		expect(secondRound[reminderIdx]!.content).toContain('docs');
-
-		// 断言 3：system-reminder 在 tool 消息之后（修复的核心）
-		expect(reminderIdx).toBeGreaterThan(toolIdx);
+		expect(userReminder).toBeUndefined();
 
 		// 断言 4：assistant(tool_calls) 之后紧跟 tool 消息（中间无 user 消息插入）
 		const assistantIdx = secondRound.findIndex((m) => m.role === 'assistant' && (m as any).tool_calls);
