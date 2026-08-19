@@ -84,10 +84,13 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 - **浏览器工具**：模型可自主打开网页、浏览内容、点击链接、填写表单、滚动页面、按键盘键，基于 Playwright（纯文本模态，无需视觉能力）
 - **宿主机 Edge 集成**：通过 CDP 连接到 Windows 宿主机 Edge，复用登录态
 - **Session 持久化**：浏览器最后访问的 URL 跨 session 持久化，resume 时自动恢复
-- **流式输出**：SSE 实时增量渲染，ESC/Ctrl+C 中断模型输出
+- **流式输出**：SSE 实时增量渲染，ESC/Ctrl+C 中断模型输出；模型调用工具前正文实时显示，对话节奏自然
 - **多轮对话**：自动持久化 turn JSON（含 `reasoning_content` 命中 kv-cache + `tool_calls` 记录）
 - **模型切换**：`/model` 命令切换 deepseek-v4-flash / deepseek-v4-pro
 - **对话恢复**：按 ID 或标题恢复历史会话（含工具调用上下文重建）
+- **子代理详情**：`/subagent` / Ctrl+T 查看子代理运行详情，格式与主会话完全统一；Ctrl+O 全屏视图可完整查看思考内容
+- **命令补全**：输入 `/` 触发命令补全，建议列表支持滚动浏览全部选项
+- **条件技能激活**：触碰 docs/ 等路径时自动激活对应技能并提示，不打断工具调用序列
 - **Token 记录**：保存 API 返回的 `usage`，为后续费用计算预留
 - **配置外置**：TOML 文件管理，支持文件间跳转引用
 - **安全隔离**：操作范围限于 home 目录和项目工作目录
@@ -114,8 +117,14 @@ chat 命令可用快捷键：
   /model          显示可用模型列表
 
 chat 命令可用参数：
-  --browser      显示浏览器窗口（默认 headless）
-  --cdp <url>     连接宿主机浏览器（如 --cdp http://127.0.0.1:9222）
+  --browser           显示浏览器窗口（默认 headless）
+  --cdp <url>         连接宿主机浏览器（如 --cdp http://127.0.0.1:9222）
+  --yolo              跳过所有工具确认（自动批准 shell/edit）
+  --async             子代理异步模式（spawn 立即返回，配合 wait/list_subagents）
+  --debug             暴露 TUI 捕获/渲染预览工具（模型调试用）
+  --self-interaction  暴露子会话 PTY 工具（模型自主验证前端展示）
+  --mock              使用 MockProvider（本地测试，无需 API key）
+  --monitor <url>     镜像 API 请求到监听服务器
 ```
 
 ## 配置
@@ -204,21 +213,29 @@ npm run test:coverage
 src/
 ├── index.ts                # 库入口（export 类型/类）
 ├── cli/
-│   ├── index.ts            # Commander CLI 主程序
-│   ├── chat-ui.ts          # 全屏 TUI 对话界面
-│   └── tui/                # 内联 TUI
-│       ├── app.ts          # TuiApp 主应用
-│       ├── conversation.ts # 对话历史渲染
-│       ├── input-editor.ts # 多行输入编辑器
-│       ├── renderer.ts     # ANSI 渲染工具
-│       └── types.ts        # TUI 类型
+│   └── index.ts            # Commander CLI 主程序（组装器）
+├── render/                 # ★ 渲染 SDK（无 I/O，输出 ANSI 行数组，可独立引用 deepseek-arch/render）
+│   ├── conversation.ts     # ConversationView 对话渲染 + 工具调用公共渲染
+│   ├── markdown.ts         # MarkdownTableRenderer 表格渲染
+│   ├── input-editor.ts     # 多行输入编辑器
+│   ├── selector.ts         # 交互选择器（stdout 通过 SelectorIO 注入）
+│   ├── subagent-record-view.ts # 子代理记录渲染（与主会话格式统一）
+│   ├── ansi.ts             # ANSI 颜色/宽度/diff 纯函数
+│   ├── types.ts            # ScreenCapture 等渲染类型
+│   └── index.ts            # barrel export
+├── presentation/           # ★ 表示层（引用 render 组装界面 + 终端 I/O）
+│   ├── tui-app.ts          # TuiApp：状态机/命令语义/事件订阅/流式渲染
+│   ├── terminal.ts         # 终端 I/O（raw mode/stdin/resize/光标）
+│   └── types.ts            # TuiConfig
 ├── core/
 │   ├── config.ts           # ConfigManager（TOML 单例）
 │   ├── storage.ts          # Storage（文件系统 Repository）
 │   ├── api.ts              # ApiClient（DeepSeek API 适配器，实现 ModelProvider）
 │   ├── model-provider.ts   # ModelProvider 接口（抽象层）
 │   ├── mock-provider.ts    # MockProvider（本地伪装提供商）
-│   └── session.ts          # SessionManager（Facade + Agent Loop）
+│   ├── session.ts          # SessionManager（Facade + Agent Loop）
+│   ├── subagent.ts         # 子代理执行（headless）
+│   └── subagent-store.ts   # 子代理记录存储
 ├── tools/
 │   ├── types.ts            # Tool 接口（name, description, parameters, execute）
 │   ├── shell.ts            # Shell 执行工具
@@ -230,11 +247,13 @@ src/
 │   ├── browser-press-key.ts# 键盘按键
 │   ├── browser-scroll.ts   # 滚动页面
 │   ├── browser-navigate-back.ts # 浏览器后退
+│   ├── tui-*.ts            # TUI 调试工具（capture/render-preview/session 系列）
 │   └── index.ts            # Barrel file（统一注册所有工具）
 ├── types/
 │   ├── index.ts            # 类型重新导出
 │   ├── chat.ts             # 消息与对话类型
 │   ├── session.ts          # 会话类型
+│   ├── subagent.ts         # 子代理领域类型
 │   ├── config.ts           # 配置类型
 │   ├── api.ts              # API 请求/响应类型
 │   └── token.ts            # Token 用量类型
