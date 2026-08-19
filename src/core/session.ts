@@ -886,6 +886,8 @@ export class SessionManager {
 
 				// M-3：收集本轮所有子代理 spawn（非异步模式用于循环结束后并行 Promise.all）
 				const allDeferredSpawns: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: PendingSubagent }[] = [];
+				// 条件 skill 激活通知：先收集，待所有 tool 消息 push 后再插入（避免打断 assistant tool_calls 序列）
+				const activatedSkillLines: string[] = [];
 
 				for (let i = 0; i < pendingToolCalls.length; i++) {
 					const tc = pendingToolCalls[i];
@@ -969,24 +971,19 @@ export class SessionManager {
 							toolResult = r.content;
 							toolError = r.error;
 
-							// 条件 skill 激活：文件工具触碰匹配路径后，激活并通知模型
+							// 条件 skill 激活：文件工具触碰匹配路径后，激活并收集通知（延迟到本轮 tool 消息之后插入）
 							if (!toolError) {
 								const touched = extractPathsFromToolCall(tc.function.name, args);
 								if (touched.length > 0) {
 									const cwd = process.env.DEEPSEEK_ARCH_SESSION_CWD ?? process.cwd();
 									const activated = activateSkillsForPaths(touched, cwd);
 									if (activated.length > 0) {
-										const lines = activated.map(
-											(s) =>
-												`- ${s.name}: ${s.description}${s.whenToUse ? ` - when to use: ${s.whenToUse}` : ''}`,
+										activatedSkillLines.push(
+											...activated.map(
+												(s) =>
+													`- ${s.name}: ${s.description}${s.whenToUse ? ` - when to use: ${s.whenToUse}` : ''}`,
+											),
 										);
-										agentMessages.push({
-											role: 'user',
-											content:
-												`<system-reminder>\nNew skill(s) now available — invoke with the "skill" tool:\n` +
-												lines.join('\n') +
-												'\n</system-reminder>',
-										});
 									}
 								}
 							}
@@ -1079,6 +1076,17 @@ export class SessionManager {
 							error: sub.status === 'failed' || sub.status === 'cancelled' ? 'subagent_failed' : undefined,
 						});
 					}
+				}
+
+				// 条件 skill 激活通知：所有 tool 消息已就位后插入（保持 assistant tool_calls 序列连续，F-10）
+				if (activatedSkillLines.length > 0) {
+					agentMessages.push({
+						role: 'user',
+						content:
+							`<system-reminder>\nNew skill(s) now available — invoke with the "skill" tool:\n` +
+							activatedSkillLines.join('\n') +
+							'\n</system-reminder>',
+					});
 				}
 
 				// 每轮工具执行后增量落盘（在 agent loop 内）
