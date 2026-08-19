@@ -248,4 +248,35 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		anyApp.closeViewer();
 		expect(anyApp.viewerActive).toBe(false);
 	});
+
+	it('agent loop：assistant 无换行 content + tool_calls 时，content 在 ● run 之前输出（不堆积到 loop 结束）', async () => {
+		const app = makeApp(mockStreamSession([
+			// assistant 正文（无换行 → mdRenderer 缓冲），随后调用工具
+			{ type: 'content_delta', text: '我先看看文件内容' },
+			{ type: 'tool_call_start', toolCallId: 'call_1', toolName: 'read_file', toolArgs: { path: 'a.txt' } },
+			{ type: 'tool_result', toolCallId: 'call_1', toolName: 'read_file', toolResult: '文件内容', error: undefined },
+			// 下一轮 assistant 又输出无换行正文 + 工具调用
+			{ type: 'content_delta', text: '现在修改' },
+			{ type: 'tool_call_start', toolCallId: 'call_2', toolName: 'edit_file', toolArgs: { path: 'a.txt' } },
+			{ type: 'tool_result', toolCallId: 'call_2', toolName: 'edit_file', toolResult: 'ok', error: undefined },
+			{ type: 'done', usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+		]));
+		await (app as unknown as { sendMessageStream: (c: string) => Promise<void> }).sendMessageStream('test');
+		const out = writes.join('');
+
+		// 第一轮：content 出现在 ● run 之前
+		const content1Idx = out.indexOf('我先看看文件内容');
+		const run1Idx = out.indexOf('● run read_file');
+		expect(content1Idx).toBeGreaterThanOrEqual(0);
+		expect(run1Idx).toBeGreaterThan(content1Idx);
+
+		// 第二轮：content 也出现在 ● run 之前（每轮独立，不堆积）
+		const content2Idx = out.indexOf('现在修改');
+		const run2Idx = out.indexOf('● run edit_file');
+		expect(content2Idx).toBeGreaterThanOrEqual(0);
+		expect(run2Idx).toBeGreaterThan(content2Idx);
+
+		// 第一轮的 content 在第二轮的 content 之前（保持顺序）
+		expect(content2Idx).toBeGreaterThan(run1Idx);
+	});
 });
