@@ -1899,6 +1899,10 @@ export class TuiApp {
 						case 'tool_call_start': {
 							flush(true);
 
+							// 刷出 content 累积缓冲：无换行的正文在 tool_calls 前会堆积在 mdRenderer，
+							// 需在工具调用前输出，保持 assistant(content)→tool 的实时交替顺序
+							this.writeOutputLines(mdRenderer.flush());
+
 							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							// 重置 reasoning/content 追踪，使下一轮 agent loop 独立处理
 							reasoningStarted = false;
@@ -1981,6 +1985,9 @@ export class TuiApp {
 						}
 						case 'subagent_spawned': {
 							flush(true);
+
+							// 同 tool_call_start：刷出 content 累积缓冲，保持实时交替
+							this.writeOutputLines(mdRenderer.flush());
 
 							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							// tool_call_start 已输出 [T: subagent_spawn] 行，此处直接输出状态行
