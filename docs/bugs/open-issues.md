@@ -67,3 +67,10 @@
 | # | 需求 | 状态 |
 |:--|:--|:--|
 | 1 | **subagent 实时输出视图**：Ctrl+T 当前仅查看列表；用户期望"切换 agent"——在主 agent 与 subagent 之间切换焦点，实时查看某 subagent 输出（可基于 Ctrl+O 全屏视图模式做） | 待确认方案 B |
+
+## 六、依赖与环境（2026-08-20）
+
+| # | 问题 | 状态 |
+|:--|:--|:--|
+| 1 | **Playwright 版本宽松导致浏览器二进制不匹配**：`^1.61.1` 被解析到 1.62.1（需 chromium-1234，本机只有 1228），Agent 浏览器工具全部报 "Chromium is not available"。已修复：下载匹配浏览器 + 报错分类提示。**版本声明是否收紧为 `~1.61.1` 用户待决策**，详见 [playwright-browser-mismatch.md](./playwright-browser-mismatch.md) | ⚠️ 部分解决，未 close |
+

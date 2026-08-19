@@ -223,33 +223,72 @@ class BrowserState {
 			this.browser = await chromium.launch(launchOptions);
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
+			const firstLine = msg.split('\n')[0];
 
-			// 判断是否是浏览器未安装的典型错误
-			const isMissingBrowser =
-				msg.includes('Executable doesn\'t exist') ||
-				msg.includes('cannot open shared object file') ||
-				msg.includes('Failed to launch browser');
+			// ── 错误分类（便于给出准确的修复指引）────────────────
+			// 1. Playwright 浏览器二进制缺失——最常见：playwright 升级后未重新下载匹配的浏览器
+			//    （每个 playwright 版本都要求特定 revision 的 Chromium，如 chromium-1228/1234）
+			const isExecutableMissing = msg.includes('Executable doesn\'t exist');
+			// 2. 系统共享库缺失（缺系统依赖，如 libnss3 等）
+			const isSharedLibMissing = msg.includes('cannot open shared object file');
+			// 3. 其他启动失败（headed 无显示服务器、沙箱限制等）
+			const isLaunchFailed = msg.includes('Failed to launch browser');
 
-			if (isMissingBrowser) {
-				if (useEdge) {
-					throw new Error(
-						`Browser launch failed: Microsoft Edge not found.\n` +
-						`  Make sure Edge is installed.  Check:  Get-Command msedge\n` +
-						`  Set Edge path permanently (Admin PowerShell):\n` +
-						`    setx PLAYWRIGHT_CHROMIUM_EXECUTABLE "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"\n` +
-						`  Or fallback to Playwright Chromium:  npx playwright install chromium\n` +
-						`  Or connect to Edge via CDP:          set BROWSER_CDP=http://127.0.0.1:9222`
-					);
-				}
+			if (useEdge) {
 				throw new Error(
-					`Browser launch failed: Chromium is not available.\n` +
-					`  Install system Chromium:    sudo pacman -S chromium\n` +
-					`  Or download Playwright's:   npx playwright install chromium\n` +
-					`  Or connect to a running browser via CDP`
+					`Browser launch failed: Microsoft Edge not found.\n` +
+					`  ${firstLine}\n\n` +
+					`  Make sure Edge is installed.  Check:  Get-Command msedge\n` +
+					`  Set Edge path permanently (Admin PowerShell):\n` +
+					`    setx PLAYWRIGHT_CHROMIUM_EXECUTABLE "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"\n` +
+					`  Or fallback to Playwright Chromium:  npx playwright install chromium\n` +
+					`  Or connect to Edge via CDP:          set BROWSER_CDP=http://127.0.0.1:9222`
 				);
 			}
 
-			throw new Error(`Browser launch failed: ${msg}`);
+			if (isExecutableMissing) {
+				// 定位问题：缺失路径中的 revision（如 chromium-1234）应与
+				// node_modules/playwright/package.json 版本对应的 revision 一致
+				throw new Error(
+					`Browser launch failed: Playwright Chromium binary not found.\n` +
+					`  ${firstLine}\n\n` +
+					`  This usually means Playwright was updated but its matching browser was not\n` +
+					`  downloaded — each Playwright version requires a specific Chromium build.\n\n` +
+					`  Fix — download the matching browser:\n` +
+					`    npx playwright install chromium\n\n` +
+					`  Or connect to a running browser via CDP:\n` +
+					`    deepseek-arch chat --cdp http://127.0.0.1:9222`
+				);
+			}
+
+			if (isSharedLibMissing) {
+				throw new Error(
+					`Browser launch failed: missing system libraries for Chromium.\n` +
+					`  ${firstLine}\n\n` +
+					`  Fix — install system dependencies:\n` +
+					`    sudo pacman -S chromium          # Arch Linux\n` +
+					`  Or run Playwright's dependency installer:\n` +
+					`    npx playwright install-deps chromium\n\n` +
+					`  Or connect to a running browser via CDP:\n` +
+					`    deepseek-arch chat --cdp http://127.0.0.1:9222`
+				);
+			}
+
+			if (isLaunchFailed) {
+				throw new Error(
+					`Browser launch failed.\n` +
+					`  ${firstLine}\n\n` +
+					`  Possible causes:\n` +
+					`    - Headed mode (--browser) without a working display server (e.g. WSL2)\n` +
+					`    - Missing system dependencies or sandbox restrictions\n\n` +
+					`  Fix — try headless mode (remove --browser), or run:\n` +
+					`    npx playwright install-deps chromium\n\n` +
+					`  Or connect to a running browser via CDP:\n` +
+					`    deepseek-arch chat --cdp http://127.0.0.1:9222`
+				);
+			}
+
+			throw new Error(`Browser launch failed: ${firstLine}`);
 		}
 
 		// 注册进程退出清理（仅一次）
