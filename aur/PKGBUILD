@@ -4,7 +4,7 @@
 # Build: ./scripts/build-prebuilt-tarball.sh → upload to GitHub Release → update sha256sums
 
 pkgname=deepseek-arch
-pkgver=1.4.0
+pkgver=1.4.1
 pkgrel=1
 pkgdesc="Terminal AI agent with Agent Loop, Tool Calling, streaming, persistent storage and browser tools"
 arch=('any')
@@ -19,7 +19,7 @@ optdepends=(
 )
 install="${pkgname}.install"
 source=("${pkgname}-${pkgver}-prebuilt.tar.gz::${url}/releases/download/v${pkgver}/${pkgname}-${pkgver}-prebuilt.tar.gz")
-sha256sums=('7ce5bc7b3c47944859675b4ae1c999bc1b76b57d276bddb854106b344a619a40')
+sha256sums=('d40008f3bf0e3ae4e560bbcb6c0271dc3bd85793d81f2ee9410add040c710325')
 
 package() {
 	cd "${srcdir}"
