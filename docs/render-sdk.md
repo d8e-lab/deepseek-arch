@@ -69,6 +69,31 @@ const result = await sel.select(getHandler, setHandler);
 
 `AppState`（枚举）、`ScreenCapture`、`TurnCaptureInfo`、`ToolCallCaptureInfo`、`InputAreaCapture`、`CaptureScreenFn`
 
+### 子代理记录渲染（`subagent-record-view.ts`）
+
+| 导出 | 类型 | 说明 |
+|---|---|---|
+| `SubagentRecordView` | class | 渲染 `SubagentRecord`（task/entries/result）为 ANSI 行；工具调用/结果/错误**复用主会话对话格式**（`● run` / `│` / `Error:`） |
+
+```ts
+import { SubagentRecordView } from 'deepseek-arch/render';
+const lines = new SubagentRecordView().render(record, cols);
+```
+
+### 公共工具调用渲染（`conversation.ts`）
+
+| 导出 | 说明 |
+|---|---|
+| `renderToolCallLine(name, args, durationMs?)` | `● run <name> <摘要> (Nms)` 工具调用行 |
+| `renderToolResultLines(result)` | `│` 竖线工具结果行（最多 6 行） |
+| `renderToolError(error)` | `[Denied]` / `Error:` 工具错误行 |
+
+主会话 `ConversationView` 与 `SubagentRecordView` 共用上述函数，保证格式一致。
+
+### 对话渲染选项
+
+`ConversationView.render(turns, termWidth, { fullThink?: boolean })` —— `fullThink: true` 时 think 完整显示（Ctrl+O 全屏视图用），默认截断 4 行。
+
 ## 消费示例
 
 ### 表示层（TUI）如何注入终端 I/O

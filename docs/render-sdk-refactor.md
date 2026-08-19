@@ -233,3 +233,18 @@ deepseek-arch (npm 包)
 | T9 | `376a89a` | Render SDK 标准化：barrel 导出 `deepseek-arch/render`（29 导出）、`docs/render-sdk.md`、ConversationView 单元测试（+11） |
 
 **T11 关键修复**：① Python 脚本 CMD 用了库入口 `dist/index.js`（应为 CLI 入口 `dist/cli/index.js`）；② `MockProvider` 默认 `streamDelayMs=0`（流式瞬间完成，测试时序假设不成立）→ CLI `--mock` 传 50ms；③ 检查期望适配当前 TUI（header 小写 `deepseek-arch v`、输入区为灰底序列 `\x1b[48;5;238m`、`[MOCK]` 标记）。
+
+## 12. 后续增强（2026-08-18）
+
+| 任务 | 提交 | 说明 |
+|---|---|---|
+| 命令补全滚动窗口 | `a63ae6c` | 修复 `renderSuggestions` 固定显示前 8 条 + 绝对索引高亮的问题——改为滚动窗口（`start = selectedIdx - maxDisplay + 1`），↓ 下移逐条展开后续项（第 9+ 项可达），顶部/底部显示折叠提示 |
+| 方案 B：SubagentRecordView | `9c53fd9` | 见下 |
+
+**方案 B（subagent 展示复用同一套渲染）**：
+
+1. **类型下沉**：`SubagentRecord`/`SubagentRoundEntry` 从 `core/subagent-store.ts` 移至 `types/subagent.ts`（render SDK 可引用，无反向依赖）；`subagent-store.ts` re-export 保持兼容；
+2. **抽取公共渲染**：`render/conversation.ts` 新增 `renderToolCallLine` / `renderToolResultLines` / `renderToolError`，主会话 `ConversationView` 与 `SubagentRecordView` 共用；
+3. **新增 `SubagentRecordView`**（`render/subagent-record-view.ts`）：渲染 `SubagentRecord` 为 ANSI 行，工具调用 `● run` / 结果 `│` / 错误 `Error:` 格式与主会话一致，content 走 MarkdownTableRenderer + wrapText；
+4. **接入**：`printSubagentRecord`（`/subagent`/Ctrl+T）与 `buildViewerLines`（Ctrl+O）改用 SDK 组件；`ConversationView.render` 增加 `fullThink` 选项（Ctrl+O 完整显示 think，主会话保持截断 4 行）；
+5. **测试**：`SubagentRecordView` 单元测试 11 条；全量 338/338 通过。
