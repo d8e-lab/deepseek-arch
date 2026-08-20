@@ -11,6 +11,10 @@ export interface TokenUsage {
 	prompt_cache_hit_tokens?: number;
 	/** 缓存未命中 token 数 */
 	prompt_cache_miss_tokens?: number;
+	/** 输出 token 细分（如 reasoning_tokens 思考 token 数） */
+	completion_tokens_details?: {
+		reasoning_tokens?: number;
+	};
 }
 
 /** 费用计算结果 */

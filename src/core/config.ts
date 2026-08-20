@@ -55,9 +55,15 @@ const DEFAULT_PROVIDERS: ProvidersConfig = {
 const DEFAULT_PRICING: PricingConfig = {
 	deepseek: {
 		'deepseek-v4-pro': {
-			input_cache_hit: 0.1,
-			input_cache_miss: 1.0,
-			output: 2.0,
+			input_cache_hit: 0.2,
+			input_cache_miss: 6.0,
+			output: 20.0,
+			currency: 'CNY',
+		},
+		'deepseek-v4-flash': {
+			input_cache_hit: 0.075,
+			input_cache_miss: 2.25,
+			output: 6.75,
 			currency: 'CNY',
 		},
 	},

@@ -43,7 +43,10 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	const providerName = cfg.get<string>('defaults.provider') ?? 'deepseek';
 	const model = cfg.get<string>('defaults.model') ?? 'deepseek-v4-pro';
 	const baseUrl = cfg.get<string>(`providers.${providerName}.base_url`) ?? 'https://api.deepseek.com';
-	const apiKey = cfg.get<string>(`providers.${providerName}.api_key`) ?? '';
+	// api_key：配置优先，回退到 DEEPSEEK_API_KEY 环境变量
+	const apiKey = cfg.get<string>(`providers.${providerName}.api_key`)
+		?? process.env.DEEPSEEK_API_KEY
+		?? '';
 	// 审查模型：可从配置读取，默认用 flash（更便宜）
 	const reviewModel = cfg.get<string>('defaults.review_model') ?? 'deepseek-v4-flash';
 
@@ -58,14 +61,26 @@ async function createTuiConfig(): Promise<TuiConfig> {
 }
 
 async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false, monitorUrl?: string, mock = false): Promise<SessionManager> {
+	const cfg = ConfigManager.getInstance();
+	// 供应商级超时/重试配置（可选，默认 120s / 2 次）
+	const timeoutMs = cfg.get<number>(`providers.${config.provider}.timeout_ms`) ?? 120_000;
+	const maxRetries = cfg.get<number>(`providers.${config.provider}.max_retries`) ?? 2;
 	const provider = mock
 		? new MockProvider('mock-chat', 50)
-		: new ApiClient(config.baseUrl, config.apiKey, config.model, monitorUrl);
-	const cfg = ConfigManager.getInstance();
+		: new ApiClient(config.baseUrl, config.apiKey, config.model, monitorUrl, timeoutMs, maxRetries);
 	const sessionsDir = cfg.getSessionsDir();
 	const storage = new Storage(sessionsDir);
 
 	const sessionMgr = new SessionManager(storage, provider, tools);
+
+	// 注入生成参数默认值（temperature/max_tokens/top_p/thinking/reasoning_effort）
+	const chatDefaults = {
+		...(cfg.get<number>('defaults.temperature') !== undefined ? { temperature: cfg.get<number>('defaults.temperature') } : {}),
+		...(cfg.get<number>('defaults.max_tokens') !== undefined ? { max_tokens: cfg.get<number>('defaults.max_tokens') } : {}),
+		...(cfg.get<string>('defaults.reasoning_effort') ? { reasoning_effort: cfg.get<string>('defaults.reasoning_effort') } : {}),
+		...(cfg.get<string>('defaults.thinking') ? { thinking: { type: cfg.get<string>('defaults.thinking') } as { type: 'enabled' | 'disabled' } } : {}),
+	};
+	sessionMgr.setChatDefaults(chatDefaults);
 
 	// 注入子代理执行器（懒绑定，解决循环依赖）
 	setSubagentRunner((name, task) => sessionMgr.runSubagent(name, task));

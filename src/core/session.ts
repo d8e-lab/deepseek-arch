@@ -12,7 +12,7 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Storage } from './storage.js';
-import type { ModelProvider } from './model-provider.js';
+import type { ModelProvider, ChatOptions } from './model-provider.js';
 import { yieldEventLoop } from '../utils/event-loop.js';
 import { turnUserContent } from '../utils/turn-utils.js';
 import { appendCacheLog } from './cache-log.js';
@@ -90,6 +90,9 @@ export class SessionManager {
 	private subagentControllers = new Map<string, AbortController>();
 	/** 子代理 token 累积（O-1：并入主会话 usage 入账） */
 	private subagentUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+	/** 生成参数默认值（temperature/max_tokens/top_p/thinking/reasoning_effort），
+	 *  从配置 defaults 读取，发送消息与子代理调用时透传给 provider */
+	private chatDefaults: ChatOptions = {};
 
 	constructor(storage: Storage, provider: ModelProvider, tools?: Tool[]) {
 		this.storage = storage;
@@ -174,6 +177,12 @@ export class SessionManager {
 	/** 切换默认模型 */
 	setModel(model: string): void {
 		this.provider.setModel?.(model);
+	}
+
+	/** 设置生成参数默认值（temperature/max_tokens/top_p/thinking/reasoning_effort），
+	 *  发送消息与子代理调用时透传给 provider。 */
+	setChatDefaults(defaults: ChatOptions): void {
+		this.chatDefaults = { ...defaults };
 	}
 
 	/** 设置子代理异步模式 */
@@ -280,7 +289,7 @@ export class SessionManager {
 				this.subagentUsage.completion_tokens += usage.completion_tokens;
 				this.subagentUsage.total_tokens += usage.total_tokens;
 			},
-		});
+		}, this.chatDefaults);
 
 		// I-2：cancelled / failed / completed 三态判定（取消是独立状态，不误标 completed）
 		let status: 'completed' | 'failed' | 'cancelled';
@@ -751,6 +760,7 @@ export class SessionManager {
 				for await (const chunk of this.provider.chatStream(roundMessages, {
 					tools: toolDefs,
 					signal,
+					...this.chatDefaults,
 				})) {
 					if (!responseId) responseId = chunk.id;
 					if (!modelName) modelName = chunk.model;

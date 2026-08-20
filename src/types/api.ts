@@ -23,7 +23,13 @@ export interface ChatCompletionRequest {
 	max_tokens?: number;
 	top_p?: number;
 	tools?: ToolDefinition[];
-	tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
+	tool_choice?: 'auto' | 'none' | 'required' | { type: 'function'; function: { name: string } };
+	/** 思考模式开关（deepseek-v4 系列） */
+	thinking?: { type?: 'enabled' | 'disabled' };
+	/** 推理强度：low / high / max（medium/xhigh 映射为 high） */
+	reasoning_effort?: string;
+	/** 流式选项：include_usage=true 时流式末尾额外传 usage 块 */
+	stream_options?: { include_usage?: boolean };
 }
 
 /** Tool call delta（流式增量） */

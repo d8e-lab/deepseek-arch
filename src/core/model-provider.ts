@@ -16,7 +16,12 @@ export interface ChatOptions {
 	model?: string;
 	temperature?: number;
 	max_tokens?: number;
+	top_p?: number;
 	tools?: ToolDefinition[];
+	/** 思考模式开关（deepseek-v4 系列） */
+	thinking?: { type?: 'enabled' | 'disabled' };
+	/** 推理强度：low / high / max */
+	reasoning_effort?: string;
 }
 
 /** 流式调用选项（含非流式选项 + 超时/重试/中断） */
@@ -24,6 +29,8 @@ export interface StreamChatOptions extends ChatOptions {
 	timeoutMs?: number;
 	maxRetries?: number;
 	signal?: AbortSignal;
+	/** 流式末尾附带 usage 块（默认 true，供 token 统计） */
+	includeUsage?: boolean;
 }
 
 /** 模型提供商统一接口 */

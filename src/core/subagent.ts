@@ -7,7 +7,7 @@
  * 实时上报给调用方（SessionManager → SubagentStore → TUI 详情视图）。
  */
 
-import type { ModelProvider } from './model-provider.js';
+import type { ModelProvider, ChatOptions } from './model-provider.js';
 import type { Tool, ToolResult } from '../tools/types.js';
 import type { Message, ToolDefinition, ToolCall, ToolCallDelta, TokenUsage } from '../types/index.js';
 import type { SubagentRoundEntry } from './subagent-store.js';
@@ -35,6 +35,7 @@ export async function runSubagentLoop(
 	systemPrompt: string,
 	signal?: AbortSignal,
 	callbacks?: SubagentCallbacks,
+	chatDefaults?: ChatOptions,
 ): Promise<string> {
 	const emit = (entry: SubagentRoundEntry) => {
 		callbacks?.onEntry?.(entry);
@@ -69,6 +70,7 @@ export async function runSubagentLoop(
 			for await (const chunk of provider.chatStream(messages, {
 				...toolOptions,
 				signal,
+				...(chatDefaults ?? {}),
 			})) {
 				const delta = chunk.choices[0]?.delta;
 				if (!delta) continue;
