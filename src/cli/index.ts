@@ -83,6 +83,13 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	};
 	sessionMgr.setChatDefaults(chatDefaults);
 
+	// 自动 compact 配置（默认开启 70%/1M）
+	sessionMgr.setAutoCompact({
+		enabled: cfg.get<boolean>('defaults.auto_compact') ?? true,
+		threshold: cfg.get<number>('defaults.auto_compact_threshold') ?? 0.7,
+		contextWindow: cfg.get<number>('defaults.context_window') ?? 1_000_000,
+	});
+
 	// 注入子代理执行器（懒绑定，解决循环依赖）
 	setSubagentRunner((name, task) => sessionMgr.runSubagent(name, task));
 

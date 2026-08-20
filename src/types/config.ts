@@ -62,6 +62,12 @@ export interface ConfigDefaults {
 	yolo?: boolean;
 	/** 子代理异步模式 */
 	async?: boolean;
+	/** 自动 compact（上下文超阈值时自动压缩，默认开启） */
+	auto_compact?: boolean;
+	/** 自动 compact 触发阈值（0~1，占 context_window 比例，默认 0.7） */
+	auto_compact_threshold?: number;
+	/** 上下文窗口大小（tokens，DeepSeek v4 为 1_000_000） */
+	context_window?: number;
 }
 
 /** 主配置（config.toml） */

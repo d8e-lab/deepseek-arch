@@ -2157,6 +2157,19 @@ export class TuiApp {
 						case 'subagent_update':
 							// 增量更新（detail view 通过 store 自行拉取，此处不渲染）
 							break;
+						case 'auto_compact': {
+							flush(true);
+
+							this.finalizeThinkCollapse();
+							const gen = event.compactGen;
+							const n = event.compressedTurns;
+							const files = event.restoredFiles;
+							const detail = gen !== undefined
+								? ` gen=${gen}, 压缩 ${n ?? 0} 轮, 恢复 ${files ?? 0} 个文件`
+								: '';
+							this.writeOutputLine(dim(`[Auto-compact] ${event.text ?? ''}${detail}`));
+							break;
+						}
 						case 'done':
 							flush(true);
 

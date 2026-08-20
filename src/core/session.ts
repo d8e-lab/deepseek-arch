@@ -93,6 +93,12 @@ export class SessionManager {
 	/** 生成参数默认值（temperature/max_tokens/top_p/thinking/reasoning_effort），
 	 *  从配置 defaults 读取，发送消息与子代理调用时透传给 provider */
 	private chatDefaults: ChatOptions = {};
+	/** 自动 compact 配置：上下文超阈值时自动压缩（默认开启，70% of 1M tokens） */
+	private autoCompact = {
+		enabled: true,
+		threshold: 0.7,
+		contextWindow: 1_000_000,
+	};
 
 	constructor(storage: Storage, provider: ModelProvider, tools?: Tool[]) {
 		this.storage = storage;
@@ -183,6 +189,17 @@ export class SessionManager {
 	 *  发送消息与子代理调用时透传给 provider。 */
 	setChatDefaults(defaults: ChatOptions): void {
 		this.chatDefaults = { ...defaults };
+	}
+
+	/** 设置自动 compact 配置（上下文超阈值时自动压缩，默认开启 70%/1M） */
+	setAutoCompact(config: { enabled?: boolean; threshold?: number; contextWindow?: number }): void {
+		if (config.enabled !== undefined) this.autoCompact.enabled = config.enabled;
+		if (config.threshold !== undefined && config.threshold > 0 && config.threshold < 1) {
+			this.autoCompact.threshold = config.threshold;
+		}
+		if (config.contextWindow !== undefined && config.contextWindow > 0) {
+			this.autoCompact.contextWindow = config.contextWindow;
+		}
 	}
 
 	/** 设置子代理异步模式 */
@@ -806,6 +823,34 @@ export class SessionManager {
 						cache_hit_tokens: usage.prompt_cache_hit_tokens ?? 0,
 						cache_miss_tokens: usage.prompt_cache_miss_tokens ?? 0,
 					});
+				}
+
+				// ── 自动 compact：本轮请求输入超阈值 → 压缩历史（保留 agentMessages 继续执行）──
+				// 以 usage.prompt_tokens（本轮实际请求的输入 token 数，含全部历史）为判据。
+				// compactContext 会等待子代理结束 → 生成摘要 → 开启新分代 → 更新 this.session.turns；
+				// 之后重建 baseMessages（摘要轮成为新前缀），当前轮的工具交互（agentMessages）保留。
+				if (usage && this.autoCompact.enabled) {
+					const promptTokens = usage.prompt_tokens + (usage.completion_tokens ?? 0);
+					const limit = Math.floor(this.autoCompact.contextWindow * this.autoCompact.threshold);
+					if (promptTokens > limit && this.session!.turns.length > 0) {
+						try {
+							const result = await this.compactContext();
+							// compact 后重建 baseMessages：buildMessages 从最后一个摘要轮开始，
+							// agentMessages（当前轮工具交互）保留，消息序列 = 摘要 + userMsg + agentMessages
+							baseMessages.length = 0;
+							baseMessages.push(...this.buildMessages(userContent));
+							onEvent({
+								type: 'auto_compact',
+								text: `上下文 ${promptTokens} tokens 超过阈值 ${limit}，已自动压缩`,
+								compactGen: result.gen,
+								compressedTurns: result.compressedTurns,
+								restoredFiles: result.restoredFiles,
+							});
+						} catch (err) {
+							// 自动 compact 失败不阻塞主流程
+							onEvent({ type: 'auto_compact', text: `自动压缩失败: ${err instanceof Error ? err.message : String(err)}` });
+						}
+					}
 				}
 
 				// 本轮无 tool_calls → 检查子代理状态

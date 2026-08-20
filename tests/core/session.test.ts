@@ -778,5 +778,99 @@ describe('SessionManager', () => {
       await mgr.startNewSession('空会话');
       await expect(mgr.compactContext()).rejects.toThrow('会话为空');
     });
+
+    it('自动 compact：请求输入超阈值时自动压缩并保留当前轮继续执行', async () => {
+      // 按调用次数：1=正常（turns 落盘），2=超阈值+工具调用（触发 compact），3=compact 后正常结束
+      const captured: { messages: Message[] } = { messages: [] };
+      let callCount = 0;
+      const client = {
+        chat: async () => makeResponse({
+          choices: [{
+            index: 0,
+            message: { role: 'assistant', content: '【压缩摘要】自动触发...' },
+            finish_reason: 'stop',
+          }],
+        }),
+        chatStream: async function* gen(messages: Message[]): AsyncGenerator<StreamChunk> {
+          captured.messages = messages;
+          callCount++;
+          if (callCount === 1) {
+            yield cchunk({ choices: [{ index: 0, delta: { content: '正常回复' }, finish_reason: null }] });
+            yield cusage({ prompt_tokens: 50, completion_tokens: 10, total_tokens: 60 });
+          } else if (callCount === 2) {
+            // 超阈值：tool_calls + 900k usage（> 800k 触发线）
+            yield cchunk({
+              choices: [{
+                index: 0,
+                delta: {
+                  content: '先用工具',
+                  tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }],
+                },
+                finish_reason: null,
+              }],
+            });
+            yield cusage({ prompt_tokens: 900_000, completion_tokens: 100, total_tokens: 900_100 });
+          } else {
+            // compact 后：纯文本结束
+            yield cchunk({ choices: [{ index: 0, delta: { content: '完成' }, finish_reason: null }] });
+            yield cusage({ prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 });
+          }
+        },
+      } as unknown as ModelProvider;
+
+      const mgr = new SessionManager(storage, client, [{
+        name: 'read_file',
+        description: 'read file',
+        parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+        requiresConfirm: false,
+        async execute(): Promise<ToolResult> {
+          return { content: 'file content' };
+        },
+      }]);
+      // 阈值 0.8、窗口 1M → 触发线 800k；900k 超过
+      mgr.setAutoCompact({ enabled: true, threshold: 0.8, contextWindow: 1_000_000 });
+      await mgr.startNewSession('自动 compact');
+      mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+      // 第一轮：正常（turns 落盘，为触发轮提供历史）
+      await mgr.sendMessageStream('第一轮问题', () => {});
+      // 第二轮：超阈值触发自动 compact
+      await mgr.sendMessageStream('第二轮问题', () => {});
+
+      // 自动 compact 后：新分代已开启（gen=1），请求上下文包含摘要
+      const gens = await storage.listGenerations(mgr.getSessionId()!);
+      expect(gens).toContain(1);
+      const gen1 = await storage.loadGeneration(mgr.getSessionId()!, 1);
+      expect(gen1[0].type).toBe('compact');
+      expect(gen1[0].summary).toContain('自动触发');
+      // compact 后（call 3）请求上下文包含摘要轮
+      const userMsgs = captured.messages.filter((m) => m.role === 'user').map((m) => m.content);
+      expect(userMsgs.some((c) => c.includes('[Compacted Context Summary]'))).toBe(true);
+    });
+
+    it('自动 compact 可关闭：enabled=false 时超阈值不压缩', async () => {
+      let firstRound = true;
+      const client = {
+        chat: async () => makeResponse({
+          choices: [{ index: 0, message: { role: 'assistant', content: '摘要', }, finish_reason: 'stop' }],
+        }),
+        chatStream: async function* gen(): AsyncGenerator<StreamChunk> {
+          if (firstRound) {
+            firstRound = false;
+            yield cusage({ prompt_tokens: 900_000, completion_tokens: 0, total_tokens: 900_000 });
+          }
+          yield cchunk({ choices: [{ index: 0, delta: { content: '回复' }, finish_reason: null }] });
+          yield cusage({ prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 });
+        },
+      } as unknown as ModelProvider;
+
+      const mgr = new SessionManager(storage, client);
+      mgr.setAutoCompact({ enabled: false });
+      await mgr.startNewSession('自动 compact 关闭');
+      mgr.setSystemPrompt({ role: 'system', content: 'system' });
+      await mgr.sendMessageStream('问题', () => {});
+
+      const gens = await storage.listGenerations(mgr.getSessionId()!);
+      expect(gens).not.toContain(1); // 未触发新分代
+    });
   });
 });
