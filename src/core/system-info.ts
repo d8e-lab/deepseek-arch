@@ -9,7 +9,7 @@
  *   4. 网络 IP
  *   5. Git 分支与远程仓库信息
  *   6. 工作区目录结构
- *   7. README / AGENTS.md 内容
+ *   7. AGENTS.md 内容（README 不再注入——易过期且浪费 token）
  */
 
 import { readFile, readdir } from 'node:fs/promises';
@@ -171,20 +171,19 @@ async function buildDirTree(dir: string, maxDepth: number, currentDepth: number)
 	return lines;
 }
 
-// ─── README / AGENTS ──────────────────────────────
+// ─── AGENTS ─────────────────────────────────────────
 
+/**
+ * 查找并读取 AGENTS 文件（AGENTS.md / agents.md 等）注入 system prompt。
+ * 注意：不再读取 README——README 是面向用户的功能文档，随版本频繁变动，
+ * 注入会让 system prompt 携带过期内容且浪费 token；agent 需要项目信息
+ * 时可用 read_file 按需读取。
+ */
 async function findAndReadDocs(dir: string): Promise<{ name: string; content: string }[]> {
 	const docs: { name: string; content: string }[] = [];
 
 	try {
 		const entries = await readdir(dir);
-		// 匹配 README, README.md, Readme.md, readme.md 等
-		const readmeFile = entries.find((e) => /^readme(\.\w+)?$/i.test(e));
-		if (readmeFile) {
-			const content = await readFileHead(join(dir, readmeFile), MAX_DOC_BYTES);
-			if (content) docs.push({ name: readmeFile, content });
-		}
-
 		// 匹配 AGENTS.md, agents.md, Agents.md 等
 		const agentsFile = entries.find((e) => /^agents\.\w+$/i.test(e));
 		if (agentsFile) {
@@ -281,7 +280,7 @@ export async function buildSystemPromptContext(cwd?: string): Promise<string> {
 	lines.push('Directory structure:');
 	lines.push(...info.dirTree);
 
-	// README / AGENTS
+	// AGENTS.md（README 不再注入）
 	for (const doc of info.docs) {
 		lines.push('');
 		lines.push(`--- ${doc.name} ---`);

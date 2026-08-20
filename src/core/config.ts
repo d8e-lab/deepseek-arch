@@ -71,7 +71,7 @@ const DEFAULT_PRICING: PricingConfig = {
 
 /**
  * 从项目根 `skill/` 目录复制全部 skill 文件到配置目录。
- * 定位方式与 readDefaultSystemPrompt 一致。
+ * 定位方式与 readSystemPromptFile 一致（通过 import.meta.url 定位项目根）。
  * 已存在的文件跳过（用户可能自定义了）。
  */
 async function copySkillDir(configDir: string): Promise<void> {
@@ -119,11 +119,13 @@ You MUST be very thorough in your thinking and comprehensively decompose the pro
 Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.`;
 
 /**
- * 从项目根目录下的 system_prompt.txt 读取默认 system prompt。
+ * 从项目根目录下的 system_prompt.txt 读取默认 system prompt 文本。
  * 定位方式：通过 import.meta.url 向上找到项目根（src/core → ../../ 或 dist/core → ../../）。
  * 找不到文件时返回硬编码兜底。
+ *
+ * 运行时每次启动实时读取（不落盘快照），保证 system_prompt.txt 的修改立即生效。
  */
-async function readDefaultSystemPrompt(): Promise<SystemPromptConfig> {
+export async function readSystemPromptFile(): Promise<string> {
 	const __filename = fileURLToPath(import.meta.url);
 	const __dirname = dirname(__filename);
 	const projectRoot = resolve(__dirname, '..', '..');
@@ -131,13 +133,9 @@ async function readDefaultSystemPrompt(): Promise<SystemPromptConfig> {
 
 	try {
 		const content = await readFile(txtPath, 'utf-8');
-		return {
-			default: { content },
-		};
+		return content.trim() || FALLBACK_SYSTEM_PROMPT;
 	} catch {
-		return {
-			default: { content: FALLBACK_SYSTEM_PROMPT },
-		};
+		return FALLBACK_SYSTEM_PROMPT;
 	}
 }
 
@@ -212,9 +210,10 @@ export class ConfigManager {
 		let appConfig = await this.loadTomlFile<AppConfig>(mainConfigPath);
 
 		if (!appConfig) {
-			// 首次运行：写入所有默认配置文件
-			// system prompt 从项目根 system_prompt.txt 读取，避免硬编码
-			const defaultSystemPrompts = await readDefaultSystemPrompt();
+			// 首次运行：写入默认配置文件
+			// 注意：不再创建 system-prompt.toml 快照——默认 system prompt 运行时
+			// 直接读项目根 system_prompt.txt（实时最新，见 readSystemPromptFile）。
+			// system-prompt.toml 仅作为可选的自定义模板（用户手动创建才生效）。
 			await this.writeTomlFile(mainConfigPath, DEFAULT_MAIN_CONFIG as unknown as Record<string, unknown>);
 			await this.writeTomlFile(
 				this.resolvePath('providers.toml'),
@@ -223,10 +222,6 @@ export class ConfigManager {
 			await this.writeTomlFile(
 				this.resolvePath('pricing.toml'),
 				DEFAULT_PRICING as unknown as Record<string, unknown>,
-			);
-			await this.writeTomlFile(
-				this.resolvePath('system-prompt.toml'),
-				defaultSystemPrompts as unknown as Record<string, unknown>,
 			);
 			// 复制 skill 文件到配置目录（首次运行）
 			await copySkillDir(this.configDir);

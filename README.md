@@ -169,7 +169,7 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 ├── config.toml           # 主配置（[paths] 文件跳转 + [defaults] 默认模型/provider/system）
 ├── providers.toml        # API 密钥与地址（可按供应商配置超时/重试）
 ├── pricing.toml          # 模型价格（¥/1M tokens）
-├── system-prompt.toml    # System Prompt 模板
+├── system-prompt.toml    # 可选：自定义 System Prompt 模板（手动创建才生效；默认直接读项目根 system_prompt.txt）
 ├── skill/                # 技能文件（首次运行从项目 skill/ 复制，用户可自定义）
 └── sessions/             # 对话数据（文件系统存储）
     └── <uuid>/
@@ -181,6 +181,8 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 ```
 
 配置 `~/.deepseek-arch/providers.toml` 中的 `api_key`（或设置 `DEEPSEEK_API_KEY` 环境变量）后即可使用。
+
+**System Prompt 来源**：默认实时读取项目根 `system_prompt.txt`（修改后下次启动立即生效，无快照缓存）；若手动在 `system-prompt.toml` 配置了 `defaults.system_prompt` 指向的模板，则优先使用自定义模板。
 
 ### 主要配置项（config.toml `[defaults]`）
 

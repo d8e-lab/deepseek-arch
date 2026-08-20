@@ -1,6 +1,6 @@
 # ConfigManager 设计
 
-> 最后更新：2026-05-18 · 实现文件：`src/core/config.ts`
+> 最后更新：2026-08-20 · 实现文件：`src/core/config.ts`
 
 ## 职责
 
@@ -9,7 +9,8 @@
 3. 合并为完整的 `ResolvedConfig`
 4. 提供点号路径取值 (`get`) 与覆写 (`set`)
 5. 支持热重载 (`reload`)
-6. 首次运行时自动创建默认配置文件
+6. 首次运行时自动创建默认配置文件（config.toml / providers.toml / pricing.toml / skill/；**不再创建 system-prompt.toml**）
+7. 提供 `readSystemPromptFile()` 实时读取项目根 `system_prompt.txt`（默认 system prompt 来源）
 
 ## 设计模式：Singleton
 
@@ -67,7 +68,11 @@ output = 2.00
 currency = "CNY"
 ```
 
-### System Prompt (system-prompt.toml)
+### System Prompt（可选自定义，system-prompt.toml）
+
+> **默认不创建**：默认 system prompt 运行时实时读取项目根 `system_prompt.txt`（`readSystemPromptFile`），
+> 修改后下次启动立即生效。`system-prompt.toml` 仅作为**可选的自定义模板**——用户手动创建
+> 并配置 `defaults.system_prompt` 指向它时才生效（优先级高于 `system_prompt.txt`）。
 
 ```toml
 [default]
