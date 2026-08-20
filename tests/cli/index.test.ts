@@ -73,12 +73,27 @@ describe('CLI (e2e)', () => {
       expect(stdout).toContain('--resume');
       expect(stdout).toContain('--yolo');
     });
+
+    it('chat --help 显示全部选项（含 debug/self-interaction/monitor）', () => {
+      const { stdout } = run(['chat', '--help']);
+      expect(stdout).toContain('--debug');
+      expect(stdout).toContain('--self-interaction');
+      expect(stdout).toContain('--mock');
+      expect(stdout).toContain('--monitor');
+      expect(stdout).toContain('--cdp');
+      expect(stdout).toContain('--async');
+    });
   });
 
   describe('resume 子命令', () => {
     it('resume --help 显示 [id] 位置参数', () => {
       const { stdout } = run(['resume', '--help']);
       expect(stdout).toContain('[id]');
+    });
+
+    it('resume --help 显示 --yolo 选项（与 chat 对齐）', () => {
+      const { stdout } = run(['resume', '--help']);
+      expect(stdout).toContain('--yolo');
     });
 
     it('resume 无参数时显示会话列表或空提示', () => {

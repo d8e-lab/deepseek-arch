@@ -56,6 +56,7 @@ async function createTuiConfig(): Promise<TuiConfig> {
 		baseUrl,
 		apiKey,
 		version: PACKAGE_VERSION,
+		systemPrompt: cfg.get<string>('defaults.system_prompt') ?? 'default',
 		reviewModel,
 	};
 }
@@ -135,7 +136,10 @@ program
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
 	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
-			const asyncMode = options.async ?? false;
+			// YOLO / async：CLI 参数优先，回退到配置文件 defaults（重启保持）
+			const cfg = ConfigManager.getInstance();
+			const yolo = options.yolo ?? cfg.get<boolean>('defaults.yolo') ?? false;
+			const asyncMode = options.async ?? cfg.get<boolean>('defaults.async') ?? false;
 			const debug = options.debug ?? false;
 			// 请求镜像监听地址：CLI 参数优先，回退到环境变量
 			const monitorUrl = options.monitor ?? process.env.DEEPSEEK_API_MONITOR_URL;
@@ -170,7 +174,7 @@ program
 					process.exit(1);
 				}
 				await sessionMgr.resumeSession(session.meta.id);
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo, options.mock);
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock);
 				if (options.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -182,7 +186,7 @@ program
 			}
 
 			// 新会话
-			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo, options.mock);
+			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock);
 			if (options.selfInteraction) {
 				app.setSelfInteraction(true);
 			}
@@ -237,12 +241,13 @@ program
 	.description('List all sessions or resume a specific one')
 	.option('--browser', 'show browser window (instead of headless)')
 	.option('--cdp <url>', 'connect to host browser via CDP')
+	.option('--yolo', 'skip all tool confirmations (auto-approve edit/shell)')
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
 	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
 	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; yolo?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
@@ -265,13 +270,15 @@ program
 				}
 
 				const tuiConfig = await createTuiConfig();
-				const asyncMode = options?.async ?? false;
+				const cfg = ConfigManager.getInstance();
+				const yolo = options?.yolo ?? cfg.get<boolean>('defaults.yolo') ?? false;
+				const asyncMode = options?.async ?? cfg.get<boolean>('defaults.async') ?? false;
 				const debug = options?.debug ?? false;
 				const tools = loadMasterTools(debug, options?.selfInteraction);
 				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
 				await sessionMgr.resumeSession(session.meta.id);
 
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), undefined, options?.mock);
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock);
 				if (options?.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -329,12 +336,15 @@ program
 			}
 
 			const tuiConfig = await createTuiConfig();
+			const cfg = ConfigManager.getInstance();
+			const yolo = options?.yolo ?? cfg.get<boolean>('defaults.yolo') ?? false;
+			const asyncMode = options?.async ?? cfg.get<boolean>('defaults.async') ?? false;
 			const debug = options?.debug ?? false;
 			const tools = loadMasterTools(debug, options?.selfInteraction);
-			const sessionMgr = await createSessionManager(tuiConfig, tools, undefined, monitorUrl, options?.mock);
+			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
 			await sessionMgr.resumeSession(session.meta.id);
 
-			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), undefined, options?.mock);
+			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock);
 			if (options?.selfInteraction) {
 				app.setSelfInteraction(true);
 			}
@@ -403,12 +413,12 @@ function generateBashCompletion(): void {
 		"\tcase \"" + D + "{words[1]}\" in",
 		"\t\tchat)",
 		"\t\t\tif [[ \"" + D + "cur\" == -* ]]; then",
-		"\t\t\t\tCOMPREPLY=($(compgen -W \"--resume --yolo --browser --cdp --async\" -- \"" + D + "cur\"))",
+		"\t\t\t\tCOMPREPLY=($(compgen -W \"--resume --yolo --browser --cdp --async --debug --self-interaction --mock --monitor\" -- \"" + D + "cur\"))",
 		"\t\t\tfi",
 		"\t\t\t;;",
 		"\t\tresume)",
 		"\t\t\tif [[ \"" + D + "cur\" == -* ]]; then",
-		"\t\t\t\tCOMPREPLY=($(compgen -W \"--browser --cdp --async\" -- \"" + D + "cur\"))",
+		"\t\t\t\tCOMPREPLY=($(compgen -W \"--browser --cdp --yolo --async --debug --self-interaction --mock --monitor\" -- \"" + D + "cur\"))",
 		"\t\t\tfi",
 		"\t\t\t;;",
 		"\t\tcompletion)",
@@ -454,13 +464,22 @@ function generateZshCompletion(): void {
 		"\t\t\t\t\t\t'--yolo[Skip all tool confirmations]' \\",
 		"\t\t\t\t\t\t'--browser[Show browser window]' \\",
 		"\t\t\t\t\t\t'--cdp=[Connect to browser via CDP]:url' \\",
-		"\t\t\t\t\t\t'--async[Async subagent mode]'",
+		"\t\t\t\t\t\t'--async[Async subagent mode]' \\",
+		"\t\t\t\t\t\t'--debug[Enable TUI debug tools]' \\",
+		"\t\t\t\t\t\t'--self-interaction[Enable TUI session PTY tools]' \\",
+		"\t\t\t\t\t\t'--mock[Use MockProvider]' \\",
+		"\t\t\t\t\t\t'--monitor=[Mirror API requests]:url'",
 		"\t\t\t\t\t;;",
 		"\t\t\t\tresume)",
 		"\t\t\t\t\t_arguments \\",
 		"\t\t\t\t\t\t'--browser[Show browser window]' \\",
 		"\t\t\t\t\t\t'--cdp=[Connect to browser via CDP]:url' \\",
-		"\t\t\t\t\t\t'--async[Async subagent mode]'",
+		"\t\t\t\t\t\t'--yolo[Skip all tool confirmations]' \\",
+		"\t\t\t\t\t\t'--async[Async subagent mode]' \\",
+		"\t\t\t\t\t\t'--debug[Enable TUI debug tools]' \\",
+		"\t\t\t\t\t\t'--self-interaction[Enable TUI session PTY tools]' \\",
+		"\t\t\t\t\t\t'--mock[Use MockProvider]' \\",
+		"\t\t\t\t\t\t'--monitor=[Mirror API requests]:url'",
 		"\t\t\t\t\t;;",
 		"\t\t\t\tcompletion)",
 		"\t\t\t\t\t_arguments '1:shell type:(bash zsh)'",

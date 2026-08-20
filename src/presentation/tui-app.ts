@@ -55,11 +55,11 @@ import { isInteractiveCommand } from '../tools/utils.js';
 /** 输入框最大可见行数 */
 const MAX_INPUT_ROWS = 5;
 
-/** 可选模型列表 */
-const AVAILABLE_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
+/** 可选模型列表（运行时从配置动态生成，见 TuiApp 构造函数；此为兜底） */
+const FALLBACK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
 /** 可用命令列表 */
-const AVAILABLE_COMMANDS = ['/model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/compact', '/exit'];
+const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/review_model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/compact', '/exit'];
 
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
@@ -71,6 +71,8 @@ export class TuiApp {
 	private tools: Tool[];
 	private yolo: boolean;
 	private reviewModel?: string;
+	/** 可选模型列表（从配置 pricing/providers 动态生成） */
+	private availableModels: string[] = FALLBACK_MODELS;
 	/** 子代理异步模式 */
 	private asyncMode = false;
 	private conversation: ConversationView;
@@ -151,6 +153,14 @@ export class TuiApp {
 		this.asyncMode = sessionMgr.getSubagentAsync();
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
+
+		// 模型候选列表：从配置 pricing.<provider> 键动态生成（含当前模型兜底）
+		if (this.configMgr) {
+			const pricing = this.configMgr.get<Record<string, Record<string, unknown>>>(`pricing.${config.provider}`);
+			const configured = pricing ? Object.keys(pricing) : [];
+			const merged = [...new Set([...configured, config.model, ...FALLBACK_MODELS])];
+			this.availableModels = merged.length > 0 ? merged : FALLBACK_MODELS;
+		}
 	}
 
 	/** 设置自我交互模式（在 start() 之前调用） */
@@ -456,12 +466,12 @@ export class TuiApp {
 
 		if (content.startsWith('/model')) {
 			const arg = content.slice(6).trim();
-			if (arg && AVAILABLE_MODELS.includes(arg)) {
+			if (arg && this.availableModels.includes(arg)) {
 				return await this.switchModel(arg);
 			}
 
 			// 交互式选择
-			const options: SelectOption<string>[] = AVAILABLE_MODELS.map((m) => ({
+			const options: SelectOption<string>[] = this.availableModels.map((m) => ({
 				label: m,
 				value: m,
 			}));
@@ -476,6 +486,18 @@ export class TuiApp {
 				return await this.switchModel(selected);
 			}
 			return true;
+		}
+
+		if (content.startsWith('/provider')) {
+			return await this.switchProvider(content.slice(9).trim());
+		}
+
+		if (content.startsWith('/system')) {
+			return await this.switchSystemPrompt(content.slice(7).trim());
+		}
+
+		if (content.startsWith('/review_model')) {
+			return await this.switchReviewModel(content.slice(13).trim());
 		}
 
 		if (content.startsWith('/help')) {
@@ -535,6 +557,102 @@ export class TuiApp {
 		return true;
 	}
 
+	/**
+	 * /provider [name] — 切换默认供应商（写回 defaults.provider）
+	 * 无参数时列出可选供应商并交互选择；不存在的供应商会报错。
+	 */
+	private async switchProvider(name: string): Promise<boolean> {
+		if (!this.configMgr) {
+			process.stdout.write(red('[Provider switch unavailable: no config manager]') + '\r\n');
+			return true;
+		}
+
+		const providers = this.configMgr.get<Record<string, { base_url?: string }>>('providers') ?? {};
+		const names = Object.keys(providers);
+
+		if (!name) {
+			// 交互式选择
+			if (names.length === 0) {
+				process.stdout.write(red('No providers configured.') + '\r\n');
+				return true;
+			}
+			const options: SelectOption<string>[] = names.map((n) => ({ label: n, value: n }));
+			const selector = new Selector(options, terminalIO, 'Select a provider (↑↓ navigate, Enter confirm):');
+			const selected = await selector.select(
+				() => this.stdinHandler,
+				(h) => { this.stdinHandler = h; },
+			);
+			if (!selected) return true;
+			name = selected;
+		}
+
+		if (!providers[name]) {
+			process.stdout.write(red(`Provider "${name}" not found. Available: ${names.join(', ') || '(none)'}`) + '\r\n');
+			return true;
+		}
+
+		this.config.provider = name;
+		await this.configMgr.set('defaults.provider', name);
+		process.stdout.write(green(`[Provider switched: ${name}]`) + '\r\n');
+		this.printHeader();
+		return true;
+	}
+
+	/**
+	 * /system [name] — 切换 system prompt 模板（写回 defaults.system_prompt）
+	 * 无参数时列出模板；/system list 等价。
+	 */
+	private async switchSystemPrompt(name: string): Promise<boolean> {
+		if (!this.configMgr) {
+			process.stdout.write(red('[System prompt switch unavailable: no config manager]') + '\r\n');
+			return true;
+		}
+
+		const prompts = this.configMgr.get<Record<string, unknown>>('systemPrompts') ?? {};
+		const names = Object.keys(prompts);
+
+		if (!name || name === 'list') {
+			if (names.length === 0) {
+				process.stdout.write(dim('No system prompt templates configured.') + '\r\n');
+				return true;
+			}
+			process.stdout.write(yellow('System prompt templates:') + '\r\n');
+			for (const n of names) {
+				const marker = n === this.config.systemPrompt ? ' *' : '';
+				process.stdout.write(`  ${green(n)}${dim(marker)}` + '\r\n');
+			}
+			return true;
+		}
+
+		if (!prompts[name]) {
+			process.stdout.write(red(`System prompt "${name}" not found. Available: ${names.join(', ') || '(none)'}`) + '\r\n');
+			return true;
+		}
+
+		this.config.systemPrompt = name;
+		await this.configMgr.set('defaults.system_prompt', name);
+		process.stdout.write(green(`[System prompt switched: ${name}]`) + '\r\n');
+		this.printHeader();
+		return true;
+	}
+
+	/** /review_model [name] — 切换 YOLO 审查模型（写回 defaults.review_model） */
+	private async switchReviewModel(name: string): Promise<boolean> {
+		if (!name) {
+			const current = this.reviewModel ?? '(unset, default deepseek-v4-flash)';
+			process.stdout.write(dim(`Current review model: ${current}`) + '\r\n');
+			process.stdout.write(dim('Usage: /review_model <model-name>') + '\r\n');
+			return true;
+		}
+
+		this.reviewModel = name;
+		if (this.configMgr) {
+			await this.configMgr.set('defaults.review_model', name);
+		}
+		process.stdout.write(green(`[Review model switched: ${name}]`) + '\r\n');
+		return true;
+	}
+
 	/** /help — 显示可用命令列表 */
 	private showHelp(): true {
 		const cols = getTermSize().cols;
@@ -544,6 +662,9 @@ export class TuiApp {
 
 		const cmds: [string, string][] = [
 			['/model [name]', 'Switch model (interactive picker if no arg)'],
+			['/provider [name]', 'Switch provider (interactive picker if no arg)'],
+			['/system [name]', 'List/switch system prompt template'],
+			['/review_model [name]', 'Show/set YOLO review model'],
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
 			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
@@ -577,6 +698,8 @@ export class TuiApp {
 		// 基本信息
 		process.stdout.write(`  Provider:  ${this.config.provider}\r\n`);
 		process.stdout.write(`  Model:     ${this.config.model}\r\n`);
+		process.stdout.write(`  System:    ${this.config.systemPrompt ?? 'default'}\r\n`);
+		process.stdout.write(`  Review:    ${this.reviewModel ?? '(default flash)'}\r\n`);
 		process.stdout.write(`  YOLO mode: ${this.yolo ? green('ON') : dim('OFF')}\r\n`);
 		process.stdout.write(`  Subagent:  ${this.asyncMode ? green('async') : dim('sync')}\r\n`);
 		process.stdout.write(`  Session:   ${meta?.id ?? '—'}${meta?.title ? ' "' + dim(meta.title) + '"' : ''}\r\n`);
@@ -648,9 +771,14 @@ export class TuiApp {
 		return true;
 	}
 
-	/** /yolo — 切换 YOLO 模式 */
+	/** /yolo — 切换 YOLO 模式（写回 defaults.yolo） */
 	private async toggleYolo(): Promise<boolean> {
 		this.yolo = !this.yolo;
+		if (this.configMgr) {
+			try {
+				await this.configMgr.set('defaults.yolo', this.yolo);
+			} catch { /* 写回失败不阻塞切换 */ }
+		}
 		process.stdout.write(
 			green(`[YOLO mode: ${this.yolo ? 'ON' : 'OFF'}]`) +
 			dim(this.yolo ? '  (auto-approve tool executions)' : '  (confirm before tool execution)') +
@@ -659,10 +787,15 @@ export class TuiApp {
 		return true;
 	}
 
-	/** /async — 切换子代理异步模式 */
+	/** /async — 切换子代理异步模式（写回 defaults.async） */
 	private async toggleAsync(): Promise<boolean> {
 		this.asyncMode = !this.asyncMode;
 		this.sessionMgr.setSubagentAsync(this.asyncMode);
+		if (this.configMgr) {
+			try {
+				await this.configMgr.set('defaults.async', this.asyncMode);
+			} catch { /* 写回失败不阻塞切换 */ }
+		}
 		process.stdout.write(
 			green(`[Subagent async: ${this.asyncMode ? 'ON' : 'OFF'}]`) +
 			dim(this.asyncMode
