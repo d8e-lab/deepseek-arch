@@ -120,6 +120,35 @@ describe('ConfigManager', () => {
     });
   });
 
+  describe('system-prompt 快照', () => {
+    it('首次 load() 自动从项目根 system_prompt.txt 生成 system-prompt.toml', async () => {
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+
+      // 快照模板 default 存在且内容非空（来自项目根 system_prompt.txt）
+      const content = mgr.get<string>('systemPrompts.default.content');
+      expect(content).toBeDefined();
+      expect(content!.length).toBeGreaterThan(0);
+      expect(content!).toContain('Reasoning Effort');
+
+      // toml 文件确实落盘
+      const { access } = await import('node:fs/promises');
+      await expect(access(join(testDir, 'system-prompt.toml'))).resolves.toBeUndefined();
+    });
+
+    it('system-prompt.toml 缺失时 reload() 会重新生成快照', async () => {
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+
+      // 删除快照，模拟缺失
+      const { rm } = await import('node:fs/promises');
+      await rm(join(testDir, 'system-prompt.toml'), { force: true });
+
+      await mgr.reload();
+      expect(mgr.get<string>('systemPrompts.default.content')).toBeDefined();
+    });
+  });
+
   describe('reload() 热重载', () => {
     it('reload 后会读取文件的最新内容', async () => {
       const mgr = ConfigManager.getInstance(testDir);

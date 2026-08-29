@@ -11,7 +11,7 @@
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
-import { ConfigManager, DEFAULT_CONFIG_DIR, readSystemPromptFile } from '../core/config.js';
+import { ConfigManager, DEFAULT_CONFIG_DIR } from '../core/config.js';
 import { ApiClient } from '../core/api.js';
 import { MockProvider } from '../core/mock-provider.js';
 import { SessionManager } from '../core/session.js';
@@ -100,13 +100,10 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	sessionMgr.setSubagentAsync(asyncMode);
 
 	// 设置 system prompt
-	// 优先级：用户自定义模板（system-prompt.toml，手动配置的）> 项目根 system_prompt.txt（实时读，默认）
+	// 来源：system-prompt.toml 模板（ConfigManager.load() 启动时已保证存在——
+	// 缺失时从项目根 system_prompt.txt 生成快照，见 ensureSystemPromptSnapshot）
 	const defaultPrompt = cfg.get<string>('defaults.system_prompt') ?? 'default';
-	let sysContent = cfg.get<string>(`systemPrompts.${defaultPrompt}.content`);
-	if (!sysContent) {
-		// 无自定义模板 → 实时读项目根 system_prompt.txt（不再使用首次启动的旧快照）
-		sysContent = await readSystemPromptFile();
-	}
+	const sysContent = cfg.get<string>(`systemPrompts.${defaultPrompt}.content`);
 	if (sysContent) {
 		// 收集系统与环境信息，注入到 system prompt
 		const envContext = await buildSystemPromptContext();
@@ -120,6 +117,9 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 			role: 'system',
 			content: sysContent + '\n' + envContext + listingSection,
 		});
+	} else {
+		// 模板缺失（defaults.system_prompt 指向了未定义的模板名）→ 提示但不注入
+		process.stderr.write(`[warn] system prompt 模板 "${defaultPrompt}" 未定义于 system-prompt.toml，本次未注入 system prompt\r\n`);
 	}
 
 	return sessionMgr;

@@ -123,7 +123,8 @@ Explicitly write out your entire deliberation process, documenting every interme
  * 定位方式：通过 import.meta.url 向上找到项目根（src/core → ../../ 或 dist/core → ../../）。
  * 找不到文件时返回硬编码兜底。
  *
- * 运行时每次启动实时读取（不落盘快照），保证 system_prompt.txt 的修改立即生效。
+ * 仅用于启动时生成 system-prompt.toml 快照（见 ensureSystemPromptSnapshot）；
+ * 运行时系统 prompt 一律以 system-prompt.toml 为准，不再直接读本文件。
  */
 export async function readSystemPromptFile(): Promise<string> {
 	const __filename = fileURLToPath(import.meta.url);
@@ -198,6 +199,24 @@ export class ConfigManager {
 	}
 
 	/**
+	 * 每次启动调用：确保 system-prompt.toml 存在。
+	 * 缺失时从项目根 system_prompt.txt 读取内容，生成默认模板快照（模板名固定为 "default"）；
+	 * 已存在则跳过（用户可能自定义了）。
+	 */
+	private async ensureSystemPromptSnapshot(relativePath: string): Promise<void> {
+		const absPath = this.resolvePath(relativePath);
+		try {
+			await access(absPath);
+			return; // 已存在（用户自定义或上次生成的快照）→ 跳过
+		} catch {
+			// 不存在 → 从项目根 system_prompt.txt 生成快照
+		}
+		const content = await readSystemPromptFile();
+		const snapshot: SystemPromptConfig = { default: { content } };
+		await this.writeTomlFile(absPath, snapshot as unknown as Record<string, unknown>);
+	}
+
+	/**
 	 * 加载配置（幂等：已加载时直接返回，除非调用过 reload） 首次运行时自动创建默认配置文件。
 	 */
 	async load(): Promise<ConfigManager> {
@@ -211,9 +230,8 @@ export class ConfigManager {
 
 		if (!appConfig) {
 			// 首次运行：写入默认配置文件
-			// 注意：不再创建 system-prompt.toml 快照——默认 system prompt 运行时
-			// 直接读项目根 system_prompt.txt（实时最新，见 readSystemPromptFile）。
-			// system-prompt.toml 仅作为可选的自定义模板（用户手动创建才生效）。
+			// system-prompt.toml 由下方 ensureSystemPromptSnapshot 统一处理
+			// （缺失时从项目根 system_prompt.txt 生成快照），此处不重复创建。
 			await this.writeTomlFile(mainConfigPath, DEFAULT_MAIN_CONFIG as unknown as Record<string, unknown>);
 			await this.writeTomlFile(
 				this.resolvePath('providers.toml'),
@@ -228,7 +246,11 @@ export class ConfigManager {
 			appConfig = DEFAULT_MAIN_CONFIG;
 		}
 
-		// 2. 解析跳转引用
+		// 2. 每次启动：确保 system-prompt.toml 存在——缺失时从项目根 system_prompt.txt
+		//    生成快照（运行时一律以 toml 为准，不直接读 txt 或硬编码）
+		await this.ensureSystemPromptSnapshot(appConfig.paths.system_prompt);
+
+		// 3. 解析跳转引用
 		const providersPath = this.resolvePath(appConfig.paths.providers);
 		const pricingPath = this.resolvePath(appConfig.paths.pricing);
 		const systemPromptPath = this.resolvePath(appConfig.paths.system_prompt);
@@ -239,7 +261,7 @@ export class ConfigManager {
 			this.loadTomlFile<SystemPromptConfig>(systemPromptPath),
 		]);
 
-		// 3. 合并
+		// 4. 合并
 		this.resolved = {
 			paths: appConfig.paths,
 			defaults: appConfig.defaults,

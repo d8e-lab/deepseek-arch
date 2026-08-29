@@ -169,17 +169,17 @@ diff ~/.deepseek-arch/sessions/<uuid1>/system-prompt.txt \
 
 ## 修改方式
 
-1. **行为规则**：编辑项目根目录的 `system_prompt.txt`，**下次启动立即生效**（运行时实时读取，无快照缓存）
+1. **行为规则**：编辑项目根目录的 `system_prompt.txt`，然后删除（或手动修改）`~/.deepseek-arch/system-prompt.toml` —— 下次启动时若该 toml 缺失，会自动从 `system_prompt.txt` 重新生成快照（`ensureSystemPromptSnapshot`）。运行时以 `system-prompt.toml` 为准，不直接读 `system_prompt.txt`
 2. **环境信息**：修改 `src/core/system-info.ts` 中的采集逻辑
-3. **用户自定义 prompt**（可选）：手动创建 `~/.deepseek-arch/system-prompt.toml`，配置 `defaults.system_prompt` 指向的模板后优先使用（否则默认读 `system_prompt.txt`）
+3. **用户自定义 prompt**：直接编辑 `~/.deepseek-arch/system-prompt.toml`（可定义多个模板），让 `defaults.system_prompt` 指向要用的模板名
 
 ## 相关文件
 
 | 文件 | 职责 |
 |------|------|
-| `system_prompt.txt` | 默认 system prompt（推理努力度 + 行为规则），运行时实时读取 |
+| `system_prompt.txt` | 默认 system prompt 源（推理努力度 + 行为规则）；仅用于 `system-prompt.toml` 缺失时生成快照 |
 | `src/core/system-info.ts` | 环境信息采集与格式化 |
-| `src/core/config.ts` | `readSystemPromptFile()` 读取 `system_prompt.txt`（含硬编码兜底） |
-| `src/cli/index.ts` | `createSessionManager()` 中拼接 prompt + 环境（自定义模板优先，否则读文件） |
+| `src/core/config.ts` | `ensureSystemPromptSnapshot()` 启动时生成 `system-prompt.toml` 快照（源 `readSystemPromptFile()`，含硬编码兜底） |
+| `src/cli/index.ts` | `createSessionManager()` 中从 `system-prompt.toml` 读取模板并拼接环境 + skill listing |
 | `src/core/session.ts` | `setSystemPrompt()` 存储，`buildMessages()` 注入，`startNewSession()` 落盘 |
-| `~/.deepseek-arch/system-prompt.toml` | 可选的自定义 prompt 模板（手动创建才生效） |
+| `~/.deepseek-arch/system-prompt.toml` | 运行时唯一 prompt 来源（启动自动生成 `[default]` 快照，可自定义） |
