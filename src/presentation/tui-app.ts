@@ -96,6 +96,12 @@ export class TuiApp {
 	private suggestionLinesCount = 0;
 	/** 双工交互：流式输出期间用户 Enter 排入的待发送消息（中断当前输出后发送） */
 	private nextMessage: string | null = null;
+	/** 命令结果区：最近一次 / 命令的输出（固定显示在输入区上方，新命令替换，发送消息后清空） */
+	private commandResultLines: string[] = [];
+	/** 命令执行期间输出捕获标志（true 时 cmdOut 写入 commandResultLines 而非 scrollback） */
+	private commandResultActive = false;
+	/** 命令结果区最大显示行数（超出截断） */
+	private readonly MAX_CMD_RESULT_ROWS = 6;
 	/** 当前轮完整 think 内容（Ctrl+O 查看完整思考用） */
 	private fullThink: string[] = [];
 	/** think 是否已折叠（超出可见行数） */
@@ -370,8 +376,10 @@ export class TuiApp {
 		// 仅空闲态重绘输入区域（流式/确认态的输出已在 scrollback 中）
 		if (this.state !== AppState.IDLE) return;
 		// 回到输入区域起点 → 清到屏底 → 重画 → 重渲染
-		if (this.lastCursorDisplayRow > 0) {
-			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		const cmdRows = this.commandResultLines.length;
+		const totalUp = this.lastCursorDisplayRow + cmdRows;
+		if (totalUp > 0) {
+			process.stdout.write(`\x1b[${totalUp}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
@@ -409,8 +417,10 @@ export class TuiApp {
 		let content = await this.readUserInput();
 
 		// 清除输入区域：回到起点（无历史记录时即当前行），清到屏底
-		if (this.lastCursorDisplayRow > 0) {
-			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		const cmdRows = this.commandResultLines.length;
+		const totalUp = this.lastCursorDisplayRow + cmdRows;
+		if (totalUp > 0) {
+			process.stdout.write(`\x1b[${totalUp}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
@@ -426,6 +436,7 @@ export class TuiApp {
 			if (!handled) {
 				// F-9：// 前缀转义——去掉一个 / 后按普通消息发送（如 "//usr/bin 在哪" → "/usr/bin 在哪"）
 				const sendContent = content.startsWith('//') ? content.slice(1) : content;
+				this.clearCommandResult(); // 发送普通消息：清空命令结果区
 				process.stdout.write(green('[You] ') + sendContent + '\r\n\r\n');
 				await this.sendMessageStream(sendContent);
 			}
@@ -436,6 +447,7 @@ export class TuiApp {
 		}
 
 		// 打印用户消息（绿色）
+		this.clearCommandResult(); // 发送普通消息：清空命令结果区
 		process.stdout.write(green('[You] ') + content + '\r\n\r\n');
 
 		// 拼接待发送的 shell 上下文（仅模型可见）
@@ -463,6 +475,42 @@ export class TuiApp {
 		if (content.startsWith('//')) {
 			return false;
 		}
+
+		// 命令输出捕获：命令内的 cmdOut 写入命令结果区（固定底部、替换式刷新）
+		this.commandResultLines = [];
+		this.commandResultActive = true;
+		try {
+			return await this.dispatchCommand(content);
+		} finally {
+			this.commandResultActive = false;
+			this.renderCommandResultBar();
+		}
+	}
+
+	/**
+	 * 流式期间执行 / 命令（全双工）：不中断当前输出，命令结果进命令结果区。
+	 * /compact 流式期间不可用（上下文状态冲突）；/exit 中断输出并退出。
+	 */
+	private async handleCommandDuringStream(content: string): Promise<void> {
+		if (content === '/compact') {
+			this.writeOutputLine(dim('(输出进行中，/compact 不可用，请等待完成后使用)'));
+			return;
+		}
+		if (content === '/exit') {
+			this.abortController?.abort();
+			this.nextMessage = null;
+			this.running = false;
+			return;
+		}
+		const handled = await this.handleCommand(content);
+		if (!handled) {
+			// // 转义 → 排队发送（输出结束后自动发送）
+			this.nextMessage = content.startsWith('//') ? content.slice(1) : content;
+		}
+	}
+
+	/** 命令分派（handleCommand 内部：输出经 cmdOut 捕获到命令结果区） */
+	private async dispatchCommand(content: string): Promise<boolean> {
 
 		if (content.startsWith('/model')) {
 			const arg = content.slice(6).trim();
@@ -531,15 +579,15 @@ export class TuiApp {
 		}
 
 		if (content === '/exit') {
-			process.stdout.write(green('Goodbye!') + '\r\n');
+			this.cmdOut(green('Goodbye!'));
 			this.running = false;
 			return true;
 		}
 
 		// 未知命令 — 不再发送给模型，显示错误提示
 		const errMsg = `Unknown command: ${content.split(/\s+/)[0]}`;
-		process.stdout.write(red(errMsg) + '\r\n');
-		process.stdout.write(dim(`  Available: ${AVAILABLE_COMMANDS.join(', ')}`) + '\r\n');
+		this.cmdOut(red(errMsg));
+		this.cmdOut(dim(`  Available: ${AVAILABLE_COMMANDS.join(', ')}`));
 		return true;
 	}
 
@@ -552,7 +600,7 @@ export class TuiApp {
 			await this.configMgr.set('defaults.model', modelName);
 		}
 
-		process.stdout.write(green(`[Model switched: ${modelName}]`) + '\r\n');
+		this.cmdOut(green(`[Model switched: ${modelName}]`));
 		this.printHeader();
 		return true;
 	}
@@ -563,7 +611,7 @@ export class TuiApp {
 	 */
 	private async switchProvider(name: string): Promise<boolean> {
 		if (!this.configMgr) {
-			process.stdout.write(red('[Provider switch unavailable: no config manager]') + '\r\n');
+			this.cmdOut(red('[Provider switch unavailable: no config manager]'));
 			return true;
 		}
 
@@ -573,7 +621,7 @@ export class TuiApp {
 		if (!name) {
 			// 交互式选择
 			if (names.length === 0) {
-				process.stdout.write(red('No providers configured.') + '\r\n');
+				this.cmdOut(red('No providers configured.'));
 				return true;
 			}
 			const options: SelectOption<string>[] = names.map((n) => ({ label: n, value: n }));
@@ -587,13 +635,13 @@ export class TuiApp {
 		}
 
 		if (!providers[name]) {
-			process.stdout.write(red(`Provider "${name}" not found. Available: ${names.join(', ') || '(none)'}`) + '\r\n');
+			this.cmdOut(red(`Provider "${name}" not found. Available: ${names.join(', ') || '(none)'}`));
 			return true;
 		}
 
 		this.config.provider = name;
 		await this.configMgr.set('defaults.provider', name);
-		process.stdout.write(green(`[Provider switched: ${name}]`) + '\r\n');
+		this.cmdOut(green(`[Provider switched: ${name}]`));
 		this.printHeader();
 		return true;
 	}
@@ -604,7 +652,7 @@ export class TuiApp {
 	 */
 	private async switchSystemPrompt(name: string): Promise<boolean> {
 		if (!this.configMgr) {
-			process.stdout.write(red('[System prompt switch unavailable: no config manager]') + '\r\n');
+			this.cmdOut(red('[System prompt switch unavailable: no config manager]'));
 			return true;
 		}
 
@@ -613,25 +661,25 @@ export class TuiApp {
 
 		if (!name || name === 'list') {
 			if (names.length === 0) {
-				process.stdout.write(dim('No system prompt templates configured.') + '\r\n');
+				this.cmdOut(dim('No system prompt templates configured.'));
 				return true;
 			}
-			process.stdout.write(yellow('System prompt templates:') + '\r\n');
+			this.cmdOut(yellow('System prompt templates:'));
 			for (const n of names) {
 				const marker = n === this.config.systemPrompt ? ' *' : '';
-				process.stdout.write(`  ${green(n)}${dim(marker)}` + '\r\n');
+				this.cmdOut(`  ${green(n)}${dim(marker)}`);
 			}
 			return true;
 		}
 
 		if (!prompts[name]) {
-			process.stdout.write(red(`System prompt "${name}" not found. Available: ${names.join(', ') || '(none)'}`) + '\r\n');
+			this.cmdOut(red(`System prompt "${name}" not found. Available: ${names.join(', ') || '(none)'}`));
 			return true;
 		}
 
 		this.config.systemPrompt = name;
 		await this.configMgr.set('defaults.system_prompt', name);
-		process.stdout.write(green(`[System prompt switched: ${name}]`) + '\r\n');
+		this.cmdOut(green(`[System prompt switched: ${name}]`));
 		this.printHeader();
 		return true;
 	}
@@ -640,8 +688,8 @@ export class TuiApp {
 	private async switchReviewModel(name: string): Promise<boolean> {
 		if (!name) {
 			const current = this.reviewModel ?? '(unset, default deepseek-v4-flash)';
-			process.stdout.write(dim(`Current review model: ${current}`) + '\r\n');
-			process.stdout.write(dim('Usage: /review_model <model-name>') + '\r\n');
+			this.cmdOut(dim(`Current review model: ${current}`));
+			this.cmdOut(dim('Usage: /review_model <model-name>'));
 			return true;
 		}
 
@@ -649,7 +697,7 @@ export class TuiApp {
 		if (this.configMgr) {
 			await this.configMgr.set('defaults.review_model', name);
 		}
-		process.stdout.write(green(`[Review model switched: ${name}]`) + '\r\n');
+		this.cmdOut(green(`[Review model switched: ${name}]`));
 		return true;
 	}
 
@@ -657,8 +705,8 @@ export class TuiApp {
 	private showHelp(): true {
 		const cols = getTermSize().cols;
 		const w = Math.max(1, cols - 1);
-		process.stdout.write(yellow('Commands') + '\r\n');
-		process.stdout.write('─'.repeat(w) + '\r\n');
+		this.cmdOut(yellow('Commands'));
+		this.cmdOut('─'.repeat(w));
 
 		const cmds: [string, string][] = [
 			['/model [name]', 'Switch model (interactive picker if no arg)'],
@@ -679,7 +727,7 @@ export class TuiApp {
 		for (const [cmd, desc] of cmds) {
 			const line = `  ${green(cmd.padEnd(24))} ${dim(desc)}`;
 			// 截断到终端宽度避免 auto-wrap
-			process.stdout.write(line + '\r\n');
+			this.cmdOut(line);
 		}
 		return true;
 	}
@@ -692,18 +740,18 @@ export class TuiApp {
 
 		const cols = getTermSize().cols;
 		const w = Math.max(1, cols - 1);
-		process.stdout.write(yellow('Session Context') + '\r\n');
-		process.stdout.write('─'.repeat(w) + '\r\n');
+		this.cmdOut(yellow('Session Context'));
+		this.cmdOut('─'.repeat(w));
 
 		// 基本信息
-		process.stdout.write(`  Provider:  ${this.config.provider}\r\n`);
-		process.stdout.write(`  Model:     ${this.config.model}\r\n`);
-		process.stdout.write(`  System:    ${this.config.systemPrompt ?? 'default'}\r\n`);
-		process.stdout.write(`  Review:    ${this.reviewModel ?? '(default flash)'}\r\n`);
-		process.stdout.write(`  YOLO mode: ${this.yolo ? green('ON') : dim('OFF')}\r\n`);
-		process.stdout.write(`  Subagent:  ${this.asyncMode ? green('async') : dim('sync')}\r\n`);
-		process.stdout.write(`  Session:   ${meta?.id ?? '—'}${meta?.title ? ' "' + dim(meta.title) + '"' : ''}\r\n`);
-		process.stdout.write(`  Turns:     ${meta?.turnCount ?? turns.length}\r\n`);
+		this.cmdOut(`  Provider:  ${this.config.provider}`);
+		this.cmdOut(`  Model:     ${this.config.model}`);
+		this.cmdOut(`  System:    ${this.config.systemPrompt ?? 'default'}`);
+		this.cmdOut(`  Review:    ${this.reviewModel ?? '(default flash)'}`);
+		this.cmdOut(`  YOLO mode: ${this.yolo ? green('ON') : dim('OFF')}`);
+		this.cmdOut(`  Subagent:  ${this.asyncMode ? green('async') : dim('sync')}`);
+		this.cmdOut(`  Session:   ${meta?.id ?? '—'}${meta?.title ? ' "' + dim(meta.title) + '"' : ''}`);
+		this.cmdOut(`  Turns:     ${meta?.turnCount ?? turns.length}`);
 
 		// Token 汇总
 		let totalPrompt = 0;
@@ -723,24 +771,24 @@ export class TuiApp {
 			}
 		}
 		const grandTotal = totalPrompt + totalCompletion;
-		process.stdout.write('  ── Token Usage ──\r\n');
-		process.stdout.write(`  Total:       ${grandTotal.toLocaleString()} tokens (${totalPrompt.toLocaleString()} in + ${totalCompletion.toLocaleString()} out)\r\n`);
+		this.cmdOut('  ── Token Usage ──');
+		this.cmdOut(`  Total:       ${grandTotal.toLocaleString()} tokens (${totalPrompt.toLocaleString()} in + ${totalCompletion.toLocaleString()} out)`);
 		if (totalCacheHit + totalCacheMiss > 0) {
 			const hitRate = totalCacheHit + totalCacheMiss > 0
 				? ((totalCacheHit / (totalCacheHit + totalCacheMiss)) * 100).toFixed(1)
 				: '0.0';
-			process.stdout.write(`  KV Cache:    ${totalCacheHit.toLocaleString()} hit / ${totalCacheMiss.toLocaleString()} miss (${hitRate}%)\r\n`);
+			this.cmdOut(`  KV Cache:    ${totalCacheHit.toLocaleString()} hit / ${totalCacheMiss.toLocaleString()} miss (${hitRate}%)`);
 		}
 
 		// 最后一轮详情
 		const lastUsage = meta?.lastUsage;
 		if (lastUsage && lastUsage.total_tokens > 0) {
-			process.stdout.write(`  Last turn:   ${lastUsage.total_tokens} tokens (${lastUsage.prompt_tokens} in + ${lastUsage.completion_tokens} out)\r\n`);
+			this.cmdOut(`  Last turn:   ${lastUsage.total_tokens} tokens (${lastUsage.prompt_tokens} in + ${lastUsage.completion_tokens} out)`);
 		}
 
 		// 累计费用
 		if (meta && meta.totalCost > 0) {
-			process.stdout.write(`  Total cost:  ¥${meta.totalCost.toFixed(4)}\r\n`);
+			this.cmdOut(`  Total cost:  ¥${meta.totalCost.toFixed(4)}`);
 		}
 
 		return true;
@@ -748,14 +796,12 @@ export class TuiApp {
 
 	/** /compact — 压缩会话上下文（摘要 + 文件重注入，开启新分代） */
 	private async compactSession(): Promise<boolean> {
-		process.stdout.write(dim('Compacting session context...') + '\r\n');
+		this.cmdOut(dim('Compacting session context...'));
 		try {
 			const result = await this.sessionMgr.compactContext();
-			process.stdout.write(
-				green(`[Compacted] → 新分代 #${result.gen}，压缩 ${result.compressedTurns} 轮，重注入 ${result.restoredFiles} 个文件 (${result.restoredTokens} tokens)`) + '\r\n',
-			);
+			this.cmdOut(green(`[Compacted] → 新分代 #${result.gen}，压缩 ${result.compressedTurns} 轮，重注入 ${result.restoredFiles} 个文件 (${result.restoredTokens} tokens)`));
 			if (result.summaryPreview) {
-				process.stdout.write(dim(`  summary: ${result.summaryPreview}`) + '\r\n');
+				this.cmdOut(dim(`  summary: ${result.summaryPreview}`));
 			}
 			// 刷新对话显示（含摘要轮折叠块）
 			const session = this.sessionMgr.getSession();
@@ -779,11 +825,7 @@ export class TuiApp {
 				await this.configMgr.set('defaults.yolo', this.yolo);
 			} catch { /* 写回失败不阻塞切换 */ }
 		}
-		process.stdout.write(
-			green(`[YOLO mode: ${this.yolo ? 'ON' : 'OFF'}]`) +
-			dim(this.yolo ? '  (auto-approve tool executions)' : '  (confirm before tool execution)') +
-			'\r\n',
-		);
+		this.cmdOut(green(`[YOLO mode: ${this.yolo ? 'ON' : 'OFF'}]`) + dim(this.yolo ? '  (auto-approve tool executions)' : '  (confirm before tool execution)'));
 		return true;
 	}
 
@@ -796,13 +838,9 @@ export class TuiApp {
 				await this.configMgr.set('defaults.async', this.asyncMode);
 			} catch { /* 写回失败不阻塞切换 */ }
 		}
-		process.stdout.write(
-			green(`[Subagent async: ${this.asyncMode ? 'ON' : 'OFF'}]`) +
-			dim(this.asyncMode
-				? '  (subagent_spawn returns [SPAWNED], use wait/list_subagents)'
-				: '  (subagent_spawn blocks until complete)') +
-			'\r\n',
-		);
+		this.cmdOut(green(`[Subagent async: ${this.asyncMode ? 'ON' : 'OFF'}]`) + dim(this.asyncMode
+			? '  (subagent_spawn returns [SPAWNED], use wait/list_subagents)'
+			: '  (subagent_spawn blocks until complete)'));
 		return true;
 	}
 
@@ -810,7 +848,7 @@ export class TuiApp {
 	private async cancelSubagentInteractive(): Promise<true> {
 		const subs = this.sessionMgr.listSubagents();
 		if (subs.length === 0) {
-			process.stdout.write(dim('No subagents to cancel.') + '\r\n');
+			this.cmdOut(dim('No subagents to cancel.'));
 			return true;
 		}
 
@@ -837,11 +875,9 @@ export class TuiApp {
 		if (selected) {
 			const cancelled = this.sessionMgr.cancelSubagent(selected === '__all__' ? 'all' : selected);
 			if (cancelled.length > 0) {
-				process.stdout.write(
-					green(`[cancelled] ${selected === '__all__' ? `全部 ${cancelled.length} 个子代理` : selected}`) + '\r\n',
-				);
+				this.cmdOut(green(`[cancelled] ${selected === '__all__' ? `全部 ${cancelled.length} 个子代理` : selected}`));
 			} else {
-				process.stdout.write(dim(`No running subagent matched.`) + '\r\n');
+				this.cmdOut(dim(`No running subagent matched.`));
 			}
 		}
 		return true;
@@ -852,14 +888,14 @@ export class TuiApp {
 		const records = this.sessionMgr.listSubagentRecords();
 
 		if (records.length === 0) {
-			process.stdout.write(dim('No subagents in current session.\r\n'));
+			this.cmdOut(dim('No subagents in current session.'));
 			return true;
 		}
 
 		if (!name) {
 			// 无参数：列出所有子代理
-			process.stdout.write(yellow('Subagents') + '\r\n');
-			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
+			this.cmdOut(yellow('Subagents'));
+			this.cmdOut(dim('─'.repeat(40)));
 			for (const record of records) {
 				const icon = record.status === 'running' ? '⏳'
 					: record.status === 'completed' ? green('✓')
@@ -867,20 +903,18 @@ export class TuiApp {
 				const elapsed = record.endMs
 					? `${((record.endMs - record.startMs) / 1000).toFixed(1)}s`
 					: `${((Date.now() - record.startMs) / 1000).toFixed(1)}s`;
-				process.stdout.write(
-					`  ${icon} ${cyan(record.name)} ${dim(`(${record.status}, ${elapsed})`)}\r\n`,
-				);
-				process.stdout.write(dim(`     ${record.task.slice(0, 80)}${record.task.length > 80 ? '...' : ''}`) + '\r\n');
+				this.cmdOut(`  ${icon} ${cyan(record.name)} ${dim(`(${record.status}, ${elapsed})`)}`);
+				this.cmdOut(dim(`     ${record.task.slice(0, 80)}${record.task.length > 80 ? '...' : ''}`));
 			}
-			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
-			process.stdout.write(dim(`/subagent <name> for full detail  |  ${records.length} total`) + '\r\n');
+			this.cmdOut(dim('─'.repeat(40)));
+			this.cmdOut(dim(`/subagent <name> for full detail  |  ${records.length} total`));
 			return true;
 		}
 
 		// 指定名称：显示完整输出
 		const record = this.sessionMgr.getSubagentRecord(name);
 		if (!record) {
-			process.stdout.write(red(`Subagent "${name}" not found. Use /subagent (no args) to list.`) + '\r\n');
+			this.cmdOut(red(`Subagent "${name}" not found. Use /subagent (no args) to list.`));
 			return true;
 		}
 
@@ -893,7 +927,7 @@ export class TuiApp {
 		const view = new SubagentRecordView();
 		const { cols } = getTermSize();
 		for (const line of view.render(record, cols)) {
-			process.stdout.write(line + '\r\n');
+			this.cmdOut(line);
 		}
 	}
 
@@ -1314,11 +1348,22 @@ export class TuiApp {
 		const visibleLines = Math.max(1, Math.min(inputLines.length, MAX_INPUT_ROWS));
 		const linesToDraw = Math.max(visibleLines, this.lastVisibleInputRows);
 
-		// 回到输入区域起始行：从上次光标位置向上移动
-		if (this.lastCursorDisplayRow > 0) {
-			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		// 回到底部区域起始行：命令结果区 + 输入区
+		const cmdRows = this.commandResultLines.length;
+		const totalUp = this.lastCursorDisplayRow + cmdRows;
+		if (totalUp > 0) {
+			process.stdout.write(`\x1b[${totalUp}A`);
 		}
 		process.stdout.write('\r');
+		// 清除旧命令结果区 + 旧输入区（CLEAR_TO_END 从当前位置清到屏底）
+		process.stdout.write(CLEAR_TO_END);
+
+		// 画命令结果区（输入区上方，固定；新命令替换旧内容）
+		for (const line of this.commandResultLines) {
+			clearLine();
+			process.stdout.write(dim('│ ') + line);
+			process.stdout.write('\r\n');
+		}
 
 		const bgStart = this.shellMode ? PINK_BG_START : GRAY_BG_START;
 		const bgEnd = this.shellMode ? PINK_BG_END : GRAY_BG_END;
@@ -1368,13 +1413,40 @@ export class TuiApp {
 		//   3. 如果绘制了建议，上移建议行数回到输入区域下方
 		//   4. 下移 cursorPos.row，右移 cursorPos.col
 		process.stdout.write('\r');
-		const totalUp = (linesToDraw - 1) + this.suggestionLinesCount;
-		if (totalUp > 0) process.stdout.write(`\x1b[${totalUp}A`);
+		const cursorUp = (linesToDraw - 1) + this.suggestionLinesCount;
+		if (cursorUp > 0) process.stdout.write(`\x1b[${cursorUp}A`);
 		if (cursorPos.row > 0) process.stdout.write(`\x1b[${cursorPos.row}B`);
 		if (cursorPos.col > 0) process.stdout.write(`\x1b[${cursorPos.col}C`);
 
 		this.lastCursorDisplayRow = cursorPos.row;
 		showCursor();
+	}
+
+	// ─── 命令结果区（固定底部，替换式刷新）───────────
+
+	/** 命令输出捕获：命令执行期间写入 commandResultLines（限高截断），否则写 scrollback */
+	private cmdOut(line: string): void {
+		if (this.commandResultActive) {
+			if (this.commandResultLines.length < this.MAX_CMD_RESULT_ROWS) {
+				this.commandResultLines.push(line);
+			} else if (!this.commandResultLines.includes('… 输出被截断')) {
+				this.commandResultLines.push(dim('… 输出被截断 (完整内容不再保留)'));
+			}
+			return;
+		}
+		this.writeOutputLine(line);
+	}
+
+	/** 重绘命令结果区 + 输入区（命令执行后 / 流式输出后调用，保持底部固定） */
+	private renderCommandResultBar(): void {
+		this.renderInput();
+	}
+
+	/** 清空命令结果区（发送普通消息后调用） */
+	private clearCommandResult(): void {
+		if (this.commandResultLines.length === 0) return;
+		this.commandResultLines = [];
+		this.renderInput();
 	}
 
 	// ─── Bug 1：流式输出期间输入区固定在底部 ──────
@@ -1384,8 +1456,11 @@ export class TuiApp {
 	 * 输出开始前/每条输出行前调用，使输出从原输入区位置开始写。
 	 */
 	private collapseInputArea(): void {
-		if (this.lastCursorDisplayRow > 0) {
-			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		// 收起底部区域（命令结果区 + 输入区）：光标上移到底部区域起点，清到屏底
+		const cmdRows = this.commandResultLines.length;
+		const totalUp = this.lastCursorDisplayRow + cmdRows;
+		if (totalUp > 0) {
+			process.stdout.write(`\x1b[${totalUp}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
@@ -1447,8 +1522,8 @@ export class TuiApp {
 	private updateThinkCollapseLine(): void {
 		if (!this.thinkFolded) return;
 		const dots = '·'.repeat(this.thinkAnimStep);
-		// 光标在输入区，上移到折叠提示行更新后移回
-		const up = (this.lastCursorDisplayRow ?? 0) + 1;
+		// 光标在输入区，上移到折叠提示行更新后移回（跨过命令结果区）
+		const up = (this.lastCursorDisplayRow ?? 0) + 1 + this.commandResultLines.length;
 		process.stdout.write(`\x1b[${up}A`);
 		process.stdout.write('\r');
 		clearLine();
@@ -1465,7 +1540,7 @@ export class TuiApp {
 			this.thinkAnimTimer = null;
 		}
 		const foldedCount = Math.max(0, this.fullThink.length - this.MAX_VISIBLE_THINK);
-		const up = (this.lastCursorDisplayRow ?? 0) + 1;
+		const up = (this.lastCursorDisplayRow ?? 0) + 1 + this.commandResultLines.length;
 		process.stdout.write(`\x1b[${up}A`);
 		process.stdout.write('\r');
 		clearLine();
@@ -1546,6 +1621,7 @@ export class TuiApp {
 			const next = this.nextMessage;
 			this.nextMessage = null;
 			if (next) {
+				this.clearCommandResult();
 				this.printSeparator();
 				process.stdout.write(green('[You] ') + next + '\r\n\r\n');
 				// fire-and-forget：sendMessageStream 内部处理异常与后续状态
@@ -1942,18 +2018,18 @@ export class TuiApp {
 		// 表格渲染器：检测 markdown 表格块并格式化为 box-drawing
 		const mdRenderer = new MarkdownTableRenderer();
 
-		// 双工交互：流式期间支持编辑输入框，Enter 中断当前输出并排队新消息（Bug 3）
+		// 全双工交互：流式期间输入框始终可编辑
+		// - / 命令：立即执行（不中断输出），输出进命令结果区（固定底部）
+		// - 普通文本 / !shell：排队（不中断当前输出），输出结束后自动发送
 		const prevHandler = this.stdinHandler;
 		this.stdinHandler = (data: string) => {
 			this.handleInputData(data, (content) => {
 				if (content === null) return; // Ctrl+C 已在 handleInputData 内处理（STREAMING 态 abort）
-				// 流式期间 Enter：/ 命令不可用（UI 状态冲突），普通文本排队发送
 				if (content.startsWith('/')) {
-					this.writeOutputLine(dim('(输出进行中，命令不可用，请等待完成后使用)'));
+					void this.handleCommandDuringStream(content);
 					return;
 				}
-				// 中断当前输出，新消息在 finally 中发送
-				this.abortController?.abort();
+				// 排队（不中断当前输出，输出结束后在 finally 中自动发送）
 				this.nextMessage = content;
 			});
 		};
@@ -2186,10 +2262,11 @@ export class TuiApp {
 				this.lastVisibleInputRows = 1;
 				this.lastCursorDisplayRow = 0;
 				this.setState(AppState.IDLE);
-				// 双工交互（Bug 3）：输出期间用户 Enter 排入的新消息 → 中断后继续发送
+				// 全双工：输出结束后自动发送排队消息（普通文本 / !shell / // 转义）
 				const next = this.nextMessage;
 				this.nextMessage = null;
 				if (next) {
+					this.clearCommandResult();
 					this.printSeparator();
 					process.stdout.write(green('[You] ') + next + '\r\n\r\n');
 					await this.sendMessageStream(next);
