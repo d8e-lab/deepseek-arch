@@ -668,6 +668,51 @@ export class SessionManager {
 					return true;
 				}
 
+				case 'subagent_send': {
+					const name = (args.subagent_name as string) || '';
+					const instruction = (args.instruction as string) || '';
+					if (!name || !instruction) {
+						pushResult('Error: both "subagent_name" and "instruction" are required.', 'invalid_params');
+						return true;
+					}
+					const sub = this.subagents.get(name);
+					if (!sub) {
+						pushResult(`Subagent "${name}" not found. Use list_subagents to check.`, 'not_found');
+						return true;
+					}
+					if (sub.status === 'running') {
+						pushResult(
+							`Subagent "${name}" is still running. Wait for it to complete (or use subagent_cancel) before sending a follow-up.`,
+							'still_running',
+						);
+						return true;
+					}
+					if (sub.status === 'cancelled') {
+						pushResult(
+							`Subagent "${name}" was cancelled — cannot send a follow-up to a cancelled subagent.`,
+							'cancelled',
+						);
+						return true;
+					}
+
+					// 追加指令并同步等待续跑（追问性质，master 需要新结果才能继续）
+					const startMs = Date.now();
+					try {
+						const result = await this.sendToSubagent(name, instruction);
+						pushResult(
+							`Follow-up result for "${name}":\n\n${result}`,
+							undefined,
+							Date.now() - startMs,
+						);
+					} catch (err) {
+						pushResult(
+							`Error sending follow-up to "${name}": ${err instanceof Error ? err.message : String(err)}`,
+							'send_failed',
+						);
+					}
+					return true;
+				}
+
 				case 'subagent_cancel': {
 					const name = (args.subagent_name as string) || '';
 					if (!name) {

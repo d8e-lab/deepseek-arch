@@ -168,6 +168,13 @@ function waitCallAll(): { id: string; function: { name: string; arguments: strin
 	};
 }
 
+function sendCall(name: string, instruction: string): { id: string; function: { name: string; arguments: string } } {
+	return {
+		id: `call-send-${name}`,
+		function: { name: 'subagent_send', arguments: JSON.stringify({ subagent_name: name, instruction }) },
+	};
+}
+
 // ─── runSubagentLoop 单元测试 ───────────────────────
 
 describe('runSubagentLoop', () => {
@@ -755,5 +762,105 @@ describe('sendToSubagent', () => {
 
 		const r = await mgr2.sendToSubagent('sub1', '恢复后继续');
 		expect(r).toBe('续跑结果');
+	});
+});
+
+// ─── subagent_send 工具（agent loop 内拦截）────────────
+
+describe('subagent_send 工具拦截', () => {
+	let sendToolDir: string;
+
+	beforeEach(async () => {
+		sendToolDir = await mkdtemp(join(tmpdir(), 'deepseek-sendtool-test-'));
+	});
+
+	afterEach(async () => {
+		await rm(sendToolDir, { recursive: true, force: true });
+	});
+
+	/** 从事件流中提取 subagent_send 的 tool_result 事件 */
+	function findSendEvent(events: import('../../src/types/index.js').StreamEvent[]) {
+		return events.find((e) => e.type === 'tool_result' && e.toolName === 'subagent_send');
+	}
+
+	it('spawn → send：master 向完成子代理追加指令，得到续跑结果（同步等待）', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task x')] },
+				{ content: '', toolCalls: [sendCall('sub1', '继续深入')] },
+				{ content: '主代理完成' },
+			],
+			(messages) => {
+				const userCount = messages.filter((m) => m.role === 'user').length;
+				return userCount === 1 ? { content: '第一轮结果' } : { content: '续跑结果' };
+			},
+		);
+		const mgr = new SessionManager(new Storage(sendToolDir), client);
+		mgr.setSubagentAsync(false);
+		await mgr.startNewSession('subagent_send 测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('spawn and follow up', (e) => events.push(e));
+
+		const ev = findSendEvent(events);
+		expect(ev).toBeDefined();
+		expect(ev!.toolResult).toContain('续跑结果');
+		expect(ev!.error).toBeUndefined();
+		// 子代理消息上下文保留两条 user 指令（task + 追加）
+		const sub = mgr.getSubagent('sub1');
+		expect(sub?.messages.filter((m) => m.role === 'user').map((m) => m.content))
+			.toEqual(['task x', '继续深入']);
+	});
+
+	it('send 不存在的子代理：not_found 错误', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [sendCall('nope', 'hi')] },
+				{ content: '主代理完成' },
+			],
+			() => ({ content: 'unused' }),
+		);
+		const mgr = new SessionManager(new Storage(sendToolDir), client);
+		mgr.setSubagentAsync(false);
+		await mgr.startNewSession('send not_found 测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('send missing', (e) => events.push(e));
+
+		const ev = findSendEvent(events);
+		expect(ev).toBeDefined();
+		expect(ev!.error).toBe('not_found');
+		expect(ev!.toolResult).toContain('nope');
+	});
+
+	it('failed 子代理可 send 续跑（failed → running → completed）', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task x')] },
+				{ content: '', toolCalls: [sendCall('sub1', '修复一下')] },
+				{ content: '主代理完成' },
+			],
+			(messages) => {
+				const userCount = messages.filter((m) => m.role === 'user').length;
+				// 第一次返回 Error: 前缀 → failed；续跑返回正常结果
+				return userCount === 1 ? { content: 'Error: 第一步失败了' } : { content: '修复完成' };
+			},
+		);
+		const mgr = new SessionManager(new Storage(sendToolDir), client);
+		mgr.setSubagentAsync(false);
+		await mgr.startNewSession('send failed 测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const events: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('spawn then fix', (e) => events.push(e));
+
+		// 第一次 drive 返回 Error: 前缀 → 曾标 failed；send 续跑后覆盖为 completed
+		const ev = findSendEvent(events);
+		expect(ev).toBeDefined();
+		expect(ev!.toolResult).toContain('修复完成');
+		expect(ev!.error).toBeUndefined();
+		expect(mgr.getSubagent('sub1')?.status).toBe('completed');
 	});
 });
