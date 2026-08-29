@@ -1,9 +1,15 @@
 # Master Agent 向 Subagent 追加指令 — 可行性调研
 
-> 状态：**调研稿（未实现）**
+> 状态：**✅ 已实现（方案 A 升级为方案 B 会话化，2026-08-29）**
 > 日期：2026-08-20
-> 分支：feat/api-config-and-docs-sync（仅文档，无代码）
+> 分支：feat/api-config-and-docs-sync（仅文档，无代码）→ feat/subagent-session-full-duplex（已实现）
 > 目标：评估"master agent 在 subagent 返回消息后继续给 subagent 发送进一步指令"的可实现性，输出方案与分阶段实施路径。
+
+> **实现更新（2026-08-29）**：实际实施采用了**方案 B（子代理会话化）**——新增 `SubagentSession`
+> （`src/core/subagent-session.ts`），消息上下文全量持久化到 `SubagentRecord.messages`，resume 后可恢复
+> 会话继续交互。核心能力：`subagent_send` 工具（master→subagent）+ Ctrl+T Subagents 总览视图
+> （用户→subagent 视图内输入）+ 全双工 TUI（流式期间 `/` 命令可用、普通输入排队不中断）。
+> 方案 A 的可恢复循环（runSubagentLoop 接收 messages 返回 {result, messages}）作为实现基础保留。
 
 ---
 

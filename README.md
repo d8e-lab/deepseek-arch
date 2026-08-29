@@ -89,8 +89,10 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 - **上下文压缩**：`/compact` 命令 + 自动 compact——分代存储、结构化摘要、Read 文件重注入，磁盘保留全量历史
 - **模型切换**：`/model` 命令切换模型（deepseek-v4-flash / deepseek-v4-pro，候选列表从配置动态生成）
 - **对话恢复**：按 ID 或标题恢复历史会话（含工具调用上下文重建）
-- **子代理系统**：`subagent_spawn` / `wait` / `list_subagents` / `subagent_cancel` 工具，独立消息上下文 + 受限工具集，支持并行与 `--async` 异步模式
-- **子代理详情**：`/subagent` / Ctrl+T 查看子代理运行详情，格式与主会话完全统一；Ctrl+O 全屏视图可完整查看思考内容
+- **子代理系统**：`subagent_spawn` / `wait` / `list_subagents` / `subagent_cancel` / `subagent_send` 工具，独立消息上下文 + 受限工具集，支持并行与 `--async` 异步模式
+- **子代理会话化（方案 B）**：子代理升级为可恢复会话——完整消息上下文保留，`subagent_send`（master 工具）或 Ctrl+T 视图内输入可向已完成/失败的子代理追加指令续跑；记录含完整消息持久化，resume 后可继续交互
+- **Subagents 总览视图**：Ctrl+T 任意状态打开全屏实时视图（状态条 + 选中子代理输出 + 视图内输入），n/p/数字切换，master 转入后台静默执行，返回时补渲染
+- **全双工输入**：模型输出期间 `/` 命令立即执行（结果固定显示在底部命令结果区），普通文本/`!shell` 排队不中断输出、结束后自动发送
 - **Skill 机制**：模型可发现并调用技能（plan/release/research），frontmatter 元数据 + 目录加载 + 条件激活（触碰 docs/ 等路径自动出现）
 - **YOLO 审查模型**：`--yolo` 下自动批准工具执行，并在 agent loop 自然终止处审查输出（stalled/deflecting 自动续答）
 - **命令补全**：输入 `/` 触发命令补全，建议列表支持滚动浏览全部选项
@@ -121,10 +123,10 @@ Commands:
 ### chat 命令快捷键
 
 ```
-Enter           发送消息（流式输出期间 Enter 中断并排队发送新消息）
+Enter           发送消息（输出期间输入进入等待队列，输出结束后自动发送）
 Ctrl+J          换行
 Ctrl+C          中断模型输出 / 退出
-Ctrl+T          子代理列表（IDLE 态）
+Ctrl+T          Subagents 总览视图（任意状态；流式期间 master 后台执行）
 Ctrl+O          全屏对话浏览视图（完整 think/content）
 ```
 
@@ -291,9 +293,10 @@ src/
 │   ├── api.ts              # ApiClient（DeepSeek API 适配器，实现 ModelProvider）
 │   ├── model-provider.ts   # ModelProvider 接口（抽象层）
 │   ├── mock-provider.ts    # MockProvider（本地伪装提供商）
-│   ├── session.ts          # SessionManager（Facade + Agent Loop + 子代理拦截）
-│   ├── subagent.ts         # 子代理循环引擎（独立消息上下文）
-│   ├── subagent-store.ts   # 子代理记录内存缓冲
+│   ├── session.ts          # SessionManager（Facade + Agent Loop + 子代理会话管理）
+│   ├── subagent.ts         # 子代理循环引擎（可恢复：接收 messages 返回最新队列）
+│   ├── subagent-session.ts # SubagentSession 会话对象（方案 B：状态/消息/续跑/持久化）
+│   ├── subagent-store.ts   # 子代理类型 re-export（原内存缓冲已由 SubagentSession 取代）
 │   ├── compact.ts          # 上下文压缩核心（摘要生成 + 文件重注入 + 分代）
 │   ├── skill.ts            # Skill 引擎（frontmatter 解析 + 加载 + 条件激活）
 │   ├── reviewer.ts         # YOLO 审查模型（completed/stalled/deflecting/asking_user）
@@ -315,6 +318,7 @@ src/
 │   ├── subagent-wait.ts    # 子代理等待工具
 │   ├── subagent-list.ts    # 子代理列表工具
 │   ├── subagent-cancel.ts  # 子代理取消工具
+│   ├── subagent-send.ts    # 子代理追加指令工具（向已完成/失败子代理续跑）
 │   ├── tui-*.ts            # TUI 调试工具（capture/render-preview/session 系列）
 │   └── index.ts            # Barrel file（统一注册所有工具）
 ├── types/
