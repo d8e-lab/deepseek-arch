@@ -36,9 +36,7 @@ export type { StreamEvent };
 import type { Tool, ToolCallRecord } from '../tools/types.js';
 import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
-import { runSubagentLoop, SUBAGENT_CANCELLED } from './subagent.js';
 import { activateSkillsForPaths, extractPathsFromToolCall } from './skill.js';
-import { SubagentStore } from './subagent-store.js';
 import {
 	MAX_RESTORE_FILES,
 	buildCompactMessages,
@@ -65,14 +63,10 @@ You are running as a subagent delegated by a master agent. Key constraints:
 - If you cannot complete the task, explain why and return what you have.
 - Keep output focused: the master agent needs your result, not a conversation.`;
 
-/** 后台子代理状态（SessionManager 实例级，跨 sendMessageStream 存活） */
-interface PendingSubagent {
-	toolCallId: string;
-	promise: Promise<string>;
-	status: 'running' | 'completed' | 'failed' | 'cancelled';
-	result?: string;
-	startMs: number;
-}
+/** 后台子代理会话（方案 B 全状态化：消息上下文 + 实时输出 + 可续跑） */
+export type { SubagentSession } from './subagent-session.js';
+import { SubagentSession as SubagentSessionImpl } from './subagent-session.js';
+import type { SubagentRecord } from '../types/subagent.js';
 
 export class SessionManager {
 	private storage: Storage;
@@ -81,13 +75,10 @@ export class SessionManager {
 	private systemPrompt: Message | null = null;
 	private tools: Tool[] = [];
 	private _subagentAsync: boolean = false;
-	private subagentStore: SubagentStore = new SubagentStore();
-	/** 实例级：后台子代理状态（I-1：主代理中断后子代理继续跑，后续轮次仍可 wait/取消） */
-	private pendingSubagents = new Map<string, PendingSubagent>();
+	/** 实例级：子代理会话集合（方案 B：SubagentSession 全状态化，跨 sendMessageStream 存活） */
+	private subagents = new Map<string, SubagentSessionImpl>();
 	/** 实例级：已通过 wait 取走结果的子代理名集合 */
 	private retrievedSubagents = new Set<string>();
-	/** 实例级：每个子代理的独立 AbortController（I-1 + 取消机制） */
-	private subagentControllers = new Map<string, AbortController>();
 	/** 子代理 token 累积（O-1：并入主会话 usage 入账） */
 	private subagentUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 	/** 生成参数默认值（temperature/max_tokens/top_p/thinking/reasoning_effort），
@@ -148,6 +139,9 @@ export class SessionManager {
 		if (session.systemPrompt) {
 			this.systemPrompt = { role: 'system', content: session.systemPrompt };
 		}
+
+		// 恢复子代理会话（方案 B：磁盘记录 → SubagentSession，可继续查看/交互）
+		await this.restoreSubagents(session.meta.id);
 
 		// 恢复浏览器到上次访问的 URL（如果浏览器工具可用）
 		this._restoreBrowserUrl(session);
@@ -212,9 +206,48 @@ export class SessionManager {
 		return this._subagentAsync;
 	}
 
-	/** 获取子代理存储（用于 /subagent 命令查看详情） */
-	getSubagentStore(): SubagentStore {
-		return this.subagentStore;
+	/** 获取子代理会话列表（TUI 详情/实时视图用） */
+	listSubagents(): SubagentSessionImpl[] {
+		return [...this.subagents.values()];
+	}
+
+	/** 获取指定子代理会话 */
+	getSubagent(name: string): SubagentSessionImpl | undefined {
+		return this.subagents.get(name);
+	}
+
+	/** 获取全部子代理记录（含 resume 恢复的） */
+	listSubagentRecords(): SubagentRecord[] {
+		return [...this.subagents.values()].map((s) => s.toRecord());
+	}
+
+	/** 获取指定子代理记录 */
+	getSubagentRecord(name: string): SubagentRecord | undefined {
+		return this.subagents.get(name)?.toRecord();
+	}
+
+	/** 从磁盘恢复子代理会话（方案 B：completed/failed 可继续 send 交互） */
+	private async restoreSubagents(sessionId: string): Promise<void> {
+		try {
+			const names = await this.storage.listSubagentRecords(sessionId);
+			for (const n of names) {
+				const record = await this.storage.loadSubagentRecord(sessionId, n);
+				if (!record) continue;
+				const session = SubagentSessionImpl.fromRecord(record, {
+					provider: this.provider,
+					tools: getAllTools(),
+					chatDefaults: this.chatDefaults,
+					onUsage: (u) => {
+						this.subagentUsage.prompt_tokens += u.prompt_tokens;
+						this.subagentUsage.completion_tokens += u.completion_tokens;
+						this.subagentUsage.total_tokens += u.total_tokens;
+					},
+				});
+				this.subagents.set(n, session);
+			}
+		} catch {
+			/* 恢复失败不阻塞 resume */
+		}
 	}
 
 	/**
@@ -238,7 +271,7 @@ export class SessionManager {
 		if (turns.length === 0) throw new Error('会话为空，无需压缩');
 
 		// Phase 1：等待所有 subagent 结束（compact 前必须收敛后台任务）
-		const pending = [...this.pendingSubagents.values()];
+		const pending = [...this.subagents.values()].filter((s) => s.isRunning);
 		if (pending.length > 0) {
 			await Promise.all(pending.map((s) => s.promise));
 		}
@@ -285,53 +318,63 @@ export class SessionManager {
 	 * M-1：通过 callbacks 将每轮输出写入 SubagentStore，完成后持久化记录。
 	 */
 	async runSubagent(name: string, task: string): Promise<string> {
+		const session = this.createSubagentSession(name, task);
+		this.subagents.set(name, session);
+
+		try {
+			const result = await session.drive();
+			await this.persistSubagent(name);
+			return result;
+		} catch (err) {
+			// drive 内部已标 failed 并 rethrow；持久化失败态并返回错误字符串（兼容旧行为）
+			await this.persistSubagent(name).catch(() => {});
+			return `Error: ${err instanceof Error ? err.message : String(err)}`;
+		}
+	}
+
+	/** 创建子代理会话（共享逻辑：runSubagent / resume 恢复用） */
+	private createSubagentSession(name: string, task: string): SubagentSessionImpl {
 		const subagentTools = getAllTools(); // 不含 subagent 管理工具
 		const basePrompt = this.systemPrompt?.content ?? '';
 		const subagentPrompt = basePrompt + SUBAGENT_APPEND_PROMPT;
-
-		// I-1：独立 AbortController（取消机制的唯一入口）
-		const controller = new AbortController();
-		this.subagentControllers.set(name, controller);
-		const signal = controller.signal;
-
-		this.subagentStore.start(name, task);
-
-		const result = await runSubagentLoop(task, this.provider, subagentTools, subagentPrompt, signal, {
-			onEntry: (entry) => {
-				this.subagentStore.push(name, entry);
-			},
+		return new SubagentSessionImpl({
+			name,
+			task,
+			systemPrompt: subagentPrompt,
+			provider: this.provider,
+			tools: subagentTools,
+			chatDefaults: this.chatDefaults,
 			// O-1：子代理 token 累积入账
 			onUsage: (usage) => {
 				this.subagentUsage.prompt_tokens += usage.prompt_tokens;
 				this.subagentUsage.completion_tokens += usage.completion_tokens;
 				this.subagentUsage.total_tokens += usage.total_tokens;
 			},
-		}, this.chatDefaults);
+		});
+	}
 
-		// I-2：cancelled / failed / completed 三态判定（取消是独立状态，不误标 completed）
-		let status: 'completed' | 'failed' | 'cancelled';
-		if (result === SUBAGENT_CANCELLED) {
-			status = 'cancelled';
-		} else if (result.startsWith('Error:')) {
-			status = 'failed';
-		} else {
-			status = 'completed';
+	/** M-1：持久化子代理记录（含完整消息上下文，供 resume 后查看/续跑） */
+	private async persistSubagent(name: string): Promise<void> {
+		if (!this.session) return;
+		const session = this.subagents.get(name);
+		if (!session) return;
+		try {
+			await this.storage.saveSubagentRecord(this.session.meta.id, session.toRecord());
+		} catch { /* 持久化失败不阻塞 */ }
+	}
+
+	/**
+	 * 向子代理发送消息（追加指令并续跑）。
+	 * 用户（TUI）与 master agent（subagent_send 工具）共用入口。
+	 * 守卫：running 中拒绝（并发保护）、cancelled 拒绝（上下文已中止）。
+	 */
+	async sendToSubagent(name: string, instruction: string): Promise<string> {
+		const session = this.subagents.get(name);
+		if (!session) {
+			throw new Error(`Subagent "${name}" not found. Use list_subagents to check.`);
 		}
-		this.subagentStore.finish(name, result, status);
-
-		// 清理独立控制器
-		this.subagentControllers.delete(name);
-
-		// M-1：持久化子代理记录（供 resume 后 /subagent 查看历史）
-		if (this.session) {
-			const record = this.subagentStore.get(name);
-			if (record) {
-				try {
-					await this.storage.saveSubagentRecord(this.session.meta.id, record);
-				} catch { /* 持久化失败不阻塞 */ }
-			}
-		}
-
+		const result = await session.send(instruction);
+		await this.persistSubagent(name);
 		return result;
 	}
 
@@ -342,10 +385,10 @@ export class SessionManager {
 	 */
 	cancelSubagent(name: string): string[] {
 		const targets = name === 'all'
-			? [...this.subagentControllers.keys()]
-			: (this.subagentControllers.has(name) ? [name] : []);
+			? [...this.subagents.values()].filter((s) => s.isRunning).map((s) => s.name)
+			: (this.subagents.has(name) ? [name] : []);
 		for (const n of targets) {
-			this.subagentControllers.get(n)?.abort();
+			this.subagents.get(n)?.cancel();
 		}
 		return targets;
 	}
@@ -516,13 +559,13 @@ export class SessionManager {
 
 		/** 异步模式状态块（拼到 roundMessages 末尾，不写 agentMessages——kv-cache 前缀稳定） */
 		const buildStatusBlock = (): Message | null => {
-			if (!asyncMode || this.pendingSubagents.size === 0) return null;
+			if (!asyncMode || this.subagents.size === 0) return null;
 
 			const now = Date.now();
 			const lines: string[] = ['[Subagent Status — async mode]'];
 			let hasContent = false;
 
-			for (const [name, sub] of this.pendingSubagents) {
+			for (const [name, sub] of this.subagents) {
 				const elapsed = Math.round((now - sub.startMs) / 1000);
 				const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
 
@@ -554,7 +597,7 @@ export class SessionManager {
 			records: ToolCallRecord[],
 			emit: (event: StreamEvent) => void,
 			launch: (name: string, task: string) => Promise<string>,
-			deferredSpawns?: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: PendingSubagent }[],
+			deferredSpawns?: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: SubagentSessionImpl }[],
 		): Promise<boolean> => {
 			const pushResult = (result: string, error?: string, durationMs = 0) => {
 				msgs.push({ role: 'tool', content: result, tool_call_id: tc.id });
@@ -576,37 +619,20 @@ export class SessionManager {
 						pushResult('Error: both "subagent_name" and "task" are required.', 'invalid_params');
 						return true;
 					}
-					if (this.pendingSubagents.has(name)) {
+					if (this.subagents.has(name)) {
 						pushResult(`Error: subagent "${name}" already exists. Use a unique name.`, 'duplicate');
 						return true;
 					}
 
-					const startMs = Date.now();
-					const promise = launch(name, task).then((r) => {
-						const sub = this.pendingSubagents.get(name);
-						if (sub) {
-							sub.result = r;
-							// I-2：cancelled 优先于 failed/completed
-							if (r === SUBAGENT_CANCELLED) sub.status = 'cancelled';
-							else sub.status = r.startsWith('Error:') ? 'failed' : 'completed';
-						}
-						return r;
-					}).catch((err) => {
-						const sub = this.pendingSubagents.get(name);
-						if (sub) {
-							sub.status = 'failed';
-							sub.result = `Error: ${err instanceof Error ? err.message : String(err)}`;
-						}
-						return '';  // 不会到这里
-					});
-
-					const sub: PendingSubagent = {
-						toolCallId: tc.id,
-						promise,
-						status: 'running',
-						startMs,
-					};
-					this.pendingSubagents.set(name, sub);
+					// launch → runSubagent：创建 SubagentSession（同步放入 this.subagents）并 drive
+					// 事件监听挂在 session.promise（drive promise，resolve 即完成；不含持久化延迟）
+					launch(name, task);
+					const sub = this.subagents.get(name);
+					if (!sub) {
+						pushResult(`Error: failed to create subagent "${name}".`, 'create_failed');
+						return true;
+					}
+					const startMs = sub.startMs;
 
 					if (async) {
 						// M-5：异步模式发紧凑事件（替代 12 行 tool_result）
@@ -623,8 +649,8 @@ export class SessionManager {
 						});
 
 						// 后台监听完成时发 subagent_finished 事件（cancelled 映射为 failed，UI 显示 ✗）
-						promise.then(() => {
-							const s = this.pendingSubagents.get(name);
+						sub.promise?.then(() => {
+							const s = this.subagents.get(name);
 							if (s) {
 								emit({
 									type: 'subagent_finished',
@@ -665,7 +691,7 @@ export class SessionManager {
 					let names: string[];
 					if (raw === undefined || raw === null || raw === '') {
 						// 无参数：等待所有尚未取回的 subagent
-						names = [...this.pendingSubagents.keys()].filter(
+						names = [...this.subagents.keys()].filter(
 							(n) => !this.retrievedSubagents.has(n),
 						);
 						if (names.length === 0) {
@@ -688,7 +714,7 @@ export class SessionManager {
 						return true;
 					}
 
-					const missing = names.filter((n) => !this.pendingSubagents.has(n));
+					const missing = names.filter((n) => !this.subagents.has(n));
 					if (missing.length > 0) {
 						pushResult(
 							`Subagent(s) not found: ${missing.join(', ')}. Use list_subagents to check.`,
@@ -708,13 +734,13 @@ export class SessionManager {
 					// 等待所有指定 subagent 完成（并行等待，全部结束后才继续）
 					const startMs = Date.now();
 					const results = await Promise.all(
-						names.map((n) => this.pendingSubagents.get(n)!.promise),
+						names.map((n) => this.subagents.get(n)!.promise!),
 					);
 					const elapsed = Date.now() - startMs;
 					for (const n of names) this.retrievedSubagents.add(n);
 
 					const anyFailed = names.some((n) => {
-						const s = this.pendingSubagents.get(n);
+						const s = this.subagents.get(n);
 						return s?.status === 'failed' || s?.status === 'cancelled';
 					});
 					const body = names
@@ -729,13 +755,13 @@ export class SessionManager {
 				}
 
 				case 'list_subagents': {
-					if (this.pendingSubagents.size === 0) {
+					if (this.subagents.size === 0) {
 						pushResult('No subagents in this session.');
 						return true;
 					}
 					const now = Date.now();
 					const lines: string[] = [];
-					for (const [n, sub] of this.pendingSubagents) {
+					for (const [n, sub] of this.subagents) {
 						const elapsed = Math.round((now - sub.startMs) / 1000);
 						const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
 						const retrievedStr = this.retrievedSubagents.has(n) ? ' [retrieved]' : '';
@@ -940,7 +966,7 @@ export class SessionManager {
 				}
 
 				// M-3：收集本轮所有子代理 spawn（非异步模式用于循环结束后并行 Promise.all）
-				const allDeferredSpawns: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: PendingSubagent }[] = [];
+				const allDeferredSpawns: { name: string; tc: ToolCall; args: Record<string, unknown>; sub: SubagentSessionImpl }[] = [];
 
 				for (let i = 0; i < pendingToolCalls.length; i++) {
 					const tc = pendingToolCalls[i];
@@ -1115,7 +1141,7 @@ export class SessionManager {
 
 				// ── M-3：非异步模式的 deferred spawns：收集完毕，并行等待 ──
 				if (allDeferredSpawns.length > 0) {
-					await Promise.all(allDeferredSpawns.map((d) => d.sub.promise));
+					await Promise.all(allDeferredSpawns.map((d) => d.sub.promise!));
 					for (const d of allDeferredSpawns) {
 						const sub = d.sub;
 						agentMessages.push({

@@ -23,20 +23,31 @@ export interface SubagentCallbacks {
 /** 被取消时返回的统一标记（I-2：区别于失败，供状态机标 cancelled） */
 export const SUBAGENT_CANCELLED = '(subagent cancelled by user)';
 
+/** 子代理循环结果：最终文本 + 最新消息队列（可恢复续跑） */
+export interface SubagentLoopResult {
+	result: string;
+	/** 最终消息队列（含 system/user/assistant/tool 全部；调用方持有以支持续跑） */
+	messages: Message[];
+}
+
 /**
- * 运行子代理循环。
+ * 运行子代理循环（可恢复会话）。
+ *
+ * 消息队列由调用方构造并持有（首启：`[system, user(task)]`；续跑：追加 user 指令后重新传入），
+ * 循环内 push assistant/tool 消息到内部副本，结束后随结果返回最新队列——调用方保存后
+ * 可再次驱动（追加指令续跑），实现"会话化"子代理。
+ *
  * 无轮次上限——子代理由模型自主决定完成时机（返回纯文本即结束），
  * 失控兜底依赖外部中断（signal）与工具自身超时。
  */
 export async function runSubagentLoop(
-	task: string,
+	messages: Message[],
 	provider: ModelProvider,
 	tools: Tool[],
-	systemPrompt: string,
 	signal?: AbortSignal,
 	callbacks?: SubagentCallbacks,
 	chatDefaults?: ChatOptions,
-): Promise<string> {
+): Promise<SubagentLoopResult> {
 	const emit = (entry: SubagentRoundEntry) => {
 		callbacks?.onEntry?.(entry);
 	};
@@ -50,15 +61,13 @@ export async function runSubagentLoop(
 		},
 	}));
 
-	const messages: Message[] = [
-		{ role: 'system', content: systemPrompt },
-		{ role: 'user', content: task },
-	];
+	// 内部副本：不修改调用方持有的数组引用，返回时给最新队列
+	const msgs: Message[] = [...messages];
 
 	let finalContent = '';
 
 	while (true) {
-		if (signal?.aborted) return SUBAGENT_CANCELLED;
+		if (signal?.aborted) return { result: SUBAGENT_CANCELLED, messages: msgs };
 
 		let content = '';
 		let reasoning = '';
@@ -67,7 +76,7 @@ export async function runSubagentLoop(
 		const toolOptions = toolDefs.length > 0 ? { tools: toolDefs } : {};
 
 		try {
-			for await (const chunk of provider.chatStream(messages, {
+			for await (const chunk of provider.chatStream(msgs, {
 				...toolOptions,
 				signal,
 				...(chatDefaults ?? {}),
@@ -95,7 +104,7 @@ export async function runSubagentLoop(
 		} catch (err: unknown) {
 			// I-2：流式 API 因 signal abort 抛 AbortError → 统一返回取消标记
 			if (err instanceof Error && err.name === 'AbortError') {
-				return SUBAGENT_CANCELLED;
+				return { result: SUBAGENT_CANCELLED, messages: msgs };
 			}
 			throw err;
 		}
@@ -103,10 +112,10 @@ export async function runSubagentLoop(
 		if (content) finalContent = content;
 
 		if (pendingToolCalls.length === 0) {
-			return finalContent || '(subagent completed with no output)';
+			return { result: finalContent || '(subagent completed with no output)', messages: msgs };
 		}
 
-		messages.push({
+		msgs.push({
 			role: 'assistant',
 			content: content || '',
 			reasoning_content: reasoning || undefined,
@@ -138,7 +147,7 @@ export async function runSubagentLoop(
 					error = r.error;
 				} catch (err: unknown) {
 					if (err instanceof Error && err.name === 'AbortError') {
-						return SUBAGENT_CANCELLED;
+						return { result: SUBAGENT_CANCELLED, messages: msgs };
 					}
 					result = `Tool error: ${err instanceof Error ? err.message : String(err)}`;
 					error = 'tool_error';
@@ -153,16 +162,13 @@ export async function runSubagentLoop(
 				toolError: error,
 			});
 
-			messages.push({
+			msgs.push({
 				role: 'tool',
 				content: result,
 				tool_call_id: tc.id,
 			});
 		}
 	}
-
-	// 不可达兜底：循环内所有路径均 return；此处满足类型检查并保持语义
-	return finalContent || '(subagent completed with no output)';
 }
 
 function accumulateToolCalls(toolCalls: ToolCall[], deltas: ToolCallDelta[]): void {

@@ -808,23 +808,21 @@ export class TuiApp {
 
 	/** /subagent_cancel — 交互式选择要取消的子代理（含"全部取消"选项） */
 	private async cancelSubagentInteractive(): Promise<true> {
-		const store = this.sessionMgr.getSubagentStore();
-		const names = store.list();
-		if (names.length === 0) {
+		const subs = this.sessionMgr.listSubagents();
+		if (subs.length === 0) {
 			process.stdout.write(dim('No subagents to cancel.') + '\r\n');
 			return true;
 		}
 
 		const options: SelectOption<string>[] = [
-			{ label: `全部取消 (${names.length} 个)`, value: '__all__' },
-			...names.map((n) => {
-				const rec = store.get(n);
-				const status = rec?.status ?? 'running';
+			{ label: `全部取消 (${subs.length} 个)`, value: '__all__' },
+			...subs.map((s) => {
+				const status = s.status;
 				const icon = status === 'running' ? '⏳'
 					: status === 'completed' ? '✓'
 					: status === 'cancelled' ? '✕'
 					: '✗';
-				return { label: `${n}  (${icon} ${status})`, value: n };
+				return { label: `${s.name}  (${icon} ${status})`, value: s.name };
 			}),
 		];
 
@@ -849,38 +847,11 @@ export class TuiApp {
 		return true;
 	}
 
-	/** /subagent [name] — 显示子代理详情 */
+	/** /subagent [name] — 显示子代理详情（resume 后历史记录已由 SessionManager 恢复） */
 	private async showSubagentDetail(name?: string): Promise<true> {
-		const store = this.sessionMgr.getSubagentStore();
-		let names = store.list();
+		const records = this.sessionMgr.listSubagentRecords();
 
-		// 如果内存中没有，尝试从存储加载历史记录
-		if (names.length === 0) {
-			const sessionId = this.sessionMgr.getSessionId();
-			if (sessionId && this.configMgr) {
-				try {
-					const { Storage } = await import('../core/storage.js');
-					const sessionsDir = this.configMgr.getSessionsDir();
-					if (sessionsDir) {
-						const storage = new Storage(sessionsDir);
-						names = await storage.listSubagentRecords(sessionId);
-						// 加载到内存 store 以便后续 get()
-						for (const n of names) {
-							const record = await storage.loadSubagentRecord(sessionId, n);
-							if (record) {
-								store.start(n, record.task);
-								for (const entry of record.entries) {
-									store.push(n, entry);
-								}
-								store.finish(n, record.result ?? '', record.status === 'cancelled' ? 'cancelled' : record.status === 'failed' ? 'failed' : 'completed');
-							}
-						}
-					}
-				} catch { /* 存储不可用，忽略 */ }
-			}
-		}
-
-		if (names.length === 0) {
+		if (records.length === 0) {
 			process.stdout.write(dim('No subagents in current session.\r\n'));
 			return true;
 		}
@@ -889,9 +860,7 @@ export class TuiApp {
 			// 无参数：列出所有子代理
 			process.stdout.write(yellow('Subagents') + '\r\n');
 			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
-			for (const n of names) {
-				const record = store.get(n);
-				if (!record) continue;
+			for (const record of records) {
 				const icon = record.status === 'running' ? '⏳'
 					: record.status === 'completed' ? green('✓')
 					: red('✗');
@@ -899,17 +868,17 @@ export class TuiApp {
 					? `${((record.endMs - record.startMs) / 1000).toFixed(1)}s`
 					: `${((Date.now() - record.startMs) / 1000).toFixed(1)}s`;
 				process.stdout.write(
-					`  ${icon} ${cyan(n)} ${dim(`(${record.status}, ${elapsed})`)}\r\n`,
+					`  ${icon} ${cyan(record.name)} ${dim(`(${record.status}, ${elapsed})`)}\r\n`,
 				);
 				process.stdout.write(dim(`     ${record.task.slice(0, 80)}${record.task.length > 80 ? '...' : ''}`) + '\r\n');
 			}
 			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
-			process.stdout.write(dim(`/subagent <name> for full detail  |  ${names.length} total`) + '\r\n');
+			process.stdout.write(dim(`/subagent <name> for full detail  |  ${records.length} total`) + '\r\n');
 			return true;
 		}
 
 		// 指定名称：显示完整输出
-		const record = store.get(name);
+		const record = this.sessionMgr.getSubagentRecord(name);
 		if (!record) {
 			process.stdout.write(red(`Subagent "${name}" not found. Use /subagent (no args) to list.`) + '\r\n');
 			return true;

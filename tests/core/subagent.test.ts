@@ -132,6 +132,14 @@ const fakeTool: Tool = {
 	async execute() { return { content: 'fake result' }; },
 };
 
+/** 构造子代理消息队列（新 runSubagentLoop 签名：完整 messages 入参） */
+function subMessages(task: string, systemPrompt = 'subagent prompt'): Message[] {
+	return [
+		{ role: 'system', content: systemPrompt },
+		{ role: 'user', content: task },
+	];
+}
+
 function spawnCall(name: string, task: string): { id: string; function: { name: string; arguments: string } } {
 	return {
 		id: `call-${name}`,
@@ -169,7 +177,7 @@ describe('runSubagentLoop', () => {
 			{ content: '最终结果' },
 		]);
 		const entries: SubagentRoundEntry[] = [];
-		const result = await runSubagentLoop('任务', client, [fakeTool], 'subagent prompt', undefined, {
+		const { result } = await runSubagentLoop(subMessages('任务'), client, [fakeTool], undefined, {
 			onEntry: (e) => entries.push(e),
 		});
 		expect(result).toBe('最终结果');
@@ -184,7 +192,7 @@ describe('runSubagentLoop', () => {
 			{ content: '结果', usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } },
 		]);
 		const usages: TokenUsage[] = [];
-		await runSubagentLoop('任务', client, [], 'prompt', undefined, { onUsage: (u) => usages.push(u) });
+		await runSubagentLoop(subMessages('任务'), client, [], undefined, { onUsage: (u) => usages.push(u) });
 		expect(usages).toHaveLength(1);
 		expect(usages[0].total_tokens).toBe(8);
 	});
@@ -192,9 +200,9 @@ describe('runSubagentLoop', () => {
 	it('signal abort 返回 SUBAGENT_CANCELLED（I-1/I-2）', async () => {
 		const controller = new AbortController();
 		const client = makeScriptClient([{ hang: true }]);
-		const p = runSubagentLoop('任务', client, [], 'prompt', controller.signal);
+		const p = runSubagentLoop(subMessages('任务'), client, [], controller.signal);
 		setTimeout(() => controller.abort(), 10);
-		const result = await p;
+		const { result } = await p;
 		expect(result).toBe(SUBAGENT_CANCELLED);
 	});
 
@@ -214,7 +222,7 @@ describe('runSubagentLoop', () => {
 		const client = makeScriptClient([
 			{ content: '', toolCalls: [{ id: 'c1', function: { name: 'abort_tool', arguments: '{}' } }] },
 		]);
-		const result = await runSubagentLoop('任务', client, [abortingTool], 'prompt');
+		const { result } = await runSubagentLoop(subMessages('任务'), client, [abortingTool]);
 		expect(result).toBe(SUBAGENT_CANCELLED);
 	});
 });
@@ -255,7 +263,7 @@ describe('SessionManager subagent 集成', () => {
 
 		expect(result).not.toBeNull();
 		// store 填充
-		const record = mgr.getSubagentStore().get('sub1');
+		const record = mgr.getSubagent('sub1');
 		expect(record).toBeDefined();
 		expect(record!.status).toBe('completed');
 		expect(record!.result).toBe('子代理结果');
@@ -301,7 +309,7 @@ describe('SessionManager subagent 集成', () => {
 		expect(subSignal).toBeDefined();
 		expect(subSignal!.aborted).toBe(false);
 		// 子代理仍在运行（store 状态 running）
-		expect(mgr.getSubagentStore().get('sub1')?.status).toBe('running');
+		expect(mgr.getSubagent('sub1')?.status).toBe('running');
 	});
 
 	it('cancelSubagent：取消后状态标 cancelled（I-2）', async () => {
@@ -325,7 +333,7 @@ describe('SessionManager subagent 集成', () => {
 
 		// 子代理收到 abort → 返回 cancelled
 		await sleep(50);
-		expect(mgr.getSubagentStore().get('sub1')?.status).toBe('cancelled');
+		expect(mgr.getSubagent('sub1')?.status).toBe('cancelled');
 	});
 
 	it('cancelSubagent("all") 取消全部运行中的子代理', async () => {
@@ -350,8 +358,8 @@ describe('SessionManager subagent 集成', () => {
 		expect(cancelled.sort()).toEqual(['a', 'b']);
 		await p;
 		await sleep(50);
-		expect(mgr.getSubagentStore().get('a')?.status).toBe('cancelled');
-		expect(mgr.getSubagentStore().get('b')?.status).toBe('cancelled');
+		expect(mgr.getSubagent('a')?.status).toBe('cancelled');
+		expect(mgr.getSubagent('b')?.status).toBe('cancelled');
 	});
 
 	it('M-3：sync 模式一轮多 spawn 并行启动（B 在 A 完成前被调用）', async () => {
@@ -385,7 +393,7 @@ describe('SessionManager subagent 集成', () => {
 		// B 已启动（旧串行实现下 A 挂起期间 B 永远不会被调用）→ 证明并行启动
 		expect(subOrder).toContain('B:start');
 		// A 超时结束（cancelled），B 正常完成
-		expect(mgr.getSubagentStore().get('B')?.status).toBe('completed');
+		expect(mgr.getSubagent('B')?.status).toBe('completed');
 	});
 
 	// ─── wait 多参数模式 ────────────────────────────
@@ -569,5 +577,183 @@ describe('SessionManager subagent 集成', () => {
 
 		const ev = findWaitEvent(events);
 		expect(ev!.toolResult).toContain('No pending subagents to wait for');
+	});
+});
+
+// ─── SubagentSession 会话化（方案 B）────────────────────
+
+describe('SubagentSession 会话化', () => {
+	it('drive 完成：status completed + 消息队列保留（tool 轮含 assistant 消息）', async () => {
+		const client = makeScriptClient([
+			{ content: '开始', toolCalls: [{ id: 'c1', function: { name: 'fake_tool', arguments: '{}' } }] },
+			{ content: '最终结果' },
+		]);
+		const { SubagentSession } = await import('../../src/core/subagent-session.js');
+		const session = new SubagentSession({
+			name: 'sub1', task: '任务', systemPrompt: 'subagent prompt',
+			provider: client, tools: [fakeTool], onUsage: () => {},
+		});
+		const result = await session.drive();
+		expect(result).toBe('最终结果');
+		expect(session.status).toBe('completed');
+		expect(session.endMs).toBeDefined();
+		expect(session.messages[0].role).toBe('system');
+		expect(session.messages[1]).toEqual({ role: 'user', content: '任务' });
+		// 有 tool_calls 的轮：assistant（含 tool_calls）+ tool 消息被保留
+		const assistantMsgs = session.messages.filter((m) => m.role === 'assistant');
+		expect(assistantMsgs.length).toBe(1);
+		expect(assistantMsgs[0].tool_calls).toBeDefined();
+		expect(session.messages.some((m) => m.role === 'tool' && m.content === 'fake result')).toBe(true);
+	});
+
+	it('send 追加指令续跑：上下文保留，新 user 消息追加，返回新结果', async () => {
+		const client = makeScriptClient([
+			{ content: '第一轮结果' },
+			{ content: '续跑结果' },
+		]);
+		const { SubagentSession } = await import('../../src/core/subagent-session.js');
+		const session = new SubagentSession({
+			name: 'sub1', task: '任务', systemPrompt: 'subagent prompt',
+			provider: client, tools: [], onUsage: () => {},
+		});
+		await session.drive();
+		expect(session.status).toBe('completed');
+
+		const r2 = await session.send('继续深入');
+		expect(r2).toBe('续跑结果');
+		expect(session.status).toBe('completed');
+		// 完整上下文保留：system + 两条 user（task + 指令）
+		const userMsgs = session.messages.filter((m) => m.role === 'user');
+		expect(userMsgs.map((m) => m.content)).toEqual(['任务', '继续深入']);
+		expect(session.messages.length).toBeGreaterThanOrEqual(3);
+	});
+
+	it('running 中 send 拒绝（并发守卫）', async () => {
+		const client = makeScriptClient([{ hang: true }]);
+		const { SubagentSession } = await import('../../src/core/subagent-session.js');
+		const session = new SubagentSession({
+			name: 'sub1', task: '任务', systemPrompt: 'subagent prompt',
+			provider: client, tools: [], onUsage: () => {},
+		});
+		const p = session.drive();
+		await expect(session.send('别打断')).rejects.toThrow(/still running/);
+		session.cancel();
+		await p;
+	});
+
+	it('cancelled 后 send 拒绝（上下文已中止）', async () => {
+		const client = makeScriptClient([{ hang: true }]);
+		const { SubagentSession } = await import('../../src/core/subagent-session.js');
+		const session = new SubagentSession({
+			name: 'sub1', task: '任务', systemPrompt: 'subagent prompt',
+			provider: client, tools: [], onUsage: () => {},
+		});
+		const p = session.drive();
+		session.cancel();
+		await p;
+		expect(session.status).toBe('cancelled');
+		await expect(session.send('不行')).rejects.toThrow(/cancelled/);
+	});
+
+	it('toRecord/fromRecord 往返：状态与消息上下文完整保留', async () => {
+		const client = makeScriptClient([{ content: '结果' }]);
+		const { SubagentSession } = await import('../../src/core/subagent-session.js');
+		const session = new SubagentSession({
+			name: 'sub1', task: '任务', systemPrompt: 'subagent prompt',
+			provider: client, tools: [], onUsage: () => {},
+		});
+		await session.drive();
+		const record = session.toRecord();
+		expect(record.messages).toBeDefined();
+		expect(record.messages!.length).toBeGreaterThan(0);
+		expect(record.status).toBe('completed');
+
+		// fromRecord 恢复：completed 状态、消息保留、可继续 send
+		const restored = SubagentSession.fromRecord(record, { provider: client, tools: [], onUsage: () => {} });
+		expect(restored.status).toBe('completed');
+		expect(restored.messages.length).toBe(session.messages.length);
+		const r2 = await restored.send('恢复后续跑');
+		expect(r2).toBe('结果'); // steps 重复最后一步
+	});
+});
+
+// ─── sendToSubagent（用户 / master 向子代理发消息）────────
+
+describe('sendToSubagent', () => {
+	let sendDir: string;
+	let sendStorage: Storage;
+	let sendMgr: SessionManager;
+
+	beforeEach(async () => {
+		sendDir = await mkdtemp(join(tmpdir(), 'deepseek-send-test-'));
+		sendStorage = new Storage(sendDir);
+	});
+
+	afterEach(async () => {
+		await rm(sendDir, { recursive: true, force: true });
+	});
+
+	it('spawn 完成后 send：子代理带上下文续跑并返回新结果', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task x')] },
+				{ content: '主代理完成' },
+			],
+			(messages) => {
+				const userCount = messages.filter((m) => m.role === 'user').length;
+				return userCount === 1 ? { content: '第一轮结果' } : { content: '续跑结果' };
+			},
+		);
+		sendMgr = new SessionManager(sendStorage, client);
+		sendMgr.setSubagentAsync(true);
+		await sendMgr.startNewSession('send 测试');
+		sendMgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		await sendMgr.sendMessageStream('spawn', () => {});
+		expect(sendMgr.getSubagent('sub1')?.status).toBe('completed');
+
+		const r = await sendMgr.sendToSubagent('sub1', '再深入一点');
+		expect(r).toBe('续跑结果');
+		expect(sendMgr.getSubagent('sub1')?.status).toBe('completed');
+		// 持久化含最新消息上下文
+		const loaded = await sendStorage.loadSubagentRecord(sendMgr.getSessionId()!, 'sub1');
+		expect(loaded?.messages?.filter((m) => m.role === 'user').map((m) => m.content))
+			.toEqual(['task x', '再深入一点']);
+	});
+
+	it('不存在的子代理：抛 not found 错误', async () => {
+		sendMgr = new SessionManager(sendStorage, makeSplitClient([{ content: 'ok' }], () => ({ content: 'x' })));
+		await sendMgr.startNewSession('send not found');
+		sendMgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+		await expect(sendMgr.sendToSubagent('nope', 'hi')).rejects.toThrow(/not found/i);
+	});
+
+	it('resume 后恢复子代理会话：completed 可继续 send（方案 B 跨进程）', async () => {
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task x')] },
+				{ content: '主代理完成' },
+			],
+			() => ({ content: '历史结果' }),
+		);
+		sendMgr = new SessionManager(sendStorage, client);
+		sendMgr.setSubagentAsync(true);
+		await sendMgr.startNewSession('resume send 测试');
+		sendMgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+		await sendMgr.sendMessageStream('spawn', () => {});
+		const sessionId = sendMgr.getSessionId()!;
+
+		// 模拟重启：新 SessionManager + resumeSession
+		const { SessionManager: SM2 } = await import('../../src/core/session.js');
+		const client2 = makeSplitClient([{ content: 'ok' }], () => ({ content: '续跑结果' }));
+		const mgr2 = new SM2(sendStorage, client2);
+		await mgr2.resumeSession(sessionId);
+		const restored = mgr2.getSubagent('sub1');
+		expect(restored).toBeDefined();
+		expect(restored!.status).toBe('completed');
+		expect(restored!.messages.length).toBeGreaterThan(0);
+
+		const r = await mgr2.sendToSubagent('sub1', '恢复后继续');
+		expect(r).toBe('续跑结果');
 	});
 });
