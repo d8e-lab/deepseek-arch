@@ -114,6 +114,18 @@ export class TuiApp {
 	private readonly MAX_VISIBLE_THINK = 5;
 	/** 全屏浏览视图是否激活（Ctrl+O） */
 	private viewerActive = false;
+	/** 视图模式：conversation（Ctrl+O 对话浏览）| subagents（Ctrl+T 子代理总览） */
+	private viewerMode: 'conversation' | 'subagents' = 'conversation';
+	/** subagents 视图：当前选中 subagent 索引 */
+	private viewerSubagentIndex = 0;
+	/** subagents 视图：底部输入缓冲（发送给选中 subagent） */
+	private subagentViewInput = '';
+	/** subagents 视图：实时刷新定时器 */
+	private subagentViewTimer: ReturnType<typeof setInterval> | null = null;
+	/** subagents 视图：发送中标志（阻止并发 send） */
+	private subagentViewBusy = false;
+	/** subagents 视图：最近一次发送错误（显示在底部） */
+	private subagentViewError: string | null = null;
 	/** 视图滚动偏移（行） */
 	private viewerScrollOffset = 0;
 	/** 视图预渲染行 */
@@ -436,7 +448,7 @@ export class TuiApp {
 			if (!handled) {
 				// F-9：// 前缀转义——去掉一个 / 后按普通消息发送（如 "//usr/bin 在哪" → "/usr/bin 在哪"）
 				const sendContent = content.startsWith('//') ? content.slice(1) : content;
-				this.clearCommandResult(); // 发送普通消息：清空命令结果区
+				this.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
 				process.stdout.write(green('[You] ') + sendContent + '\r\n\r\n');
 				await this.sendMessageStream(sendContent);
 			}
@@ -447,7 +459,7 @@ export class TuiApp {
 		}
 
 		// 打印用户消息（绿色）
-		this.clearCommandResult(); // 发送普通消息：清空命令结果区
+		this.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
 		process.stdout.write(green('[You] ') + content + '\r\n\r\n');
 
 		// 拼接待发送的 shell 上下文（仅模型可见）
@@ -1041,16 +1053,9 @@ export class TuiApp {
 			return;
 		}
 
-		// Ctrl+T: toggle subagent detail view
+		// Ctrl+T: 打开 subagent 总览视图（任意状态可用；流式期间 master 后台静默）
 		if (data === '\x14') {
-			if (this.state === AppState.IDLE) {
-				this.showSubagentDetail();
-				this.printSeparator();
-				this.lastVisibleInputRows = 1;
-				this.lastCursorDisplayRow = 0;
-				this.drawInputArea();
-				process.stdout.write('\r');
-			}
+			this.openSubagentsView();
 			return;
 		}
 
@@ -1429,7 +1434,8 @@ export class TuiApp {
 		if (this.commandResultActive) {
 			if (this.commandResultLines.length < this.MAX_CMD_RESULT_ROWS) {
 				this.commandResultLines.push(line);
-			} else if (!this.commandResultLines.includes('… 输出被截断')) {
+			} else if (this.commandResultLines.length === this.MAX_CMD_RESULT_ROWS) {
+				// 恰好超限一次：追加截断提示（之后不再追加）
 				this.commandResultLines.push(dim('… 输出被截断 (完整内容不再保留)'));
 			}
 			return;
@@ -1442,11 +1448,11 @@ export class TuiApp {
 		this.renderInput();
 	}
 
-	/** 清空命令结果区（发送普通消息后调用） */
-	private clearCommandResult(): void {
+	/** 清空命令结果区（发送普通消息后调用；redraw=false 时输入区已清除，避免错位重绘） */
+	private clearCommandResult(redraw = true): void {
 		if (this.commandResultLines.length === 0) return;
 		this.commandResultLines = [];
-		this.renderInput();
+		if (redraw) this.renderInput();
 	}
 
 	// ─── Bug 1：流式输出期间输入区固定在底部 ──────
@@ -1558,6 +1564,7 @@ export class TuiApp {
 	private openViewer(): void {
 		if (this.viewerActive) return;
 		this.viewerActive = true;
+		this.viewerMode = 'conversation';
 		// 记录打开时状态（退出时据此补渲染）
 		const session = this.sessionMgr.getSession();
 		this.viewerOpenTurnCount = session?.turns.length ?? 0;
@@ -1621,7 +1628,7 @@ export class TuiApp {
 			const next = this.nextMessage;
 			this.nextMessage = null;
 			if (next) {
-				this.clearCommandResult();
+				this.clearCommandResult(false); // 输入区已重建，不重绘避免错位
 				this.printSeparator();
 				process.stdout.write(green('[You] ') + next + '\r\n\r\n');
 				// fire-and-forget：sendMessageStream 内部处理异常与后续状态
@@ -1783,6 +1790,254 @@ export class TuiApp {
 		else if (seq === 'D') this.viewerJumpTurn(-1);
 		else if (seq === '5~') this.viewerPageScroll(-1);
 		else if (seq === '6~') this.viewerPageScroll(1);
+	}
+
+	// ─── Ctrl+T Subagents 总览视图（全屏，实时刷新 + 视图内交互）────
+
+	/** 打开 Subagents 总览视图（任意状态可用；流式期间 master 后台静默缓冲） */
+	private openSubagentsView(): void {
+		if (this.viewerActive) return;
+		this.viewerActive = true;
+		this.viewerMode = 'subagents';
+		this.viewerSubagentIndex = 0;
+		this.subagentViewInput = '';
+		this.subagentViewBusy = false;
+		this.subagentViewError = null;
+		// 记录打开时状态（退出时据此补渲染 master 输出）
+		const session = this.sessionMgr.getSession();
+		this.viewerOpenTurnCount = session?.turns.length ?? 0;
+		this.viewerOpenedDuringStream = this.state !== AppState.IDLE;
+		this.viewerOpenedTurnDone = false;
+		this.viewerOpenedTurnLines = [];
+		this.streamLines = [];
+		// 暂停 think 折叠动画（其直接写 stdout，会污染主 buffer）
+		if (this.thinkAnimTimer) {
+			clearInterval(this.thinkAnimTimer);
+			this.thinkAnimTimer = null;
+		}
+		// 保存当前 stdinHandler，切换为视图 handler
+		this.viewerPrevHandler = this.stdinHandler;
+		this.viewerHandler = (data: string) => this.handleSubagentsViewInput(data);
+		this.stdinHandler = this.viewerHandler;
+		// 建立视图关闭等待（inputCycle 在视图打开时等待）
+		this.viewerClosedPromise = new Promise<void>((r) => { this.viewerClosedResolve = r; });
+		// 切换 alternate screen 并渲染
+		process.stdout.write('\x1b[?1049h');
+		this.renderSubagentsView();
+		// 实时刷新：500ms 重渲染（状态条 + 选中 subagent 输出）
+		this.subagentViewTimer = setInterval(() => {
+			if (this.viewerActive && this.viewerMode === 'subagents') {
+				this.renderSubagentsView();
+			}
+		}, 500);
+	}
+
+	/** 退出 Subagents 视图：恢复主 buffer + 补渲染 master 后台输出 + 恢复输入 */
+	private closeSubagentsView(): void {
+		if (!this.viewerActive || this.viewerMode !== 'subagents') return;
+		if (this.subagentViewTimer) {
+			clearInterval(this.subagentViewTimer);
+			this.subagentViewTimer = null;
+		}
+		this.viewerActive = false;
+		this.viewerMode = 'conversation';
+		// 恢复 stdinHandler（同 closeViewer 逻辑）
+		if (this.stdinHandler === this.viewerHandler) {
+			if (!this.viewerOpenedDuringStream) {
+				this.stdinHandler = this.viewerPrevHandler;
+			} else if (this.abortController) {
+				this.stdinHandler = this.viewerPrevHandler;
+			} else {
+				this.stdinHandler = null;
+			}
+		}
+		this.viewerHandler = null;
+		this.viewerPrevHandler = null;
+		// 恢复主 buffer（alternate screen 保存的主 TUI 内容还原）
+		process.stdout.write('\x1b[?1049l');
+		// 补渲染视图期间的静默输出（master 后台输出）
+		this.replayViewerOutput();
+		// 重建输入区
+		this.printSeparator();
+		this.lastVisibleInputRows = 1;
+		this.lastCursorDisplayRow = 0;
+		this.drawInputArea();
+		process.stdout.write('\r');
+		this.renderInput();
+		// 输出已结束：恢复 IDLE 状态并发送视图期间/前排队的消息
+		if (!this.abortController) {
+			this.setState(AppState.IDLE);
+			const next = this.nextMessage;
+			this.nextMessage = null;
+			if (next) {
+				this.clearCommandResult(false);
+				this.printSeparator();
+				process.stdout.write(green('[You] ') + next + '\r\n\r\n');
+				void this.sendMessageStream(next);
+			}
+		}
+		// 通知等待中的 inputCycle：视图已关闭
+		this.viewerClosedResolve?.();
+		this.viewerClosedResolve = null;
+		this.viewerClosedPromise = null;
+	}
+
+	/** 渲染 Subagents 总览视图（顶部状态条 + 选中 subagent 输出 + 底部输入） */
+	private renderSubagentsView(): void {
+		const { rows, cols } = getTermSize();
+		const subs = this.sessionMgr.listSubagents();
+
+		process.stdout.write('\x1b[2J\x1b[H');
+
+		if (subs.length === 0) {
+			process.stdout.write(yellow('═══ Subagents ═══') + '\r\n');
+			process.stdout.write(dim('(当前会话没有 subagent。master agent 可通过 subagent_spawn 创建。)') + '\r\n');
+			process.stdout.write('\r\n');
+			process.stdout.write(dim('  [q] 返回 master') + '\r\n');
+			return;
+		}
+
+		// 校正选中索引（subagent 可能被取消/移除）
+		if (this.viewerSubagentIndex >= subs.length) this.viewerSubagentIndex = 0;
+		const current = subs[this.viewerSubagentIndex];
+		const record = current.toRecord();
+
+		// ── 顶部状态条（无进度条：状态 + 耗时）──
+		const curIcon = current.status === 'running' ? '⏳'
+			: current.status === 'completed' ? '✓' : '✗';
+		process.stdout.write(yellow(`═══ Subagents (${subs.length}) — 选中: ${current.name} ${curIcon} ═══`) + '\r\n');
+		subs.forEach((s, i) => {
+			const icon = s.status === 'running' ? '●'
+				: s.status === 'completed' ? green('✓')
+				: red('✗');
+			const elapsed = ((Date.now() - s.startMs) / 1000).toFixed(1);
+			const marker = i === this.viewerSubagentIndex ? green('▸') : ' ';
+			const name = i === this.viewerSubagentIndex ? cyan(s.name) : s.name;
+			process.stdout.write(`  ${marker} ${icon} ${name} ${dim(`(${s.status}, ${elapsed}s)`)}` + '\r\n');
+		});
+		process.stdout.write(dim('─'.repeat(Math.max(20, cols - 2))) + '\r\n');
+
+		// ── 选中 subagent 输出（复用 SubagentRecordView，显示末尾 N 行 = 最新）──
+		const view = new SubagentRecordView();
+		const lines = view.render(record, cols);
+		const visible = Math.max(1, rows - 7); // 状态条区 + 提示行 + 输入行
+		const start = Math.max(0, lines.length - visible);
+		for (let r = 0; r < visible; r++) {
+			const idx = start + r;
+			process.stdout.write('\r\x1b[2K');
+			if (idx < lines.length) {
+				process.stdout.write(lines[idx].slice(0, cols - 1));
+			}
+			if (r < visible - 1) process.stdout.write('\r\n');
+		}
+
+		// ── 底部：快捷键提示 + 输入区 ──
+		process.stdout.write('\r\n\x1b[2K');
+		process.stdout.write(dim(`  [n] next  [p] previous  [1-${Math.min(subs.length, 9)}] 跳转  [q] 返回 master`) + '\r\n');
+		process.stdout.write('\x1b[2K');
+		if (this.subagentViewBusy) {
+			process.stdout.write(dim(`  ⏳ 正在发送给 ${current.name}... (ESC 中断)`));
+		} else {
+			const prefix = `  > ${this.subagentViewInput}`;
+			process.stdout.write(green(prefix) + dim('  [Enter] 发送'));
+			if (this.subagentViewError) {
+				process.stdout.write(red(`  ⚠ ${this.subagentViewError}`));
+			}
+		}
+	}
+
+	/** Subagents 视图输入处理：n/p/数字切换、Enter 发送、q/ESC 返回 */
+	private handleSubagentsViewInput(data: string): void {
+		const subs = this.sessionMgr.listSubagents();
+		for (let i = 0; i < data.length; i++) {
+			const ch = data[i];
+
+			// ESC 单独键 → 关闭视图
+			if (ch === '\x1b') {
+				if (data[i + 1] !== '[') { this.closeSubagentsView(); return; }
+				// 跳过 ESC 序列（方向键等暂不支持）
+				i++;
+				while (i < data.length) {
+					const sc = data.charCodeAt(i);
+					i++;
+					if (sc >= 0x40 && sc <= 0x7e) break;
+				}
+				i--;
+				continue;
+			}
+			if (ch === 'q' || ch === 'Q') { this.closeSubagentsView(); return; }
+
+			// 发送中：忽略其他输入（ESC 已处理）
+			if (this.subagentViewBusy) continue;
+
+			if (ch === '\x0d' || ch === '\x0a') {
+				// Enter 发送给当前选中 subagent
+				const text = this.subagentViewInput.trim();
+				this.subagentViewInput = '';
+				if (text) {
+					void this.sendToSubagentFromView(text);
+				} else {
+					this.renderSubagentsView();
+				}
+				continue;
+			}
+			if (ch === '\x7f' || ch === '\x08') {
+				// Backspace
+				this.subagentViewInput = this.subagentViewInput.slice(0, -1);
+				this.renderSubagentsView();
+				continue;
+			}
+			if (ch === 'n') {
+				if (subs.length > 0) {
+					this.viewerSubagentIndex = (this.viewerSubagentIndex + 1) % subs.length;
+					this.subagentViewError = null;
+					this.renderSubagentsView();
+				}
+				continue;
+			}
+			if (ch === 'p') {
+				if (subs.length > 0) {
+					this.viewerSubagentIndex = (this.viewerSubagentIndex - 1 + subs.length) % subs.length;
+					this.subagentViewError = null;
+					this.renderSubagentsView();
+				}
+				continue;
+			}
+			if (ch >= '1' && ch <= '9') {
+				const idx = Number(ch) - 1;
+				if (idx < subs.length) {
+					this.viewerSubagentIndex = idx;
+					this.subagentViewError = null;
+					this.renderSubagentsView();
+				}
+				continue;
+			}
+			// 可打印字符（含中文等单码元字符）追加到输入缓冲
+			if (ch >= ' ') {
+				this.subagentViewInput += ch;
+				this.renderSubagentsView();
+				continue;
+			}
+		}
+	}
+
+	/** 视图内：向选中 subagent 发送消息（同步等待续跑，期间视图显示发送中） */
+	private async sendToSubagentFromView(text: string): Promise<void> {
+		const subs = this.sessionMgr.listSubagents();
+		const current = subs[this.viewerSubagentIndex];
+		if (!current) { this.renderSubagentsView(); return; }
+		this.subagentViewBusy = true;
+		this.subagentViewError = null;
+		this.renderSubagentsView();
+		try {
+			await this.sessionMgr.sendToSubagent(current.name, text);
+			// 结果已追加到 record.entries/result，重渲染显示最新输出
+		} catch (err) {
+			this.subagentViewError = err instanceof Error ? err.message : String(err);
+		} finally {
+			this.subagentViewBusy = false;
+			this.renderSubagentsView();
+		}
 	}
 
 	/** 视图搜索输入模式（逐字符） */
@@ -2266,7 +2521,7 @@ export class TuiApp {
 				const next = this.nextMessage;
 				this.nextMessage = null;
 				if (next) {
-					this.clearCommandResult();
+					this.clearCommandResult(false); // 输入区已收起，不重绘
 					this.printSeparator();
 					process.stdout.write(green('[You] ') + next + '\r\n\r\n');
 					await this.sendMessageStream(next);

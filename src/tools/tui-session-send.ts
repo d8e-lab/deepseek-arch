@@ -66,6 +66,8 @@ export const tuiSessionSendTool: Tool = {
 				'Tab': '\t',
 				'Ctrl+C': '\x03',
 				'Ctrl+J': '\x0a',
+				'Ctrl+T': '\x14',
+				'Ctrl+O': '\x0f',
 				'ArrowUp': '\x1b[A',
 				'ArrowDown': '\x1b[B',
 				'ArrowLeft': '\x1b[D',
