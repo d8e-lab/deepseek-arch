@@ -61,7 +61,9 @@ You are running as a subagent delegated by a master agent. Key constraints:
 - Do NOT spawn sub-subagents, use wait, or list_subagents (these tools are not available to you).
 - Do NOT use the skill tool or save_plan (not available to subagents).
 - If you cannot complete the task, explain why and return what you have.
-- Keep output focused: the master agent needs your result, not a conversation.`;
+- Keep output focused: the master agent needs your result, not a conversation.
+- You may receive follow-up instructions after reporting a result. When given a follow-up,
+  continue from your previous context — do NOT restart the task from scratch.`;
 
 /** 后台子代理会话（方案 B 全状态化：消息上下文 + 实时输出 + 可续跑） */
 export type { SubagentSession } from './subagent-session.js';
