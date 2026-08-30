@@ -41,35 +41,44 @@ export const tuiSessionStartTool: Tool = {
 		if (useYolo) args.push('--yolo');
 		if (useMock) args.push('--mock');
 
-		const info = sessionManager.spawn(['node', ...args], {
-			cols: 300,
-			rows: 200,
-			env: {
-				DEEPSEEK_API_KEY: 'mock-key',
-			},
-		});
+		try {
+			const info = sessionManager.spawn(['node', ...args], {
+				cols: 300,
+				rows: 200,
+				env: {
+					DEEPSEEK_API_KEY: 'mock-key',
+				},
+			});
 
-		// 等待初始渲染
-		await new Promise(resolve => setTimeout(resolve, 800));
+			// 等待初始渲染
+			await new Promise(resolve => setTimeout(resolve, 800));
 
-		// 读取初始输出
-		const buf = sessionManager.readBuffer(info.sessionId) ?? '';
-		const preview = buf.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r\n?/g, '\n').slice(-500);
+			// 读取初始输出
+			const buf = sessionManager.readBuffer(info.sessionId) ?? '';
+			const preview = buf.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r\n?/g, '\n').slice(-500);
 
-		return {
-			content: [
-				`Session started: ${info.sessionId}`,
-				`PID: ${info.pid}`,
-				`Terminal: 300×200`,
-				`Args: ${args.join(' ')}`,
-				'',
-				'=== Initial Output (last 500 chars) ===',
-				preview.slice(-500),
-				'=== End ===',
-				'',
-				'Use tui_session_send to type text, tui_session_read to get output,',
-				'tui_session_capture for structured TUI state, and tui_session_stop to end.',
-			].join('\n'),
-		};
+			return {
+				content: [
+					`Session started: ${info.sessionId}`,
+					`PID: ${info.pid}`,
+					`Terminal: 300×200`,
+					`Args: ${args.join(' ')}`,
+					'',
+					'=== Initial Output (last 500 chars) ===',
+					preview.slice(-500),
+					'=== End ===',
+					'',
+					'Use tui_session_send to type text, tui_session_read to get output,',
+					'tui_session_capture for structured TUI state, and tui_session_stop to end.',
+				].join('\n'),
+			};
+		} catch (err) {
+			// node-pty 缺失/编译失败时不崩溃，返回可读错误供模型感知
+			const message = err instanceof Error ? err.message : String(err);
+			return {
+				content: `tui_session_start failed: ${message}`,
+				error: 'pty_unavailable',
+			};
+		}
 	},
 };

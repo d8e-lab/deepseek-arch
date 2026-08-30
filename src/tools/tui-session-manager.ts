@@ -5,10 +5,48 @@
  * 支持多 session 管理、输入发送、输出捕获、屏幕状态解析。
  */
 
-import * as pty from 'node-pty';
+import type { IPty } from 'node-pty';
+import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { stripAnsi } from '../render/ansi.js';
 import type { ScreenCapture, TurnCaptureInfo, ToolCallCaptureInfo, InputAreaCapture } from '../render/types.js';
+
+// ─── node-pty 懒加载 ───────────────────────────────
+// node-pty 是原生模块（Linux 上需源码编译）。若安装时未编译成功，
+// 顶层 import 会导致整个 CLI 启动即崩溃。这里改为运行时按需加载：
+// 只有真正调用 spawn()（PTY 功能）时才 require，失败时抛出可读错误。
+
+type PtyModule = typeof import('node-pty');
+
+export class PtyUnavailableError extends Error {
+	constructor(cause?: unknown) {
+		super(
+			'PTY subsystem unavailable: node-pty native module could not be loaded.\n' +
+			'This usually means node-pty was not compiled during installation.\n' +
+			'Fix: reinstall deepseek-arch, or rebuild node-pty manually:\n' +
+			'  cd "$(npm root -g)/deepseek-arch" && npm rebuild node-pty\n' +
+			'Build tools may be required (Arch: sudo pacman -S base-devel python).',
+		);
+		this.name = 'PtyUnavailableError';
+		if (cause) (this as { cause?: unknown }).cause = cause;
+	}
+}
+
+const require = createRequire(import.meta.url);
+let ptyModule: PtyModule | null = null;
+let ptyLoadError: PtyUnavailableError | null = null;
+
+function loadPty(): PtyModule {
+	if (ptyModule) return ptyModule;
+	if (ptyLoadError) throw ptyLoadError;
+	try {
+		ptyModule = require('node-pty') as PtyModule;
+		return ptyModule;
+	} catch (cause) {
+		ptyLoadError = new PtyUnavailableError(cause);
+		throw ptyLoadError;
+	}
+}
 
 // ─── 类型 ───────────────────────────────────────────
 
@@ -22,7 +60,7 @@ export interface SessionInfo {
 
 interface ManagedSession {
 	info: SessionInfo;
-	proc: pty.IPty;
+	proc: IPty;
 	buffer: string;
 	maxBufferSize: number;
 }
@@ -53,7 +91,7 @@ class TuiSessionManagerImpl {
 		// 移除可能干扰 PTY 会话的环境变量
 		delete env.BROWSER_CDP;
 
-		const proc = pty.spawn(args[0], args.slice(1), {
+		const proc = loadPty().spawn(args[0], args.slice(1), {
 			cols,
 			rows,
 			name: 'xterm-256color',
