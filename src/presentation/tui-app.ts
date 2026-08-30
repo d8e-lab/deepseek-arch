@@ -100,12 +100,10 @@ export class TuiApp {
 	private suggestionLinesCount = 0;
 	/** 双工交互：流式输出期间用户 Enter 排入的待发送消息（中断当前输出后发送） */
 	private nextMessage: string | null = null;
-	/** 命令结果区：最近一次 / 命令的输出（固定显示在输入区上方，新命令替换，发送消息后清空） */
+	/** 命令结果区：最近一次 / 命令的输出（固定显示在输入区下方，完整保留，发送消息后清空） */
 	private commandResultLines: string[] = [];
 	/** 命令执行期间输出捕获标志（true 时 cmdOut 写入 commandResultLines 而非 scrollback） */
 	private commandResultActive = false;
-	/** 命令结果区最大显示行数（超出截断） */
-	private readonly MAX_CMD_RESULT_ROWS = 6;
 	/** 当前轮完整 think 内容（Ctrl+O 查看完整思考用） */
 	private fullThink: string[] = [];
 	/** think 是否已折叠（超出可见行数） */
@@ -394,8 +392,8 @@ export class TuiApp {
 		// 仅空闲态重绘输入区域（流式/确认态的输出已在 scrollback 中）
 		if (this.state !== AppState.IDLE) return;
 		// 回到输入区域起点 → 清到屏底 → 重画 → 重渲染
-		// 上移基准：光标在输入区行（相对区域顶部 lastCursorDisplayRow），命令结果区在其上方 lastCmdRows 行
-		const upRows = this.lastCmdRows + this.lastCursorDisplayRow;
+		// 上移基准：光标在输入区行（相对区域顶部 lastCursorDisplayRow）；命令结果区在输入区下方
+		const upRows = this.lastCursorDisplayRow;
 		if (upRows > 0) {
 			process.stdout.write(`\x1b[${upRows}A`);
 		}
@@ -451,7 +449,7 @@ export class TuiApp {
 		let content = await this.readUserInput();
 
 		// 清除输入区域：回到起点（无历史记录时即当前行），清到屏底
-		const upRows = this.lastCmdRows + this.lastCursorDisplayRow;
+		const upRows = this.lastCursorDisplayRow;
 		if (upRows > 0) {
 			process.stdout.write(`\x1b[${upRows}A`);
 		}
@@ -1391,13 +1389,14 @@ export class TuiApp {
 		this.input.setWrapWidth(availWidth);
 		hideCursor();
 
-		// 回到底部区域起始行：上移命令结果区行数 + 光标所在输入行偏移（光标在输入区行，非区域外）
-		const upRows = this.lastCmdRows + this.lastCursorDisplayRow;
+		// 回到底部区域起始行（输入区顶部）：上移光标所在输入行偏移。
+		// 命令结果区/建议列表在输入区下方，被 CLEAR_TO_END 从输入区顶部清掉。
+		const upRows = this.lastCursorDisplayRow;
 		if (upRows > 0) {
 			process.stdout.write(`\x1b[${upRows}A`);
 		}
 		process.stdout.write('\r');
-		// 清除旧底部区域（命令结果区 + 输入区 + 建议列表：从区域顶部清到屏底）
+		// 清除旧底部区域（输入区 + 命令结果区/建议列表：从区域顶部清到屏底）
 		process.stdout.write(CLEAR_TO_END);
 
 		this.drawBottomArea(cols, availWidth);
@@ -1418,25 +1417,22 @@ export class TuiApp {
 		this.drawBottomArea(cols, availWidth);
 	}
 
-	/** 绘制底部区域：命令结果区（输入区上方，固定）+ 输入区；结束后更新 lastBottomRows */
+	/**
+	 * 绘制底部区域：输入区 + 命令结果区/建议列表（均固定在输入区下方，类似建议列表），
+	 * 不随对话滚动、不截断；结束后更新 lastBottomRows。
+	 * 命令模式：输入区下方显示建议列表（命令结果区暂隐藏，避免两者抢占空间）；
+	 * 非命令模式：输入区下方显示命令结果区（完整内容）。
+	 */
 	private drawBottomArea(cols: number, availWidth: number): void {
 		const inputLines = this.input.getDisplayLines();
 		const cursorPos = this.input.getCursorDisplayPos();
 		const visibleLines = Math.max(1, Math.min(inputLines.length, MAX_INPUT_ROWS));
 		const linesToDraw = Math.max(visibleLines, this.lastVisibleInputRows);
 
-		// 画命令结果区（输入区上方，固定；新命令替换旧内容）
-		for (const line of this.commandResultLines) {
-			clearLine();
-			process.stdout.write(dim('│ ') + line);
-			process.stdout.write('\r\n');
-		}
-		const cmdRows = this.commandResultLines.length;
-
 		const bgStart = this.shellMode ? PINK_BG_START : GRAY_BG_START;
 		const bgEnd = this.shellMode ? PINK_BG_END : GRAY_BG_END;
 
-		// 绘制每一行
+		// 1. 输入区（区域顶部）
 		for (let r = 0; r < linesToDraw; r++) {
 			clearLine();
 			if (r < inputLines.length && r < MAX_INPUT_ROWS) {
@@ -1449,49 +1445,47 @@ export class TuiApp {
 		}
 		this.lastVisibleInputRows = visibleLines;
 
-		// 绘制建议列表（在输入区域下方）
+		// 2. 输入区下方：命令模式 → 建议列表；否则 → 命令结果区（完整，不截断）
+		let belowRows = 0;
 		if (this.input.isInCommandMode()) {
 			const suggestIdx = this.input.getSuggestionIndex();
 			const suggestions = this.input.getSuggestions();
 			// 旧建议列表已被上移后的 CLEAR_TO_END 清除，无需残留清理（\r\n 在屏底会触发滚动）
 			this.suggestionLinesCount = this.renderSuggestions(suggestions, suggestIdx, availWidth);
-		} else if (this.suggestionLinesCount > 0) {
-			// 非命令模式：旧的建议列表已被 CLEAR_TO_END 清除
+			belowRows = this.suggestionLinesCount;
+		} else {
+			// 命令结果区：从输入区下一行开始画，完整显示（最后一行不换行，供光标定位）
+			for (let i = 0; i < this.commandResultLines.length; i++) {
+				process.stdout.write('\r\n');
+				clearLine();
+				process.stdout.write(dim('│ ') + this.commandResultLines[i]);
+			}
 			this.suggestionLinesCount = 0;
+			belowRows = this.commandResultLines.length;
 		}
 
 		// 定位光标：
-		// for 循环结束后，光标在最后一行行首（每行末 \r\n 回到下行行首）。
-		// 如果有建议列表，光标在建议列表之后，需先上移建议行数回到输入区
-		//   1. \r 归零列
-		//   2. 上移 linesToDraw-1 行回到第一个输入行
-		//   3. 如果绘制了建议，上移建议行数回到输入区域下方
-		//   4. 下移 cursorPos.row，右移 cursorPos.col
+		// 绘制结束后光标在最后一行行首（下方区域最后一行不换行 → 光标在最后一行行尾，
+		// \r 归零列）。上移 (linesToDraw-1) + belowRows 回到输入区第一行，
+		// 再下移 cursorPos.row、右移 cursorPos.col 到输入区光标位置。
 		process.stdout.write('\r');
-		const cursorUp = (linesToDraw - 1) + this.suggestionLinesCount;
+		const cursorUp = (linesToDraw - 1) + belowRows;
 		if (cursorUp > 0) process.stdout.write(`\x1b[${cursorUp}A`);
 		if (cursorPos.row > 0) process.stdout.write(`\x1b[${cursorPos.row}B`);
 		if (cursorPos.col > 0) process.stdout.write(`\x1b[${cursorPos.col}C`);
 
 		this.lastCursorDisplayRow = cursorPos.row;
-		// 记录命令结果区行数（下次上移基准的一部分）
-		this.lastCmdRows = cmdRows;
-		// 记录底部区域总高度（命令结果区 + 输入区 + 建议列表），供区域是否在屏判断
-		this.lastBottomRows = cmdRows + linesToDraw + this.suggestionLinesCount;
+		// 记录底部区域总高度（输入区 + 下方区域），供区域是否在屏判断
+		this.lastBottomRows = linesToDraw + belowRows;
 		showCursor();
 	}
 
 	// ─── 命令结果区（固定底部，替换式刷新）───────────
 
-	/** 命令输出捕获：命令执行期间写入 commandResultLines（限高截断），否则写 scrollback */
+	/** 命令输出捕获：命令执行期间写入 commandResultLines（完整保留，不截断），否则写 scrollback */
 	private cmdOut(line: string): void {
 		if (this.commandResultActive) {
-			if (this.commandResultLines.length < this.MAX_CMD_RESULT_ROWS) {
-				this.commandResultLines.push(line);
-			} else if (this.commandResultLines.length === this.MAX_CMD_RESULT_ROWS) {
-				// 恰好超限一次：追加截断提示（之后不再追加）
-				this.commandResultLines.push(dim('… 输出被截断 (完整内容不再保留)'));
-			}
+			this.commandResultLines.push(line);
 			return;
 		}
 		this.writeOutputLine(line);
@@ -1529,8 +1523,8 @@ export class TuiApp {
 	 * 输出开始前/每条输出行前调用，使输出从原输入区位置开始写。
 	 */
 	private collapseInputArea(): void {
-		// 收起底部区域（命令结果区 + 输入区 + 建议列表）：光标上移到底部区域起点，清到屏底
-		const upRows = this.lastCmdRows + this.lastCursorDisplayRow;
+		// 收起底部区域（输入区 + 命令结果区/建议列表）：光标上移到底部区域起点（输入区顶部），清到屏底
+		const upRows = this.lastCursorDisplayRow;
 		if (upRows > 0) {
 			process.stdout.write(`\x1b[${upRows}A`);
 		}
@@ -1538,7 +1532,6 @@ export class TuiApp {
 		process.stdout.write(CLEAR_TO_END);
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
-		this.lastCmdRows = 0;
 		this.lastBottomRows = 0;
 	}
 
