@@ -66,8 +66,8 @@ export interface ConfigDefaults {
 	auto_compact?: boolean;
 	/** 自动 compact 触发阈值（0~1，占 context_window 比例，默认 0.7） */
 	auto_compact_threshold?: number;
-	/** 上下文窗口大小（tokens，DeepSeek v4 为 1_000_000） */
-	context_window?: number;
+	/** 上下文窗口大小（tokens）：数字或带单位写法（如 "1M"/"256K"，十进制），默认 1M */
+	context_window?: number | string;
 }
 
 /** 主配置（config.toml） */

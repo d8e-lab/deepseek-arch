@@ -11,7 +11,7 @@
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
-import { ConfigManager, DEFAULT_CONFIG_DIR } from '../core/config.js';
+import { ConfigManager, DEFAULT_CONFIG_DIR, parseTokenSize } from '../core/config.js';
 import { ApiClient } from '../core/api.js';
 import { MockProvider } from '../core/mock-provider.js';
 import { SessionManager } from '../core/session.js';
@@ -83,11 +83,11 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	};
 	sessionMgr.setChatDefaults(chatDefaults);
 
-	// 自动 compact 配置（默认开启 70%/1M）
+	// 自动 compact 配置（默认开启 70%/1M；context_window 支持 "1M"/"256K" 等单位写法）
 	sessionMgr.setAutoCompact({
 		enabled: cfg.get<boolean>('defaults.auto_compact') ?? true,
 		threshold: cfg.get<number>('defaults.auto_compact_threshold') ?? 0.7,
-		contextWindow: cfg.get<number>('defaults.context_window') ?? 1_000_000,
+		contextWindow: parseTokenSize(cfg.get<number | string>('defaults.context_window')) ?? 1_000_000,
 	});
 
 	// 注入子代理执行器（懒绑定，解决循环依赖）

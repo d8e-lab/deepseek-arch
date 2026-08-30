@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ConfigManager, DEFAULT_CONFIG_DIR } from '../../src/core/config.js';
+import { ConfigManager, DEFAULT_CONFIG_DIR, parseTokenSize } from '../../src/core/config.js';
 
 describe('ConfigManager', () => {
   let testDir: string;
@@ -75,7 +75,7 @@ describe('ConfigManager', () => {
         async: false,
         auto_compact: true,
         auto_compact_threshold: 0.7,
-        context_window: 1000000,
+        context_window: '1M',
       });
       // temperature/max_tokens 默认不设置（模板中为注释示例，未激活）
       expect(mgr.get('defaults.temperature')).toBeUndefined();
@@ -135,7 +135,7 @@ describe('ConfigManager', () => {
       expect(mgr.get('defaults.async')).toBe(false);
       expect(mgr.get('defaults.auto_compact')).toBe(true);
       expect(mgr.get('defaults.auto_compact_threshold')).toBe(0.7);
-      expect(mgr.get('defaults.context_window')).toBe(1_000_000);
+      expect(mgr.get('defaults.context_window')).toBe('1M');
       // 已有值保留
       expect(mgr.get('defaults.provider')).toBe('deepseek');
       expect(mgr.get('defaults.model')).toBe('deepseek-v4-pro');
@@ -236,6 +236,31 @@ describe('ConfigManager', () => {
       const dir = mgr.getSessionsDir();
       expect(dir).toContain('sessions');
       expect(dir).toContain(testDir);
+    });
+  });
+
+  describe('parseTokenSize()', () => {
+    it('纯数字原样返回', () => {
+      expect(parseTokenSize(5000)).toBe(5000);
+      expect(parseTokenSize(1_000_000)).toBe(1_000_000);
+    });
+
+    it('带单位写法（十进制：K=千 M=百万 G=十亿）', () => {
+      expect(parseTokenSize('1M')).toBe(1_000_000);
+      expect(parseTokenSize('256K')).toBe(256_000);
+      expect(parseTokenSize('1.5M')).toBe(1_500_000);
+      expect(parseTokenSize('2G')).toBe(2_000_000_000);
+    });
+
+    it('大小写与空白容错', () => {
+      expect(parseTokenSize('1m')).toBe(1_000_000);
+      expect(parseTokenSize(' 256k ')).toBe(256_000);
+    });
+
+    it('无法解析返回 undefined', () => {
+      expect(parseTokenSize(undefined)).toBeUndefined();
+      expect(parseTokenSize('abc')).toBeUndefined();
+      expect(parseTokenSize('')).toBeUndefined();
     });
   });
 });

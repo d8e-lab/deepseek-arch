@@ -202,7 +202,7 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 | `async` | `false` | 子代理异步模式（`/async` 写回） |
 | `auto_compact` | `true` | 自动 compact 开关 |
 | `auto_compact_threshold` | `0.7` | 自动 compact 触发阈值（占上下文窗口比例） |
-| `context_window` | `1000000` | 上下文窗口大小（tokens） |
+| `context_window` | `"1M"` | 上下文窗口大小（tokens）：支持数字或单位写法（K=千、M=百万、G=十亿，十进制） |
 
 供应商级配置（providers.toml）：`base_url`、`api_key`、`timeout_ms`（默认 120000）、`max_retries`（默认 2）。
 

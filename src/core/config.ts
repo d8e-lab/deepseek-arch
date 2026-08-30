@@ -34,36 +34,45 @@ export const DEFAULT_CONFIG_DIR = resolve(homedir(), '.deepseek-arch');
 /** 默认配置内容（首次运行自动创建；字符串模板保留注释，完整展示可配置项） */
 const DEFAULT_MAIN_CONFIG: string = `# DeepSeek Arch 主配置
 # 路径均为相对本文件目录（~/.deepseek-arch/）的相对路径
+# 修改后重启生效；运行中可用 /model /provider /system 等命令写回 defaults 段。
 
 [paths]
-providers = "./providers.toml"
-pricing = "./pricing.toml"
-system_prompt = "./system-prompt.toml"
-sessions = "./sessions"
+# 各配置文件/目录的位置（相对本文件目录；支持绝对路径）
+providers = "./providers.toml"      # API 供应商配置（base_url/api_key/超时/重试）
+pricing = "./pricing.toml"          # 模型价格表（同时作为 /model 候选列表数据源）
+system_prompt = "./system-prompt.toml"  # System Prompt 模板（启动缺失时从项目根生成快照）
+sessions = "./sessions"             # 会话数据目录
 
 # ── 默认参数 ──────────────────────────────────────────
 [defaults]
+# 默认供应商（providers.toml 中定义的键名；/provider 切换写回）
 provider = "deepseek"
+# 默认模型（pricing.toml 中定义的模型名；/model 切换写回）
 model = "deepseek-v4-pro"
+# system prompt 模板名（system-prompt.toml 中的模板键；/system 切换写回）
 system_prompt = "default"
+# YOLO 审查模型（/review_model 切换写回；--yolo 下审查输出用）
 review_model = "deepseek-v4-flash"
 
 # 生成参数：默认不设置（= 交由 API 侧默认值）。
 # 注意：deepseek-v4 思考模式下 temperature 不生效。
 # 取消注释即可自定义：
-# temperature = 0.7
-# max_tokens = 8192
-reasoning_effort = "high"   # 推理强度：low / high / max
-thinking = "enabled"        # 思考模式：enabled / disabled
+# temperature = 0.7     # 采样温度（0~2，值越大越随机）
+# max_tokens = 8192     # 单次回复最大输出 tokens
+# 推理强度：low / high / max（影响思考深度与耗时）
+reasoning_effort = "high"
+# 思考模式：enabled / disabled（disabled 关闭思考，直接输出）
+thinking = "enabled"
 
 # 运行时状态（/yolo /async 命令写回）
-yolo = false
-async = false
+yolo = false            # YOLO 模式：自动批准工具执行（跳过确认）
+async = false           # 子代理异步模式：spawn 立即返回，配合 wait/list_subagents
 
-# 自动 compact（上下文超阈值时压缩）
-auto_compact = true
-auto_compact_threshold = 0.7
-context_window = 1000000
+# 自动 compact（上下文超阈值时压缩历史，保留摘要）
+auto_compact = true     # 是否启用自动压缩
+auto_compact_threshold = 0.7  # 触发阈值（0~1，占 context_window 比例）
+# 上下文窗口大小（tokens）：支持数字或带单位写法（K=千、M=百万、G=十亿，十进制）
+context_window = "1M"
 `;
 
 const DEFAULT_PROVIDERS: ProvidersConfig = {
@@ -102,8 +111,24 @@ const DEFAULT_DEFAULTS: Partial<ConfigDefaults> = {
 	async: false,
 	auto_compact: true,
 	auto_compact_threshold: 0.7,
-	context_window: 1_000_000,
+	context_window: '1M',
 };
+
+/**
+ * 解析 token 数量：支持纯数字或带单位写法（K=千、M=百万、G=十亿，十进制）。
+ * 例：parseTokenSize("1M") → 1000000；parseTokenSize("256K") → 256000；parseTokenSize(5000) → 5000。
+ * 无法解析时返回 undefined。
+ */
+export function parseTokenSize(value: number | string | undefined): number | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value === 'number') return value;
+	const m = value.trim().match(/^(\d+(?:\.\d+)?)\s*([KMG]?)$/i);
+	if (!m) return undefined;
+	const n = parseFloat(m[1]);
+	const unit = m[2].toUpperCase();
+	const mult = unit === 'K' ? 1_000 : unit === 'M' ? 1_000_000 : unit === 'G' ? 1_000_000_000 : 1;
+	return Math.round(n * mult);
+}
 
 /**
  * 从项目根 `skill/` 目录复制全部 skill 文件到配置目录。
