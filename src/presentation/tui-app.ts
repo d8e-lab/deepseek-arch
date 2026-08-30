@@ -45,6 +45,8 @@ import { AppState } from '../render/types.js';
 import type { ScreenCapture, TurnCaptureInfo, ToolCallCaptureInfo, InputAreaCapture } from '../render/types.js';
 import type { TuiConfig } from './types.js';
 import { BottomArea } from './bottom-area.js';
+import { OverlayPane } from './overlay-pane.js';
+import type { OverlayReplayInfo } from './overlay-pane.js';
 import { Selector } from '../render/selector.js';
 import type { SelectOption } from '../render/selector.js';
 import { MarkdownTableRenderer } from '../render/markdown.js';
@@ -102,10 +104,8 @@ export class TuiApp {
 	private thinkAnimStep = 0;
 	/** think 最多实时显示行数（超出折叠） */
 	private readonly MAX_VISIBLE_THINK = 5;
-	/** 全屏浏览视图是否激活（Ctrl+O） */
-	private viewerActive = false;
-	/** 视图模式：conversation（Ctrl+O 对话浏览）| subagents（Ctrl+T 子代理总览） */
-	private viewerMode: 'conversation' | 'subagents' = 'conversation';
+	/** 全屏覆盖层（Ctrl+O 对话浏览 / Ctrl+T Subagents 总览）——公共生命周期收敛至 OverlayPane */
+	private overlay: OverlayPane;
 	/** subagents 视图：当前选中 subagent 索引 */
 	private viewerSubagentIndex = 0;
 	/** subagents 视图：底部输入缓冲（发送给选中 subagent） */
@@ -134,23 +134,6 @@ export class TuiApp {
 	private viewerSearchActive = false;
 	/** 搜索输入缓冲 */
 	private viewerSearchInput = '';
-	/** 打开视图前的 stdinHandler（退出时恢复） */
-	private viewerPrevHandler: ((data: string) => void) | null = null;
-	/** 当前视图 handler 引用（退出时判断主循环是否已接管输入） */
-	private viewerHandler: ((data: string) => void) | null = null;
-	/** 视图关闭等待（inputCycle 在视图打开时等待，避免接管输入） */
-	private viewerClosedPromise: Promise<void> | null = null;
-	private viewerClosedResolve: (() => void) | null = null;
-	/** 打开视图时的 turns.length（退出时据此补渲染） */
-	private viewerOpenTurnCount = 0;
-	/** 打开视图时是否处于流式输出中 */
-	private viewerOpenedDuringStream = false;
-	/** 打开时的进行中轮是否已完成（done） */
-	private viewerOpenedTurnDone = false;
-	/** 打开时的进行中轮在视图期间的输出行（done 时归档） */
-	private viewerOpenedTurnLines: string[] = [];
-	/** 视图期间当前轮的输出行缓冲（流式静默用） */
-	private streamLines: string[] = [];
 
 	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean, mock?: boolean) {
 		this.out = new ScreenBuffer();
@@ -168,6 +151,35 @@ export class TuiApp {
 			out: this.out,
 			input: this.input,
 			getCols: () => getTermSize().cols,
+		});
+		this.overlay = new OverlayPane(this.out, {
+			getHandler: () => this.stdinHandler,
+			setHandler: (h) => { this.stdinHandler = h; },
+			isStreamActive: () => this.abortController !== null,
+			pauseThink: () => {
+				// 暂停 think 折叠动画（其直接写 stdout，会污染主 buffer）
+				if (this.thinkAnimTimer) {
+					clearInterval(this.thinkAnimTimer);
+					this.thinkAnimTimer = null;
+				}
+			},
+			render: () => this.renderActiveOverlay(),
+			cleanup: () => this.cleanupActiveOverlay(),
+			replay: (info) => this.replayOverlayOutput(info),
+			rebuildBottom: () => {
+				// 重建输入区
+				this.printSeparator();
+				this.bottom.resetPosition();
+				this.bottom.drawBase();
+				this.out.write('\r');
+				this.bottom.renderIdle();
+			},
+			setIdleIfStreamEnded: () => {
+				// 输出已结束：恢复 IDLE 状态（nextMessage 保留，交给主循环 inputCycle 统一发送，避免双流并发）
+				if (!this.abortController) {
+					this.setState(AppState.IDLE);
+				}
+			},
 		});
 
 		// 模型候选列表：从配置 pricing.<provider> 键动态生成（含当前模型兜底）
@@ -412,8 +424,8 @@ export class TuiApp {
 
 	private async inputCycle(): Promise<void> {
 		// 视图打开中：等待视图关闭（不接管输入，避免覆盖 viewer handler）
-		if (this.viewerActive) {
-			await this.waitForViewerClose();
+		if (this.overlay.active) {
+			await this.overlay.waitForClose();
 			return;
 		}
 		// 视图关闭后残留的排队消息（视图期间/前排队的普通文本）：
@@ -426,7 +438,7 @@ export class TuiApp {
 			this.out.write(green('[You] ') + next + '\r\n\r\n');
 			await this.sendMessageStream(next);
 			// 视图可能在发送期间打开：跳过 UI 收尾（主循环等待视图关闭后重新进入）
-			if (this.viewerActive) return;
+			if (this.overlay.active) return;
 			this.printSeparator();
 			return;
 		}
@@ -463,7 +475,7 @@ export class TuiApp {
 				await this.sendMessageStream(sendContent);
 			}
 			// 视图可能在命令处理/输出期间打开：跳过 UI 收尾（视图接管）
-			if (this.viewerActive) return;
+			if (this.overlay.active) return;
 			// 命令执行完毕：清空输入区（命令文本已在 dispatchCommand 提交，避免残留显示/误操作）
 			this.input.clear();
 			// 命令结果区已渲染在底部：收起 → 写分隔线 → 重画底部（避免覆盖）
@@ -485,7 +497,7 @@ export class TuiApp {
 		await this.sendMessageStream(content);
 
 		// 视图可能在输出期间打开：跳过 UI 收尾（主循环等待视图关闭后重新进入）
-		if (this.viewerActive) return;
+		if (this.overlay.active) return;
 		this.printSeparator();
 	}
 
@@ -1374,9 +1386,9 @@ export class TuiApp {
 
 	/** 输出一行到 scrollback，并在底部重绘输入区（Bug 1）；视图打开时缓冲（流式静默） */
 	private writeOutputLine(line: string): void {
-		if (this.viewerActive) {
+		if (this.overlay.active) {
 			// 全屏视图打开：输出静默缓冲（退出视图后补渲染）
-			this.streamLines.push(line);
+			this.overlay.bufferOutput(line);
 			return;
 		}
 		this.bottom.collapse();
@@ -1387,8 +1399,8 @@ export class TuiApp {
 	/** 批量输出多行（减少逐行重绘闪烁）；视图打开时缓冲 */
 	private writeOutputLines(lines: string[]): void {
 		if (lines.length === 0) return;
-		if (this.viewerActive) {
-			this.streamLines.push(...lines);
+		if (this.overlay.active) {
+			this.overlay.bufferOutputs(lines);
 			return;
 		}
 		this.bottom.collapse();
@@ -1449,95 +1461,32 @@ export class TuiApp {
 
 	/** 打开全屏浏览视图（alternate screen；流式期间打开则后台静默输出） */
 	private openViewer(): void {
-		if (this.viewerActive) return;
-		this.viewerActive = true;
-		this.viewerMode = 'conversation';
-		// 记录打开时状态（退出时据此补渲染）
+		if (this.overlay.active) return;
 		const session = this.sessionMgr.getSession();
-		this.viewerOpenTurnCount = session?.turns.length ?? 0;
-		this.viewerOpenedDuringStream = this.state !== AppState.IDLE;
-		this.viewerOpenedTurnDone = false;
-		this.viewerOpenedTurnLines = [];
-		this.streamLines = [];
-		// 暂停 think 折叠动画（其直接写 stdout，会污染主 buffer）
-		if (this.thinkAnimTimer) {
-			clearInterval(this.thinkAnimTimer);
-			this.thinkAnimTimer = null;
-		}
-		// 保存当前 stdinHandler，切换为视图 handler
-		this.viewerPrevHandler = this.stdinHandler;
-		this.viewerHandler = (data: string) => this.handleViewerInput(data);
-		this.stdinHandler = this.viewerHandler;
-		// 建立视图关闭等待（inputCycle 在视图打开时等待）
-		this.viewerClosedPromise = new Promise<void>((r) => { this.viewerClosedResolve = r; });
-		// 切换 alternate screen 并渲染
-		this.out.write('\x1b[?1049h');
-		this.buildViewerLines();
-		this.viewerScrollOffset = 0;
-		this.renderViewer();
+		this.overlay.setOpenTurnCount(session?.turns.length ?? 0);
+		this.overlay.open('conversation', (data: string) => this.handleViewerInput(data), this.state !== AppState.IDLE);
+		// 渲染由 OverlayPane.render 钩子（renderActiveOverlay）完成
 	}
 
-	/** 退出全屏浏览视图：恢复主 buffer + 补渲染静默期输出 + 恢复输入 */
+	/** 退出全屏浏览视图：公共生命周期由 OverlayPane 统一处理 */
 	private closeViewer(): void {
-		if (!this.viewerActive) return;
-		this.viewerActive = false;
-		// 恢复 stdinHandler：
-		// - 若主循环已接管（readUserInput 设置了新 handler），保持不变
-		// - 若仍持有视图 handler，按打开场景区分：
-		//   * IDLE 打开（无流式）：恢复 readUserInput 的 handler（inputCycle 仍在 await 它）
-		//   * 流式打开：输出还在跑 → 恢复双工 handler（流式继续）；
-		//               已结束 → 置空让主循环 inputCycle 接管
-		if (this.stdinHandler === this.viewerHandler) {
-			if (!this.viewerOpenedDuringStream) {
-				this.stdinHandler = this.viewerPrevHandler;
-			} else if (this.abortController) {
-				this.stdinHandler = this.viewerPrevHandler;
-			} else {
-				this.stdinHandler = null;
-			}
-		}
-		this.viewerHandler = null;
-		this.viewerPrevHandler = null;
-		// 恢复主 buffer（alternate screen 保存的主 TUI 内容还原）
-		this.out.write('\x1b[?1049l');
-		// 补渲染视图期间的静默输出
-		this.replayViewerOutput();
-		// 重建输入区
-		this.printSeparator();
-		this.bottom.resetPosition();
-		this.bottom.drawBase();
-		this.out.write('\r');
-		this.bottom.renderIdle();
-		// 输出已结束：恢复 IDLE 状态（nextMessage 保留，交给主循环 inputCycle 统一发送，避免双流并发）
-		if (!this.abortController) {
-			this.setState(AppState.IDLE);
-		}
-		// 通知等待中的 inputCycle：视图已关闭
-		this.viewerClosedResolve?.();
-		this.viewerClosedResolve = null;
-		this.viewerClosedPromise = null;
-	}
-
-	/** 等待视图关闭（inputCycle 在视图打开时调用，避免接管输入） */
-	private async waitForViewerClose(): Promise<void> {
-		if (this.viewerClosedPromise) {
-			await this.viewerClosedPromise;
-		}
+		if (this.overlay.currentMode !== 'conversation') return;
+		this.overlay.close();
 	}
 
 	/**
-	 * 补渲染视图期间的静默输出：
+	 * 补渲染视图期间的静默输出（OverlayPane.replay 钩子）：
 	 *  - 完整轮次从 turns 补（resume 式）
-	 *  - 打开时进行中的轮补 viewerOpenedTurnLines + streamLines（视图期间增量）
+	 *  - 打开时进行中的轮补 openedTurnLines + streamLines（视图期间增量）
 	 */
-	private replayViewerOutput(): void {
+	private replayOverlayOutput(info: OverlayReplayInfo): void {
 		const session = this.sessionMgr.getSession();
 		const turns = session?.turns ?? [];
-		let from = this.viewerOpenTurnCount;
-		if (this.viewerOpenedDuringStream) {
-			if (this.viewerOpenedTurnDone) {
+		let from = info.openTurnCount;
+		if (info.openedDuringStream) {
+			if (info.openedTurnDone) {
 				// 打开时的轮已完成：跳过它（前半已在主 buffer），渲染它之后完成的新轮
-				from = this.viewerOpenTurnCount + 1;
+				from = info.openTurnCount + 1;
 			} else {
 				// 打开时的轮未完成：无新完成轮（turns 不含它），仅补增量
 				from = turns.length;
@@ -1549,14 +1498,31 @@ export class TuiApp {
 			this.writeOutputLines(lines);
 		}
 		// 打开时进行中轮的视图期间增量
-		if (this.viewerOpenedTurnLines.length > 0) {
-			this.writeOutputLines(this.viewerOpenedTurnLines);
-			this.viewerOpenedTurnLines = [];
+		if (info.openedTurnLines.length > 0) {
+			this.writeOutputLines(info.openedTurnLines);
 		}
 		// 最新进行中轮的增量
-		if (this.streamLines.length > 0) {
-			this.writeOutputLines(this.streamLines);
-			this.streamLines = [];
+		if (info.streamLines.length > 0) {
+			this.writeOutputLines(info.streamLines);
+		}
+	}
+
+	/** 渲染当前激活的覆盖层（OverlayPane.render 钩子） */
+	private renderActiveOverlay(): void {
+		if (this.overlay.currentMode === 'subagents') {
+			this.renderSubagentsView();
+		} else {
+			this.buildViewerLines();
+			this.viewerScrollOffset = 0;
+			this.renderViewer();
+		}
+	}
+
+	/** 覆盖层关闭清理（OverlayPane.cleanup 钩子）：子视图刷新定时器等 */
+	private cleanupActiveOverlay(): void {
+		if (this.subagentViewTimer) {
+			clearInterval(this.subagentViewTimer);
+			this.subagentViewTimer = null;
 		}
 	}
 
@@ -1673,9 +1639,7 @@ export class TuiApp {
 
 	/** 打开 Subagents 总览视图（任意状态可用；流式期间 master 后台静默缓冲） */
 	private openSubagentsView(): void {
-		if (this.viewerActive) return;
-		this.viewerActive = true;
-		this.viewerMode = 'subagents';
+		if (this.overlay.active) return;
 		this.viewerSubagentIndex = 0;
 		this.subagentViewInput = '';
 		this.subagentViewBusy = false;
@@ -1683,72 +1647,20 @@ export class TuiApp {
 		this.subagentViewInsertMode = false;
 		// 记录打开时状态（退出时据此补渲染 master 输出）
 		const session = this.sessionMgr.getSession();
-		this.viewerOpenTurnCount = session?.turns.length ?? 0;
-		this.viewerOpenedDuringStream = this.state !== AppState.IDLE;
-		this.viewerOpenedTurnDone = false;
-		this.viewerOpenedTurnLines = [];
-		this.streamLines = [];
-		// 暂停 think 折叠动画（其直接写 stdout，会污染主 buffer）
-		if (this.thinkAnimTimer) {
-			clearInterval(this.thinkAnimTimer);
-			this.thinkAnimTimer = null;
-		}
-		// 保存当前 stdinHandler，切换为视图 handler
-		this.viewerPrevHandler = this.stdinHandler;
-		this.viewerHandler = (data: string) => this.handleSubagentsViewInput(data);
-		this.stdinHandler = this.viewerHandler;
-		// 建立视图关闭等待（inputCycle 在视图打开时等待）
-		this.viewerClosedPromise = new Promise<void>((r) => { this.viewerClosedResolve = r; });
-		// 切换 alternate screen 并渲染
-		this.out.write('\x1b[?1049h');
-		this.renderSubagentsView();
-		// 实时刷新：500ms 重渲染（状态条 + 选中 subagent 输出）
+		this.overlay.setOpenTurnCount(session?.turns.length ?? 0);
+		this.overlay.open('subagents', (data: string) => this.handleSubagentsViewInput(data), this.state !== AppState.IDLE);
+		// 渲染由 OverlayPane.render 钩子（renderActiveOverlay）完成；此处启动实时刷新
 		this.subagentViewTimer = setInterval(() => {
-			if (this.viewerActive && this.viewerMode === 'subagents') {
+			if (this.overlay.active && this.overlay.currentMode === 'subagents') {
 				this.renderSubagentsView();
 			}
 		}, 500);
 	}
 
-	/** 退出 Subagents 视图：恢复主 buffer + 补渲染 master 后台输出 + 恢复输入 */
+	/** 退出 Subagents 视图：公共生命周期由 OverlayPane 统一处理（timer 清理在 cleanup 钩子） */
 	private closeSubagentsView(): void {
-		if (!this.viewerActive || this.viewerMode !== 'subagents') return;
-		if (this.subagentViewTimer) {
-			clearInterval(this.subagentViewTimer);
-			this.subagentViewTimer = null;
-		}
-		this.viewerActive = false;
-		this.viewerMode = 'conversation';
-		// 恢复 stdinHandler（同 closeViewer 逻辑）
-		if (this.stdinHandler === this.viewerHandler) {
-			if (!this.viewerOpenedDuringStream) {
-				this.stdinHandler = this.viewerPrevHandler;
-			} else if (this.abortController) {
-				this.stdinHandler = this.viewerPrevHandler;
-			} else {
-				this.stdinHandler = null;
-			}
-		}
-		this.viewerHandler = null;
-		this.viewerPrevHandler = null;
-		// 恢复主 buffer（alternate screen 保存的主 TUI 内容还原）
-		this.out.write('\x1b[?1049l');
-		// 补渲染视图期间的静默输出（master 后台输出）
-		this.replayViewerOutput();
-		// 重建输入区
-		this.printSeparator();
-		this.bottom.resetPosition();
-		this.bottom.drawBase();
-		this.out.write('\r');
-		this.bottom.renderIdle();
-		// 输出已结束：恢复 IDLE 状态（nextMessage 保留，交给主循环 inputCycle 统一发送，避免双流并发）
-		if (!this.abortController) {
-			this.setState(AppState.IDLE);
-		}
-		// 通知等待中的 inputCycle：视图已关闭
-		this.viewerClosedResolve?.();
-		this.viewerClosedResolve = null;
-		this.viewerClosedPromise = null;
+		if (this.overlay.currentMode !== 'subagents') return;
+		this.overlay.close();
 	}
 
 	/** 渲染 Subagents 总览视图（顶部状态条 + 选中 subagent 输出 + 底部输入） */
@@ -2336,11 +2248,7 @@ export class TuiApp {
 							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							// 视图打开时的轮已完成：归档该轮视图期间增量（退出时补渲染），
 							// 之后完成的新轮增量清空（退出时从 turns 补渲染完整轮）
-							if (this.viewerActive && this.viewerOpenedDuringStream && !this.viewerOpenedTurnDone) {
-								this.viewerOpenedTurnDone = true;
-								this.viewerOpenedTurnLines = this.streamLines;
-							}
-							this.streamLines = [];
+							this.overlay.onTurnDone();
 							// 刷出表格渲染器中暂存的剩余内容（Bug 1：走统一输出收口）
 							this.writeOutputLines(mdRenderer.flush());
 							this.printUsage(event);
@@ -2369,7 +2277,7 @@ export class TuiApp {
 			}
 		} finally {
 			this.abortController = null;
-			if (!this.viewerActive) {
+			if (!this.overlay.active) {
 				// 正常路径（无视图打开）：恢复输入、UI 状态、nextMessage 链
 				this.stdinHandler = prevHandler;
 				// Bug 1：收起输出期间绘制的输入区，使后续 printSeparator/drawBase 从输出末尾正常开始
@@ -2386,8 +2294,8 @@ export class TuiApp {
 					await this.sendMessageStream(next);
 				}
 			}
-			// viewerActive：跳过 UI/输入恢复（避免覆盖视图 handler、污染 alternate screen），
-			// 状态与 nextMessage 由 closeViewer 统一处理
+			// overlay.active：跳过 UI/输入恢复（避免覆盖视图 handler、污染 alternate screen），
+			// 状态与 nextMessage 由 OverlayPane.close 统一处理
 		}
 	}
 

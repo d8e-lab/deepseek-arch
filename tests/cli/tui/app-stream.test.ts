@@ -223,7 +223,7 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 			sendMessageStream: (c: string) => Promise<void>;
 			openViewer: () => void;
 			viewerLines: string[];
-			viewerActive: boolean;
+			overlay: { active: boolean };
 			closeViewer: () => void;
 		};
 		await anyApp.sendMessageStream('test');
@@ -240,13 +240,13 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 
 		// Ctrl+O 全屏视图：viewerLines 含完整 think（第 6/7 行可见）
 		anyApp.openViewer();
-		expect(anyApp.viewerActive).toBe(true);
+		expect(anyApp.overlay.active).toBe(true);
 		const viewerText = stripAnsi(anyApp.viewerLines.join('\n'));
 		expect(viewerText).toContain('思考第6行');
 		expect(viewerText).toContain('思考第7行');
 		// 退出视图
 		anyApp.closeViewer();
-		expect(anyApp.viewerActive).toBe(false);
+		expect(anyApp.overlay.active).toBe(false);
 	});
 
 	it('agent loop：assistant 无换行 content + tool_calls 时，content 在 ● run 之前输出（不堆积到 loop 结束）', async () => {
