@@ -130,6 +130,8 @@ export class TuiApp {
 	private subagentViewBusy = false;
 	/** subagents 视图：最近一次发送错误（显示在底部） */
 	private subagentViewError: string | null = null;
+	/** subagents 视图：vim 式输入模式（false=命令模式：n/p/数字导航；true=insert：字符进输入缓冲） */
+	private subagentViewInsertMode = false;
 	/** 视图滚动偏移（行） */
 	private viewerScrollOffset = 0;
 	/** 视图预渲染行 */
@@ -1852,6 +1854,7 @@ export class TuiApp {
 		this.subagentViewInput = '';
 		this.subagentViewBusy = false;
 		this.subagentViewError = null;
+		this.subagentViewInsertMode = false;
 		// 记录打开时状态（退出时据此补渲染 master 输出）
 		const session = this.sessionMgr.getSession();
 		this.viewerOpenTurnCount = session?.turns.length ?? 0;
@@ -1976,29 +1979,52 @@ export class TuiApp {
 
 		// ── 底部：快捷键提示 + 输入区 ──
 		process.stdout.write('\r\n\x1b[2K');
-		process.stdout.write(dim(`  [n] next  [p] previous  [1-${Math.min(subs.length, 9)}] 跳转  [q] 返回 master`) + '\r\n');
+		if (this.subagentViewInsertMode) {
+			process.stdout.write(dim(`  [Enter] 发送  [ESC] 退出输入`) + '\r\n');
+		} else {
+			process.stdout.write(dim(`  [n] next  [p] previous  [1-${Math.min(subs.length, 9)}] 跳转  [i] 输入  [q] 返回 master`) + '\r\n');
+		}
 		process.stdout.write('\x1b[2K');
 		if (this.subagentViewBusy) {
 			process.stdout.write(dim(`  ⏳ 正在发送给 ${current.name}... (ESC 中断)`));
+		} else if (this.subagentViewInsertMode) {
+			const prefix = `  > ${this.subagentViewInput}`;
+			process.stdout.write(green(prefix) + dim('  [Enter] 发送  [ESC] 退出'));
+			if (this.subagentViewError) {
+				process.stdout.write(red(`  ⚠ ${this.subagentViewError}`));
+			}
 		} else {
 			const prefix = `  > ${this.subagentViewInput}`;
-			process.stdout.write(green(prefix) + dim('  [Enter] 发送'));
+			process.stdout.write(dim(prefix) + dim('  按 [i] 进入输入模式'));
 			if (this.subagentViewError) {
 				process.stdout.write(red(`  ⚠ ${this.subagentViewError}`));
 			}
 		}
 	}
 
-	/** Subagents 视图输入处理：n/p/数字切换、Enter 发送、q/ESC 返回 */
+	/** Subagents 视图输入处理：vim 式双模式
+	 *  - 命令模式（默认）：n/p/数字 切换、i 进入 insert、q/ESC 返回 master
+	 *  - insert 模式（按 i 进入）：字符进输入缓冲（n/p 等不再被捕捉），
+	 *    Enter 发送、ESC 退出到命令模式 */
 	private handleSubagentsViewInput(data: string): void {
 		const subs = this.sessionMgr.listSubagents();
 		for (let i = 0; i < data.length; i++) {
 			const ch = data[i];
 
-			// ESC 单独键 → 关闭视图
+			// ESC 序列（方向键等暂不支持）——两种模式都跳过
 			if (ch === '\x1b') {
-				if (data[i + 1] !== '[') { this.closeSubagentsView(); return; }
-				// 跳过 ESC 序列（方向键等暂不支持）
+				if (data[i + 1] !== '[') {
+					// 单独 ESC：insert → 退出到命令模式；命令模式 → 关闭视图
+					if (this.subagentViewBusy) {
+						this.closeSubagentsView();
+					} else if (this.subagentViewInsertMode) {
+						this.subagentViewInsertMode = false;
+						this.renderSubagentsView();
+					} else {
+						this.closeSubagentsView();
+					}
+					return;
+				}
 				i++;
 				while (i < data.length) {
 					const sc = data.charCodeAt(i);
@@ -2008,25 +2034,44 @@ export class TuiApp {
 				i--;
 				continue;
 			}
-			if (ch === 'q' || ch === 'Q') { this.closeSubagentsView(); return; }
 
 			// 发送中：忽略其他输入（ESC 已处理）
 			if (this.subagentViewBusy) continue;
 
-			if (ch === '\x0d' || ch === '\x0a') {
-				// Enter 发送给当前选中 subagent
-				const text = this.subagentViewInput.trim();
-				this.subagentViewInput = '';
-				if (text) {
-					void this.sendToSubagentFromView(text);
-				} else {
+			if (this.subagentViewInsertMode) {
+				// ── insert 模式：所有字符进输入缓冲，n/p 等不解释为命令 ──
+				if (ch === '\x0d' || ch === '\x0a') {
+					// Enter 发送给当前选中 subagent（发送后回命令模式，vim 式）
+					const text = this.subagentViewInput.trim();
+					this.subagentViewInput = '';
+					this.subagentViewInsertMode = false;
+					if (text) {
+						void this.sendToSubagentFromView(text);
+					} else {
+						this.renderSubagentsView();
+					}
+					continue;
+				}
+				if (ch === '\x7f' || ch === '\x08') {
+					// Backspace
+					this.subagentViewInput = this.subagentViewInput.slice(0, -1);
 					this.renderSubagentsView();
+					continue;
+				}
+				// 可打印字符（含中文等单码元字符）追加到输入缓冲
+				if (ch >= ' ') {
+					this.subagentViewInput += ch;
+					this.renderSubagentsView();
+					continue;
 				}
 				continue;
 			}
-			if (ch === '\x7f' || ch === '\x08') {
-				// Backspace
-				this.subagentViewInput = this.subagentViewInput.slice(0, -1);
+
+			// ── 命令模式：导航键 + i 进入 insert ──
+			if (ch === 'q' || ch === 'Q') { this.closeSubagentsView(); return; }
+			if (ch === 'i' || ch === 'I') {
+				this.subagentViewInsertMode = true;
+				this.subagentViewError = null;
 				this.renderSubagentsView();
 				continue;
 			}
@@ -2055,12 +2100,7 @@ export class TuiApp {
 				}
 				continue;
 			}
-			// 可打印字符（含中文等单码元字符）追加到输入缓冲
-			if (ch >= ' ') {
-				this.subagentViewInput += ch;
-				this.renderSubagentsView();
-				continue;
-			}
+			// 命令模式：其他字符忽略（不进入输入缓冲）
 		}
 	}
 

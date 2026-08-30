@@ -33,7 +33,8 @@ import termios
 FRAMES_DIR = os.path.join(os.path.dirname(__file__), 'frames-subagents')
 CMD = ['node', 'dist/cli/index.js', 'chat', '--mock', '--yolo']
 SPAWN_MSG = '调研 #spawn:research #task:调研架构'
-VIEW_MSG = '补充分析'
+# 含 'n' 的英文消息：验证 insert 模式下 n 不被当作导航键捕捉（旧逻辑会输入 'thak you'）
+VIEW_MSG = 'thank you'
 
 ANSI_PATTERN = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
 CR_PATTERN = re.compile(r'\r\n?')
@@ -127,10 +128,17 @@ def main():
             'subagent_listed': 'research' in clean,
             'status_icon': '●' in clean or '✓' in clean,
             'nav_hint': '[n] next' in clean,
-            'input_prompt': '[Enter] 发送' in clean,
+            'insert_hint': '按 [i] 进入输入模式' in clean,  # vim 式：命令模式提示按 i
         }
 
-        # ═══ 阶段 2: 视图内输入消息并发送给 subagent ═══
+        # ═══ 阶段 2: vim 式——按 i 进入 insert，输入消息并发送 ═══
+        os.write(master_fd, b'i')   # i → insert 模式（否则 n/p 被当作导航键）
+        time.sleep(0.5)
+        buf = read_all(master_fd, timeout=0.4)
+        clean = save_frame(buf, 'frame-01b-insert')
+        results['frame-01b-insert'] = {
+            'insert_mode_prompt': '[Enter] 发送  [ESC] 退出' in clean,
+        }
         for ch in VIEW_MSG:
             os.write(master_fd, ch.encode())
             time.sleep(0.02)
