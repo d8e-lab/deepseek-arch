@@ -1453,14 +1453,20 @@ export class TuiApp {
 			this.suggestionLinesCount = this.renderSuggestions(suggestions, suggestIdx, availWidth);
 			belowRows = this.suggestionLinesCount;
 		} else {
-			// 命令结果区：从输入区下一行开始画，完整显示（最后一行不换行，供光标定位）
-			for (let i = 0; i < this.commandResultLines.length; i++) {
-				process.stdout.write('\r\n');
-				clearLine();
-				process.stdout.write(dim('│ ') + this.commandResultLines[i]);
+			// 命令结果区：从输入区下一行开始画。每行按可用宽度折行（ANSI-aware），
+			// 避免超宽行触发终端自动 wrap 破坏物理行数/光标定位；完整显示不截断。
+			let physicalRows = 0;
+			for (const line of this.commandResultLines) {
+				const wrapped = wrapText(line, Math.max(1, availWidth - 2)); // '│ ' 前缀占 2 列
+				for (const wl of wrapped) {
+					process.stdout.write('\r\n');
+					clearLine();
+					process.stdout.write(dim('│ ') + wl);
+					physicalRows++;
+				}
 			}
 			this.suggestionLinesCount = 0;
-			belowRows = this.commandResultLines.length;
+			belowRows = physicalRows;
 		}
 
 		// 定位光标：
