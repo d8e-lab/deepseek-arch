@@ -13,7 +13,7 @@
  *   const apiKey = cfg.get("providers.deepseek.api_key");
  */
 
-import { readFile, writeFile, mkdir, access, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, access, readdir, copyFile, rm } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -88,6 +88,21 @@ const DEFAULT_PRICING: PricingConfig = {
 			currency: 'CNY',
 		},
 	},
+};
+
+/**
+ * defaults 段中有明确默认值的键（与模板/README 一致）。
+ * temperature/max_tokens 保持"未设置"（默认不传，交 API 侧默认；模板中为注释示例）。
+ */
+const DEFAULT_DEFAULTS: Partial<ConfigDefaults> = {
+	review_model: 'deepseek-v4-flash',
+	reasoning_effort: 'high',
+	thinking: 'enabled',
+	yolo: false,
+	async: false,
+	auto_compact: true,
+	auto_compact_threshold: 0.7,
+	context_window: 1_000_000,
 };
 
 /**
@@ -170,6 +185,8 @@ export class ConfigManager {
 	private configDir: string;
 	private loaded = false;
 	private resolved: ResolvedConfig | null = null;
+	/** 最近一次 load() 自动补全的 defaults 键（init 报告用） */
+	private lastAddedDefaultsKeys: string[] = [];
 
 	private constructor(configDir?: string) {
 		this.configDir = configDir ?? DEFAULT_CONFIG_DIR;
@@ -273,26 +290,9 @@ export class ConfigManager {
 		// 2. 兼容旧配置：自动补全 defaults 缺失键（有明确默认值的键，与模板/README 一致）。
 		//    temperature/max_tokens 保持"未设置"（默认不传，交 API 侧默认；模板中为注释示例）。
 		//    已设置的值保留；写回会规范化文件（旧配置无注释可丢，新模板键齐不触发）。
-		const DEFAULT_DEFAULTS: Partial<ConfigDefaults> = {
-			review_model: 'deepseek-v4-flash',
-			reasoning_effort: 'high',
-			thinking: 'enabled',
-			yolo: false,
-			async: false,
-			auto_compact: true,
-			auto_compact_threshold: 0.7,
-			context_window: 1_000_000,
-		};
-		const defaults = appConfig.defaults ?? {};
-		const defaultsRecord = defaults as unknown as Record<string, unknown>;
-		const missing = Object.entries(DEFAULT_DEFAULTS).filter(
-			([k]) => defaultsRecord[k] === undefined,
-		);
-		if (missing.length > 0) {
-			for (const [k, v] of missing) {
-				defaultsRecord[k] = v;
-			}
-			appConfig.defaults = defaults;
+		const added = this.applyMissingDefaults(appConfig);
+		this.lastAddedDefaultsKeys = added;
+		if (added.length > 0) {
 			await this.writeTomlFile(mainConfigPath, appConfig as unknown as Record<string, unknown>);
 		}
 
@@ -329,6 +329,81 @@ export class ConfigManager {
 		this.loaded = false;
 		this.resolved = null;
 		return this.load();
+	}
+
+	/**
+	 * 显式初始化/迁移配置：
+	 * - 缺失的 config.toml 用默认模板生成（含完整注释）
+	 * - defaults 缺失键自动补全（保留已有值）
+	 * - 缺失的 providers/pricing 引用文件用默认模板补建
+	 * - force=true 时先备份现有 config.toml（.bak）再重新生成
+	 * 返回本次操作报告（供 CLI init 子命令展示）。
+	 */
+	async init(force = false): Promise<InitReport> {
+		await this.ensureConfigDir();
+		const mainConfigPath = this.resolvePath('config.toml');
+		const existed = await this.pathExists(mainConfigPath);
+
+		let backupPath: string | null = null;
+		if (force && existed) {
+			backupPath = `${mainConfigPath}.bak`;
+			await copyFile(mainConfigPath, backupPath);
+			await rm(mainConfigPath, { force: true });
+		}
+
+		// 强制重新加载（绕过幂等，重新解析 + 补全；load 会重设 resolved）
+		this.loaded = false;
+		await this.load();
+		const addedDefaults = [...this.lastAddedDefaultsKeys];
+		this.lastAddedDefaultsKeys = [];
+
+		// 确保引用文件存在（load 只在首次生成；init 补建后续被删的）
+		const providersPath = this.resolvePath(this.resolved?.paths.providers ?? 'providers.toml');
+		const pricingPath = this.resolvePath(this.resolved?.paths.pricing ?? 'pricing.toml');
+		const createdFiles: string[] = [];
+		if (!(await this.pathExists(providersPath))) {
+			await this.writeTomlFile(providersPath, DEFAULT_PROVIDERS as unknown as Record<string, unknown>);
+			createdFiles.push(this.shortName(providersPath));
+		}
+		if (!(await this.pathExists(pricingPath))) {
+			await this.writeTomlFile(pricingPath, DEFAULT_PRICING as unknown as Record<string, unknown>);
+			createdFiles.push(this.shortName(pricingPath));
+		}
+
+		return {
+			configDir: this.configDir,
+			created: !existed || force,
+			forceBackup: backupPath,
+			addedDefaults,
+			createdFiles,
+		};
+	}
+
+	/** 补全 appConfig.defaults 缺失键（有默认值的），返回补全的键名列表 */
+	private applyMissingDefaults(appConfig: AppConfig): string[] {
+		const defaults = appConfig.defaults ?? {};
+		const defaultsRecord = defaults as unknown as Record<string, unknown>;
+		const missing = Object.entries(DEFAULT_DEFAULTS).filter(
+			([k]) => defaultsRecord[k] === undefined,
+		);
+		for (const [k, v] of missing) {
+			defaultsRecord[k] = v;
+		}
+		appConfig.defaults = defaults;
+		return missing.map(([k]) => k);
+	}
+
+	private async pathExists(p: string): Promise<boolean> {
+		try {
+			await access(p);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private shortName(p: string): string {
+		return p.startsWith(this.configDir) ? p.slice(this.configDir.length + 1) : p;
 	}
 
 	/**
@@ -416,4 +491,17 @@ export class ConfigManager {
 	getSessionsDir(): string {
 		return this.resolvePath(this.resolved?.paths.sessions ?? 'sessions');
 	}
+}
+
+/** init() 操作报告（CLI init 子命令展示用） */
+export interface InitReport {
+	configDir: string;
+	/** 本次是否创建了 config.toml（首次或 force 重新生成） */
+	created: boolean;
+	/** force 时的备份路径（未 force 或原本不存在时为 null） */
+	forceBackup: string | null;
+	/** 自动补全的 defaults 键名 */
+	addedDefaults: string[];
+	/** 本次补建的缺失引用文件（相对配置目录） */
+	createdFiles: string[];
 }

@@ -110,4 +110,49 @@ describe('CLI (e2e)', () => {
       expect(status).toBe(1);
     });
   });
+
+  describe('init 子命令', () => {
+    it('init --help 显示 --force 选项', () => {
+      const { stdout } = run(['init', '--help']);
+      expect(stdout).toContain('--force');
+      expect(stdout).toContain('Initialize or migrate');
+    });
+
+    it('init 在临时 HOME 下生成配置并报告', () => {
+      const { mkdtempSync } = require('node:fs');
+      const { tmpdir } = require('node:os');
+      const { join } = require('node:path');
+      const home = mkdtempSync(join(tmpdir(), 'deepseek-arch-cli-init-'));
+      const { stdout, status } = runWithEnv(['init'], { HOME: home });
+      expect(status).toBe(0);
+      expect(stdout).toContain('Config directory');
+      expect(stdout).toContain('config.toml: created');
+      // 生成的文件存在
+      const { existsSync } = require('node:fs');
+      expect(existsSync(join(home, '.deepseek-arch', 'config.toml'))).toBe(true);
+      expect(existsSync(join(home, '.deepseek-arch', 'providers.toml'))).toBe(true);
+      // 再次运行：已存在
+      const again = runWithEnv(['init'], { HOME: home });
+      expect(again.stdout).toContain('config.toml: exists');
+    });
+  });
 });
+
+/** 带环境变量运行的辅助（init 测试用临时 HOME 隔离） */
+function runWithEnv(args: string[], env: Record<string, string>): { stdout: string; stderr: string; status: number | null } {
+  try {
+    const stdout = execSync(`node ${CLI_PATH} ${args.join(' ')}`, {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 10000,
+      env: { ...process.env, ...env },
+    });
+    return { stdout, stderr: '', status: 0 };
+  } catch (err: any) {
+    return {
+      stdout: err.stdout?.toString() ?? '',
+      stderr: err.stderr?.toString() ?? '',
+      status: err.status ?? null,
+    };
+  }
+}

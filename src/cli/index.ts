@@ -370,6 +370,38 @@ program
 		}
 	});
 
+// ─── init 子命令 ─────────────────────────────────
+// 显式初始化/迁移配置：生成缺失的 config.toml/providers.toml/pricing.toml，
+// 自动补全 defaults 缺失键；--force 备份并重新生成 config.toml。
+
+program
+	.command('init')
+	.description('Initialize or migrate configuration files (config.toml/providers.toml/pricing.toml)')
+	.option('-f, --force', 'backup and regenerate config.toml from default template')
+	.action(async (options: { force?: boolean }) => {
+		try {
+			const cfg = ConfigManager.getInstance();
+			const report = await cfg.init(!!options.force);
+			console.log(`Config directory: ${report.configDir}`);
+			if (report.forceBackup) console.log(`Backup created: ${report.forceBackup}`);
+			if (report.created) {
+				console.log('config.toml: created from default template');
+			} else {
+				console.log('config.toml: exists (defaults checked)');
+			}
+			if (report.addedDefaults.length > 0) {
+				console.log(`Added default keys: ${report.addedDefaults.join(', ')}`);
+			}
+			for (const f of report.createdFiles) {
+				console.log(`Created missing file: ${f}`);
+			}
+			console.log('Next: set your API key in providers.toml, then run: deepseek-arch chat');
+		} catch (err: any) {
+			console.error('Failed:', err?.message ?? err);
+			process.exit(1);
+		}
+	});
+
 // ─── api-monitor 子命令 ─────────────────────────────
 // 启动 API 请求监听进程：接收 ApiClient 镜像发送的请求体，原样保存到磁盘。
 
@@ -417,7 +449,7 @@ function generateBashCompletion(): void {
 		'',
 		"\t# 第一级子命令",
 		"\tif [[ " + D + "cword -eq 1 ]]; then",
-		"\t\tCOMPREPLY=($(compgen -W \"chat resume clear completion\" -- \"" + D + "cur\"))",
+		"\t\tCOMPREPLY=($(compgen -W \"chat resume clear init completion\" -- \"" + D + "cur\"))",
 		"\t\treturn",
 		"\tfi",
 		'',
