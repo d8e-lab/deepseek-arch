@@ -92,6 +92,8 @@ export class TuiApp {
 	private lastVisibleInputRows = 1;
 	/** 上次渲染后的光标所在输入行号（0-based，用于下次回到起点） */
 	private lastCursorDisplayRow = 0;
+	/** 上次渲染的底部区域总行数（命令结果区 + 输入区）；上移基准 */
+	private lastBottomRows = 0;
 	/** 命令补全建议列表的行数（用于清理） */
 	private suggestionLinesCount = 0;
 	/** 双工交互：流式输出期间用户 Enter 排入的待发送消息（中断当前输出后发送） */
@@ -388,16 +390,15 @@ export class TuiApp {
 		// 仅空闲态重绘输入区域（流式/确认态的输出已在 scrollback 中）
 		if (this.state !== AppState.IDLE) return;
 		// 回到输入区域起点 → 清到屏底 → 重画 → 重渲染
-		const cmdRows = this.commandResultLines.length;
-		const totalUp = this.lastCursorDisplayRow + cmdRows;
-		if (totalUp > 0) {
-			process.stdout.write(`\x1b[${totalUp}A`);
+		if (this.lastBottomRows > 0) {
+			process.stdout.write(`\x1b[${this.lastBottomRows}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
 		this.drawInputArea();
 		process.stdout.write('\r');
 		this.lastCursorDisplayRow = 0;
+		this.lastBottomRows = 0;
 		this.renderInput();
 	};
 
@@ -429,13 +430,12 @@ export class TuiApp {
 		let content = await this.readUserInput();
 
 		// 清除输入区域：回到起点（无历史记录时即当前行），清到屏底
-		const cmdRows = this.commandResultLines.length;
-		const totalUp = this.lastCursorDisplayRow + cmdRows;
-		if (totalUp > 0) {
-			process.stdout.write(`\x1b[${totalUp}A`);
+		if (this.lastBottomRows > 0) {
+			process.stdout.write(`\x1b[${this.lastBottomRows}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
+		this.lastBottomRows = 0;
 
 		if (content === null) {
 			this.running = false;
@@ -454,7 +454,8 @@ export class TuiApp {
 			}
 			// 视图可能在命令处理/输出期间打开：跳过 UI 收尾（视图接管）
 			if (this.viewerActive) return;
-			this.printSeparator();
+			// 命令结果区已渲染在底部：收起 → 写分隔线 → 重画底部（避免覆盖）
+			this.printSeparatorKeepBottom();
 			return;
 		}
 
@@ -495,7 +496,9 @@ export class TuiApp {
 			return await this.dispatchCommand(content);
 		} finally {
 			this.commandResultActive = false;
-			this.renderCommandResultBar();
+			// 渲染由调用方统一处理：
+			//  - inputCycle 命令路径 → printSeparatorKeepBottom（收起→分隔线→重画）
+			//  - handleCommandDuringStream（流式）→ renderCommandResultBar
 		}
 	}
 
@@ -519,6 +522,8 @@ export class TuiApp {
 			// // 转义 → 排队发送（输出结束后自动发送）
 			this.nextMessage = content.startsWith('//') ? content.slice(1) : content;
 		}
+		// 流式期间：命令结果区立即渲染（光标在输入区，上移重绘）
+		this.renderCommandResultBar();
 	}
 
 	/** 命令分派（handleCommand 内部：输出经 cmdOut 捕获到命令结果区） */
@@ -1348,20 +1353,38 @@ export class TuiApp {
 		this.input.setWrapWidth(availWidth);
 		hideCursor();
 
+		// 回到底部区域起始行：上移上次底部区域总高度（命令结果区 + 输入区）
+		if (this.lastBottomRows > 0) {
+			process.stdout.write(`\x1b[${this.lastBottomRows}A`);
+		}
+		process.stdout.write('\r');
+		// 清除旧底部区域（命令结果区 + 输入区）
+		process.stdout.write(CLEAR_TO_END);
+
+		this.drawBottomArea(cols, availWidth);
+	}
+
+	/**
+	 * 输出后/命令后：光标已在输出末尾（底部区域已收起），直接绘制底部区域。
+	 * 与 IDLE 态 renderInput 不同：不做上移（上移会跑到输出区里），
+	 * 从当前光标位置画命令结果区 + 输入区，使其视觉上固定在屏幕底部。
+	 */
+	private renderInputDuringStream(): void {
+		this.lastCursorDisplayRow = 0;
+		const cols = getTermSize().cols;
+		const availWidth = cols - 1;
+		this.input.setWrapWidth(availWidth);
+		hideCursor();
+		process.stdout.write(CLEAR_TO_END);
+		this.drawBottomArea(cols, availWidth);
+	}
+
+	/** 绘制底部区域：命令结果区（输入区上方，固定）+ 输入区；结束后更新 lastBottomRows */
+	private drawBottomArea(cols: number, availWidth: number): void {
 		const inputLines = this.input.getDisplayLines();
 		const cursorPos = this.input.getCursorDisplayPos();
 		const visibleLines = Math.max(1, Math.min(inputLines.length, MAX_INPUT_ROWS));
 		const linesToDraw = Math.max(visibleLines, this.lastVisibleInputRows);
-
-		// 回到底部区域起始行：命令结果区 + 输入区
-		const cmdRows = this.commandResultLines.length;
-		const totalUp = this.lastCursorDisplayRow + cmdRows;
-		if (totalUp > 0) {
-			process.stdout.write(`\x1b[${totalUp}A`);
-		}
-		process.stdout.write('\r');
-		// 清除旧命令结果区 + 旧输入区（CLEAR_TO_END 从当前位置清到屏底）
-		process.stdout.write(CLEAR_TO_END);
 
 		// 画命令结果区（输入区上方，固定；新命令替换旧内容）
 		for (const line of this.commandResultLines) {
@@ -1369,6 +1392,7 @@ export class TuiApp {
 			process.stdout.write(dim('│ ') + line);
 			process.stdout.write('\r\n');
 		}
+		const cmdRows = this.commandResultLines.length;
 
 		const bgStart = this.shellMode ? PINK_BG_START : GRAY_BG_START;
 		const bgEnd = this.shellMode ? PINK_BG_END : GRAY_BG_END;
@@ -1424,6 +1448,8 @@ export class TuiApp {
 		if (cursorPos.col > 0) process.stdout.write(`\x1b[${cursorPos.col}C`);
 
 		this.lastCursorDisplayRow = cursorPos.row;
+		// 记录底部区域总高度（命令结果区 + 输入区 + 建议列表），供下次上移
+		this.lastBottomRows = cmdRows + linesToDraw + this.suggestionLinesCount;
 		showCursor();
 	}
 
@@ -1443,9 +1469,22 @@ export class TuiApp {
 		this.writeOutputLine(line);
 	}
 
-	/** 重绘命令结果区 + 输入区（命令执行后 / 流式输出后调用，保持底部固定） */
+	/** 重绘命令结果区 + 输入区（命令执行后调用）：
+	 *  - 底部区域已收起（IDLE 命令，光标在输出末尾）→ 直接画
+	 *  - 底部区域在屏（流式命令，光标在输入区）→ 上移旧高度重绘 */
 	private renderCommandResultBar(): void {
-		this.renderInput();
+		if (this.lastBottomRows > 0) {
+			this.renderInput();
+		} else {
+			this.renderInputDuringStream();
+		}
+	}
+
+	/** 收起底部 → 写分隔线 → 重画底部（命令执行后使用，避免分隔线覆盖命令结果区/输入区） */
+	private printSeparatorKeepBottom(): void {
+		this.collapseInputArea();
+		this.printSeparator();
+		this.renderInputDuringStream();
 	}
 
 	/** 清空命令结果区（发送普通消息后调用；redraw=false 时输入区已清除，避免错位重绘） */
@@ -1462,26 +1501,15 @@ export class TuiApp {
 	 * 输出开始前/每条输出行前调用，使输出从原输入区位置开始写。
 	 */
 	private collapseInputArea(): void {
-		// 收起底部区域（命令结果区 + 输入区）：光标上移到底部区域起点，清到屏底
-		const cmdRows = this.commandResultLines.length;
-		const totalUp = this.lastCursorDisplayRow + cmdRows;
-		if (totalUp > 0) {
-			process.stdout.write(`\x1b[${totalUp}A`);
+		// 收起底部区域（命令结果区 + 输入区 + 建议列表）：光标上移到底部区域起点，清到屏底
+		if (this.lastBottomRows > 0) {
+			process.stdout.write(`\x1b[${this.lastBottomRows}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
-	}
-
-	/**
-	 * 输出期间：从当前光标位置（输出区末尾）重绘输入区。
-	 * 与 IDLE 态 renderInput 不同：强制 lastCursorDisplayRow=0，不做上移回退，
-	 * 直接在光标下方绘制输入区，使其视觉上固定在屏幕底部。
-	 */
-	private renderInputDuringStream(): void {
-		this.lastCursorDisplayRow = 0;
-		this.renderInput();
+		this.lastBottomRows = 0;
 	}
 
 	/** 输出一行到 scrollback，并在底部重绘输入区（Bug 1）；视图打开时缓冲（流式静默） */
