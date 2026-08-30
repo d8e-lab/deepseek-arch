@@ -1414,23 +1414,10 @@ export class TuiApp {
 		if (this.input.isInCommandMode()) {
 			const suggestIdx = this.input.getSuggestionIndex();
 			const suggestions = this.input.getSuggestions();
-			const oldSuggCount = this.suggestionLinesCount;
-			const totalSuggestLines = this.renderSuggestions(suggestions, suggestIdx, availWidth);
-			// 清除旧建议的残留行（新列表变短时）
-			if (totalSuggestLines < oldSuggCount) {
-				for (let r = totalSuggestLines; r < oldSuggCount; r++) {
-					process.stdout.write('\r\n');
-					clearLine();
-				}
-				// 回到新建议的最后一行
-				if (oldSuggCount - totalSuggestLines > 0) {
-					process.stdout.write(`\x1b[${oldSuggCount - totalSuggestLines}A`);
-				}
-			}
-			this.suggestionLinesCount = totalSuggestLines;
+			// 旧建议列表已被上移后的 CLEAR_TO_END 清除，无需残留清理（\r\n 在屏底会触发滚动）
+			this.suggestionLinesCount = this.renderSuggestions(suggestions, suggestIdx, availWidth);
 		} else if (this.suggestionLinesCount > 0) {
-			// 非命令模式：清除旧的建议列表（光标当前在输入区末尾，清到屏底即可）
-			process.stdout.write(CLEAR_TO_END);
+			// 非命令模式：旧的建议列表已被 CLEAR_TO_END 清除
 			this.suggestionLinesCount = 0;
 		}
 
