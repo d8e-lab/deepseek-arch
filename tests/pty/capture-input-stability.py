@@ -179,7 +179,7 @@ def main():
 
     try:
         # 初始画面
-        time.sleep(0.6)
+        time.sleep(1.5)
         buf = read_all(master_fd, timeout=0.5)
         vt.apply(buf.decode('utf-8', errors='replace'))
         init_rows = sorted(vt.gray_rows)

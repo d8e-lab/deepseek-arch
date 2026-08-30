@@ -194,6 +194,25 @@ describe('runSubagentLoop', () => {
 		expect(entries.some((e) => e.type === 'tool_result' && e.content === 'fake result')).toBe(true);
 	});
 
+	it('流式 content 按完整行 emit（不逐 chunk 拆碎，半行结尾 flush）', async () => {
+		// 模拟真实流式：一个轮次内多个 delta chunk（DeepSeek 每 chunk 几个词）
+		const client = {
+			chatStream: async function* () {
+				yield emitStep({ content: '第一行' });        // 半行（无 \n）
+				yield emitStep({ content: '续写\n第二行\n' }); // 续写 + 拆出两行
+				yield emitStep({ content: '第三行' });        // 半行，轮次结束 flush
+			},
+		} as unknown as ModelProvider;
+		const entries: SubagentRoundEntry[] = [];
+		const { result } = await runSubagentLoop(subMessages('任务'), client, [], undefined, {
+			onEntry: (e) => entries.push(e),
+		});
+		expect(result).toBe('第一行续写\n第二行\n第三行');
+		const contentEntries = entries.filter((e) => e.type === 'content');
+		// 按 \n 边界拆成完整行，而非每 chunk 一条碎 entry
+		expect(contentEntries.map((e) => e.content)).toEqual(['第一行续写', '第二行', '第三行']);
+	});
+
 	it('onUsage 回调收集每轮 usage（O-1）', async () => {
 		const client = makeScriptClient([
 			{ content: '结果', usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } },

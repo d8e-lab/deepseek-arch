@@ -99,7 +99,7 @@ def main():
 
     try:
         # ═══ 阶段 0: 等待启动 + spawn subagent ═══
-        time.sleep(0.6)
+        time.sleep(1.5)
         read_all(master_fd, timeout=0.4)
 
         for ch in SPAWN_MSG:

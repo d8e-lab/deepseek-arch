@@ -83,8 +83,8 @@ def main():
         return buf
 
     try:
-        # 启动
-        time.sleep(0.6)
+        # 启动（全量并行负载下 TUI 启动可能较慢）
+        time.sleep(1.5)
         drain(0.5)
 
         # 发送第一条消息（触发流式输出 #stream → 逐字符）
@@ -92,7 +92,7 @@ def main():
             os.write(master_fd, ch.encode())
             time.sleep(0.01)
         os.write(master_fd, b'\r')
-        time.sleep(0.4)  # 流式进行中（reasoning 阶段）
+        time.sleep(0.8)  # 流式进行中（reasoning 阶段）
         drain(0.2)       # 清空输入回显，只保留流式增量观察
 
         # 流式期间：输入普通文字排队（不中断输出）
@@ -100,21 +100,21 @@ def main():
             os.write(master_fd, ch.encode())
             time.sleep(0.01)
         os.write(master_fd, b'\r')
-        time.sleep(0.3)
+        time.sleep(0.6)
         drain(0.2)
 
         # 流式期间：打开全屏浏览视图（Ctrl+O）
         os.write(master_fd, b'\x0f')
-        time.sleep(0.5)
+        time.sleep(0.8)
         buf_view = drain(0.5)
 
         # 等待流结束（视图打开期间，finally 跳过排空，nextMessage 保留）
-        time.sleep(2.5)
+        time.sleep(3.5)
         drain(0.5)
 
         # 关闭视图（q）
         os.write(master_fd, b'q')
-        time.sleep(0.6)
+        time.sleep(1.0)
 
         # 主循环恢复：发送排队消息 followup → 第二轮回复
         # 在 followup 流进行中再输入 second：新代码 followup 完成后才进入下一轮输入；
@@ -123,7 +123,7 @@ def main():
             os.write(master_fd, ch.encode())
             time.sleep(0.01)
         os.write(master_fd, b'\r')
-        time.sleep(2.5)
+        time.sleep(3.5)
         drain(0.5)
         time.sleep(0.5)
         drain(0.3)

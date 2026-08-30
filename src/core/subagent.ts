@@ -72,6 +72,11 @@ export async function runSubagentLoop(
 		let content = '';
 		let reasoning = '';
 		const pendingToolCalls: ToolCall[] = [];
+		// 流式 content 累积缓冲：按完整行（\n 边界）emit，避免每个 chunk 一条碎 entry
+		let contentPending = '';
+		const emitContentLine = (line: string): void => {
+			emit({ type: 'content', content: line, timestamp: Date.now() });
+		};
 
 		const toolOptions = toolDefs.length > 0 ? { tools: toolDefs } : {};
 
@@ -91,7 +96,15 @@ export async function runSubagentLoop(
 
 				if (delta.content) {
 					content += delta.content;
-					emit({ type: 'content', content: delta.content, timestamp: Date.now() });
+					contentPending += delta.content;
+					// 按完整行 emit（\n 边界），半行留待后续 chunk / 轮次结束 flush
+					while (true) {
+						const nlIdx = contentPending.indexOf('\n');
+						if (nlIdx < 0) break;
+						const line = contentPending.slice(0, nlIdx);
+						contentPending = contentPending.slice(nlIdx + 1);
+						emitContentLine(line);
+					}
 				}
 
 				if (delta.tool_calls && delta.tool_calls.length > 0) {
@@ -110,6 +123,11 @@ export async function runSubagentLoop(
 		}
 
 		if (content) finalContent = content;
+		// flush 剩余未按行拆分的 content 半行（无 \n 结尾的尾部）
+		if (contentPending) {
+			emitContentLine(contentPending);
+			contentPending = '';
+		}
 
 		if (pendingToolCalls.length === 0) {
 			return { result: finalContent || '(subagent completed with no output)', messages: msgs };
