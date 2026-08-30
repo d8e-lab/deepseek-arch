@@ -113,14 +113,18 @@ describe('输入区定位回归测试（8 个历史 bug）', () => {
 	it('572bb26: 命令结果区超宽行折行后光标上移按物理行数（完整显示、输入区不逐次下移）', () => {
 		const app = makeApp();
 		const anyApp = app as unknown as {
-			commandResultLines: string[];
-			renderInput: () => void;
+			bottom: {
+				clearCommandResult: (redraw?: boolean) => void;
+				pushCommandLine: (l: string) => void;
+				renderIdle: () => void;
+			};
 		};
 		const wrapWidth = termCols() - 2; // availWidth - 2（'│ ' 前缀占 2 列）
 		const wide = '─'.repeat(wrapWidth * 2 + 3); // 确定折成 3 个物理行
 
-		anyApp.commandResultLines = [wide];
-		anyApp.renderInput();
+		anyApp.bottom.clearCommandResult(false);
+		anyApp.bottom.pushCommandLine(wide);
+		anyApp.bottom.renderIdle();
 		const out = writes.join('');
 
 		// 完整显示不截断：157 个 '─' 全部在输出中（折成 3 行）
@@ -135,7 +139,7 @@ describe('输入区定位回归测试（8 个历史 bug）', () => {
 
 		// 再次重绘（模拟键入）：上移基准为光标行偏移（0），不产生额外上移 → 输入区不逐次下移
 		writes.length = 0;
-		anyApp.renderInput();
+		anyApp.bottom.renderIdle();
 		const out2 = writes.join('');
 		expect(out2).not.toContain('\x1b[1A');
 		expect(out2).not.toContain('\x1b[2A');
@@ -282,27 +286,31 @@ describe('输入区定位回归测试（8 个历史 bug）', () => {
 	it('0838994: 多行输入 + 命令结果区时，上移基准为光标行偏移（输入框不逐字符上移）', () => {
 		const app = makeApp();
 		const anyApp = app as unknown as {
-			commandResultLines: string[];
-			renderInput: () => void;
-			collapseInputArea: () => void;
+			bottom: {
+				clearCommandResult: (redraw?: boolean) => void;
+				pushCommandLine: (l: string) => void;
+				renderIdle: () => void;
+				collapse: () => void;
+			};
 			input: { insertChar: (c: string) => void; getDisplayLines: () => string[] };
 		};
-		anyApp.commandResultLines = ['命令结果行'];
-		anyApp.renderInput(); // 设定 wrap width
+		anyApp.bottom.clearCommandResult(false);
+		anyApp.bottom.pushCommandLine('命令结果行');
+		anyApp.bottom.renderIdle(); // 设定 wrap width
 
 		// 键入超宽内容：输入框折成 2 行，光标在第 2 行（display row = 1）
 		for (let i = 0; i < termCols() + 10; i++) anyApp.input.insertChar('a');
 		expect(anyApp.input.getDisplayLines().length).toBeGreaterThan(1);
-		anyApp.renderInput();
+		anyApp.bottom.renderIdle();
 		// 再次键入重绘：上移量 = 光标行偏移（1），不是底部区域总高度（2 + 命令结果区 1 = 3）
 		writes.length = 0;
-		anyApp.renderInput();
+		anyApp.bottom.renderIdle();
 		const out = writes.join('');
 		expect(out.startsWith('\x1b[?25l\x1b[1A\r\x1b[0J')).toBe(true);
 
-		// collapseInputArea 同样只上移光标行偏移：\x1b[1A + \r + 清到屏底
+		// collapse 同样只上移光标行偏移：\x1b[1A + \r + 清到屏底
 		writes.length = 0;
-		anyApp.collapseInputArea();
+		anyApp.bottom.collapse();
 		expect(writes.join('')).toBe('\x1b[1A\r\x1b[0J');
 	});
 
@@ -354,12 +362,12 @@ describe('输入区定位回归测试（8 个历史 bug）', () => {
 		const anyApp = app as unknown as {
 			handleCommand: (c: string) => Promise<boolean>;
 			sendMessageStream: (c: string) => Promise<void>;
-			commandResultLines: string[];
+			bottom: { getCommandLineCount: () => number };
 		};
 
 		// 先执行 /context：命令结果区占据底部区域
 		await anyApp.handleCommand('/context');
-		expect(anyApp.commandResultLines.length).toBeGreaterThan(0);
+		expect(anyApp.bottom.getCommandLineCount()).toBeGreaterThan(0);
 
 		// 发送消息：模型输出必须完整
 		await anyApp.sendMessageStream('hello');
@@ -384,11 +392,11 @@ describe('输入区定位回归测试（8 个历史 bug）', () => {
 		const app = makeApp();
 		const anyApp = app as unknown as {
 			handleCommand: (c: string) => Promise<boolean>;
-			renderInputDuringStream: () => void;
+			bottom: { renderAfterOutput: () => void };
 		};
 
 		await anyApp.handleCommand('/help');
-		anyApp.renderInputDuringStream();
+		anyApp.bottom.renderAfterOutput();
 		const out = writes.join('');
 
 		// 输入区（灰底）出现在命令结果区（'│ ' 前缀）之前 → 结果区在输入框下方

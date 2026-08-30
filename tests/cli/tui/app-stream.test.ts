@@ -99,11 +99,11 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		expect(out.indexOf(GRAY_BG_START)).toBeGreaterThan(out.indexOf('hello world'));
 	});
 
-	it('collapseInputArea 先清屏再输出（CLEAR_TO_END 序列）', () => {
+	it('collapse 先清屏再输出（CLEAR_TO_END 序列）', () => {
 		const app = makeApp();
-		const anyApp = app as unknown as { collapseInputArea: () => void };
+		const anyApp = app as unknown as { bottom: { collapse: () => void } };
 		// 首次：lastCursorDisplayRow=0，直接 \r + 清屏
-		anyApp.collapseInputArea();
+		anyApp.bottom.collapse();
 		const first = writes.join('');
 		expect(first).toContain(CLEAR_TO_END);
 	});
