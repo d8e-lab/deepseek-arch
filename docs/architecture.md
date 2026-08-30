@@ -13,8 +13,20 @@ deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ES
 │                      CLI Layer                            │
 │  Commander.js: --version, --help, chat, resume            │
 │  src/cli/index.ts                                         │
-│  TuiApp: 内联 TUI + 流式渲染 + 工具确认                    │
-│  src/cli/tui/app.ts                                       │
+└────────────────────────┬─────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────┐
+│             Presentation Layer（表示层）                    │
+│  TuiApp（状态机 + 模块组装）  src/presentation/tui-app.ts   │
+│  ├── ScreenBuffer   输出唯一通道（可注入测试）               │
+│  ├── BottomArea     底部容器：输入区+命令结果区+建议列表      │
+│  │                   （高度实时测量，无跨模块记账）           │
+│  ├── OverlayPane    全屏覆盖层基类（Ctrl+O/Ctrl+T 公共生命周期）│
+│  ├── terminal.ts    终端控制原语（尺寸/光标/清屏/粘贴）        │
+│  └── types.ts       表示层配置（TuiConfig）                 │
+│            ↓ 引用（无 I/O）                                │
+│  Render SDK  src/render/（ConversationView/InputEditor/    │
+│              Selector/MarkdownTableRenderer/SubagentRecordView/ansi）│
 └────────────┬─────────────────────────────────┬───────────┘
              │                                 │
 ┌────────────▼──────────────┐  ┌───────────────▼───────────┐
@@ -46,14 +58,18 @@ deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ES
               └──────────┘  └───────────────┘
 ```
 
-**依赖方向**：CLI → SessionManager + Tools。SessionManager → {ConfigManager, Storage, ModelProvider}。Tools 无内部依赖。ApiClient/MockProvider 实现 ModelProvider 接口。无循环依赖。
+**依赖方向**：CLI → Presentation → Render SDK；CLI → SessionManager + Tools。SessionManager → {ConfigManager, Storage, ModelProvider}。Tools 无内部依赖。ApiClient/MockProvider 实现 ModelProvider 接口。无循环依赖。
 
 ## 模块职责
 
 | 模块 | 文件 | 职责 | 状态 |
 |------|------|------|------|
-| **CLI (Commander)** | `src/cli/index.ts` | Commander.js 命令行解析，注册子命令，加载 Tools | ✅ |
-| **TuiApp** | `src/cli/tui/app.ts` | 内联 TUI，流式渲染，工具确认 (y/N)，diff 着色 | ✅ |
+| **CLI (Commander)** | `src/cli/index.ts` | Commander.js 命令行解析，注册子命令，加载 Tools，组装 SessionManager + TuiApp | ✅ |
+| **TuiApp** | `src/presentation/tui-app.ts` | 表示层主应用：状态机 + 模块组装 + 输入解析 + 命令分派 + 流式事件渲染 | ✅ |
+| **ScreenBuffer** | `src/presentation/screen-buffer.ts` | 输出唯一通道（默认写 stdout，测试可注入 fake） | ✅ |
+| **BottomArea** | `src/presentation/bottom-area.ts` | 底部区域容器：输入区 + 命令结果区 + 建议列表；高度实时测量，无跨模块光标记账 | ✅ |
+| **OverlayPane** | `src/presentation/overlay-pane.ts` | 全屏覆盖层基类：alt screen 进出 + handler 接管/恢复 + 静默输出缓冲回放 | ✅ |
+| **Render SDK** | `src/render/` | 无 I/O 渲染组件库：ConversationView / InputEditor / Selector / MarkdownTableRenderer / SubagentRecordView / ansi | ✅ |
 | **ConfigManager** | `src/core/config.ts` | TOML 多文件加载，文件跳转引用，持久化读写 | ✅ |
 | **Storage** | `src/core/storage.ts` | 文件系统存储，sessions 目录 + turns.json（含 tool_calls） | ✅ |
 | **Types** | `src/types/` | 全部领域类型定义（含 ToolDefinition/ToolCall 等 API 类型） | ✅ |
@@ -72,6 +88,8 @@ deepseek-arch 是一个 Linux 终端 AI 助手，基于 Node.js + TypeScript (ES
 | **Adapter** | ApiClient — 封装第三方 API，隔离变化 |
 | **Barrel File** | src/tools/index.ts — 统一注册工具，新增只需一行 export |
 | **状态机** | TuiApp — IDLE → SENDING → STREAMING → CONFIRMING → IDLE |
+| **容器/布局** | BottomArea — 底部区域（输入区+命令结果区+建议列表）独立容器，高度实时测量 |
+| **模板方法** | OverlayPane — 全屏覆盖层公共生命周期（打开/关闭/缓冲/回放），子视图差异通过 hooks 注入 |
 
 ## 数据流
 
