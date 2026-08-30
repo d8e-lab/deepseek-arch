@@ -475,6 +475,8 @@ export class TuiApp {
 			}
 			// 视图可能在命令处理/输出期间打开：跳过 UI 收尾（视图接管）
 			if (this.viewerActive) return;
+			// 命令执行完毕：清空输入区（命令文本已在 dispatchCommand 提交，避免残留显示/误操作）
+			this.input.clear();
 			// 命令结果区已渲染在底部：收起 → 写分隔线 → 重画底部（避免覆盖）
 			this.printSeparatorKeepBottom();
 			return;
