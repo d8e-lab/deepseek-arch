@@ -33,9 +33,31 @@ export class SubagentRecordView {
 		lines.push(dim('─'.repeat(sepWidth)));
 
 		// ─── 输出条目 ──────────────────────────
+		// 合并连续 content 条目：流式输出被按 chunk/行拆成多条碎 entry，
+		// 合并成完整段落再渲染（markdown 表格跨条目也完整）
+		let contentBuffer: string[] = [];
+		const flushContentBuffer = (): void => {
+			if (contentBuffer.length === 0) return;
+			const md = new MarkdownTableRenderer();
+			const rendered = md.feed(contentBuffer.join('\n')) ?? [];
+			rendered.push(...(md.flush() ?? []));
+			for (const rline of rendered) {
+				for (const wline of wrapText(rline, Math.max(1, termWidth - 2))) {
+					lines.push('  ' + wline);
+				}
+			}
+			contentBuffer = [];
+		};
+
 		for (const entry of record.entries) {
+			if (entry.type === 'content') {
+				contentBuffer.push(entry.content);
+				continue;
+			}
+			flushContentBuffer();
 			this.renderEntry(lines, entry, termWidth);
 		}
+		flushContentBuffer();
 
 		// ─── 最终结果 ──────────────────────────
 		if (record.result) {

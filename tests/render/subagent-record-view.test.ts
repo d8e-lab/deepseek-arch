@@ -52,6 +52,32 @@ describe('SubagentRecordView', () => {
 		expect(lines.some(l => l.includes('  这是子代理的回复'))).toBe(true);
 	});
 
+	it('连续 content 条目合并渲染（不逐条拆行）', () => {
+		// 流式按行记录的碎条目：合并成完整段落渲染
+		const lines = view.renderToText(makeRecord([
+			{ type: 'content', content: '第一行', timestamp: 1 },
+			{ type: 'content', content: '第二行', timestamp: 2 },
+			{ type: 'content', content: '第三行', timestamp: 3 },
+		]), 80);
+		const text = lines.join('\n');
+		expect(text).toContain('  第一行');
+		expect(text).toContain('  第二行');
+		expect(text).toContain('  第三行');
+	});
+
+	it('markdown 表格跨 content 条目渲染完整', () => {
+		// 表格行被拆成多条 entry（流式按行记录）：合并后表格完整渲染
+		const lines = view.renderToText(makeRecord([
+			{ type: 'content', content: '| A | B |', timestamp: 1 },
+			{ type: 'content', content: '|---|---|', timestamp: 2 },
+			{ type: 'content', content: '| 1 | 2 |', timestamp: 3 },
+		]), 80);
+		const text = lines.join('\n');
+		// 表格渲染为 box-drawing 行（含 │ 与 ─）
+		expect(text).toContain('│');
+		expect(text).toContain('─');
+	});
+
 	it('tool_call 复用 ● run 格式', () => {
 		const lines = view.renderToText(makeRecord([
 			{ type: 'tool_call', content: '', toolName: 'shell', toolArgs: { command: 'ls' }, timestamp: 1 },

@@ -28,7 +28,18 @@ export function wrapText(text: string, maxWidth: number): string[] {
 		}
 		let current = '';
 		let currentWidth = 0;
-		for (const ch of rawLine) {
+		let i = 0;
+		while (i < rawLine.length) {
+			const ch = rawLine[i];
+			// 跳过 ANSI 转义序列（不计宽度，保留在输出中）
+			if (ch === '\x1b') {
+				const m = rawLine.slice(i).match(/^\x1b\[[0-9;?]*[a-zA-Z]/);
+				if (m) {
+					current += m[0];
+					i += m[0].length;
+					continue;
+				}
+			}
 			const cw = strDisplayWidth(ch);
 			if (currentWidth + cw > maxWidth) {
 				lines.push(current);
@@ -38,6 +49,7 @@ export function wrapText(text: string, maxWidth: number): string[] {
 				current += ch;
 				currentWidth += cw;
 			}
+			i += ch.length;
 		}
 		if (current) lines.push(current);
 	}

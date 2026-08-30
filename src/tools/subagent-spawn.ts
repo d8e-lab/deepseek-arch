@@ -24,7 +24,9 @@ export const subagentSpawnTool: Tool = {
 		'It CANNOT spawn sub-subagents or use plan/save_plan. ' +
 		'Use this to parallelize independent work: spawn multiple subagents in one round. ' +
 		'Each subagent needs a unique subagent_name for later tracking (via wait/list_subagents). ' +
-		'Be specific about the task and expected output format — the subagent works independently.',
+		'Be specific about the task and expected output format — the subagent works independently. ' +
+		'The subagent\'s context is preserved after completion — you can send follow-up instructions ' +
+		'with subagent_send (it resumes with its full previous context).',
 	parameters: {
 		type: 'object',
 		properties: {

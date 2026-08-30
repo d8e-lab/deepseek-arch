@@ -99,7 +99,8 @@ export interface StreamEvent {
 		| 'tool_call_delta' | 'tool_call_start' | 'tool_preview' | 'tool_result'
 		| 'tool_output'
 		| 'review_verdict'
-		| 'subagent_spawned' | 'subagent_finished' | 'subagent_update';
+		| 'subagent_spawned' | 'subagent_finished' | 'subagent_update'
+		| 'auto_compact';
 	/** 增量文本（reasoning_delta / content_delta / tool_call_delta） */
 	text?: string;
 	/** token 用量（done 事件） */
@@ -135,4 +136,10 @@ export interface StreamEvent {
 	subagentStatus?: 'completed' | 'failed';
 	/** 子代理耗时 ms（subagent_finished） */
 	subagentElapsedMs?: number;
+	/** 自动 compact 触发的分代号（auto_compact 事件） */
+	compactGen?: number;
+	/** 自动 compact 压缩的轮次数（auto_compact 事件） */
+	compressedTurns?: number;
+	/** 自动 compact 恢复的文件数（auto_compact 事件） */
+	restoredFiles?: number;
 }

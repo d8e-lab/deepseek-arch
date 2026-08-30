@@ -1,6 +1,6 @@
 # ConfigManager 设计
 
-> 最后更新：2026-05-18 · 实现文件：`src/core/config.ts`
+> 最后更新：2026-08-20 · 实现文件：`src/core/config.ts`
 
 ## 职责
 
@@ -9,7 +9,8 @@
 3. 合并为完整的 `ResolvedConfig`
 4. 提供点号路径取值 (`get`) 与覆写 (`set`)
 5. 支持热重载 (`reload`)
-6. 首次运行时自动创建默认配置文件
+6. 首次运行时自动创建默认配置文件（config.toml / providers.toml / pricing.toml / skill/）
+7. **每次启动**检查 `system-prompt.toml`，缺失时从项目根 `system_prompt.txt` 生成默认模板快照（`ensureSystemPromptSnapshot`）
 
 ## 设计模式：Singleton
 
@@ -67,7 +68,13 @@ output = 2.00
 currency = "CNY"
 ```
 
-### System Prompt (system-prompt.toml)
+### System Prompt（system-prompt.toml 快照）
+
+> **启动自动生成**：每次启动时 `ConfigManager.load()` 检查 `system-prompt.toml`，若不存在则从项目根
+> `system_prompt.txt` 读取内容生成默认模板（`[default]`）快照（`ensureSystemPromptSnapshot`）。
+> 运行时系统 prompt 一律以 `system-prompt.toml` 为准——不直接读 `system_prompt.txt`，也不直接用硬编码兜底。
+> 因此：编辑项目根 `system_prompt.txt` 后需删除（或修改）`~/.deepseek-arch/system-prompt.toml` 才会在下次启动生效；
+> 用户也可直接编辑 `system-prompt.toml` 自定义模板，并让 `defaults.system_prompt` 指向它。
 
 ```toml
 [default]

@@ -11,7 +11,7 @@
 ```
 system_prompt.txt          ← 项目根目录，可独立编辑
         +
-<environment_info>         ← 运行时动态注入（OS / Git / 目录树 / README）
+<environment_info>         ← 运行时动态注入（OS / Git / 目录树 / AGENTS.md）
         ↓
 SessionManager.setSystemPrompt()
         ↓
@@ -128,7 +128,7 @@ buildMessages() → messages[0]  →  POST /v1/chat/completions
 | 网络 IP | `os.networkInterfaces()` |
 | Git 分支/远程 | `git branch --all` + `git remote -v` |
 | 目录结构（2 层深） | `fs.readdir()` 递归，过滤隐藏文件和 `node_modules` |
-| README / AGENTS.md | 大小写不敏感匹配，最多读 8KB |
+| AGENTS.md | 大小写不敏感匹配，最多读 8KB（README 不再注入——随版本变动易过期且浪费 token） |
 
 ## 调试
 
@@ -169,17 +169,17 @@ diff ~/.deepseek-arch/sessions/<uuid1>/system-prompt.txt \
 
 ## 修改方式
 
-1. **行为规则**：编辑项目根目录的 `system_prompt.txt`，下次启动生效
+1. **行为规则**：编辑项目根目录的 `system_prompt.txt`，然后删除（或手动修改）`~/.deepseek-arch/system-prompt.toml` —— 下次启动时若该 toml 缺失，会自动从 `system_prompt.txt` 重新生成快照（`ensureSystemPromptSnapshot`）。运行时以 `system-prompt.toml` 为准，不直接读 `system_prompt.txt`
 2. **环境信息**：修改 `src/core/system-info.ts` 中的采集逻辑
-3. **用户自定义 prompt**：编辑 `~/.deepseek-arch/system-prompt.toml`（通过 `/config` 命令或直接编辑）
+3. **用户自定义 prompt**：直接编辑 `~/.deepseek-arch/system-prompt.toml`（可定义多个模板），让 `defaults.system_prompt` 指向要用的模板名
 
 ## 相关文件
 
 | 文件 | 职责 |
 |------|------|
-| `system_prompt.txt` | 推理努力度 + 行为规则模板 |
+| `system_prompt.txt` | 默认 system prompt 源（推理努力度 + 行为规则）；仅用于 `system-prompt.toml` 缺失时生成快照 |
 | `src/core/system-info.ts` | 环境信息采集与格式化 |
-| `src/core/config.ts` | 读取 `system_prompt.txt` 写入 `system-prompt.toml`（兜底） |
-| `src/cli/index.ts` | `createSessionManager()` 中拼接 prompt + 环境 |
+| `src/core/config.ts` | `ensureSystemPromptSnapshot()` 启动时生成 `system-prompt.toml` 快照（源 `readSystemPromptFile()`，含硬编码兜底） |
+| `src/cli/index.ts` | `createSessionManager()` 中从 `system-prompt.toml` 读取模板并拼接环境 + skill listing |
 | `src/core/session.ts` | `setSystemPrompt()` 存储，`buildMessages()` 注入，`startNewSession()` 落盘 |
-| `~/.deepseek-arch/system-prompt.toml` | 用户可覆盖的 prompt 配置 |
+| `~/.deepseek-arch/system-prompt.toml` | 运行时唯一 prompt 来源（启动自动生成 `[default]` 快照，可自定义） |

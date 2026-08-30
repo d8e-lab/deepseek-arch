@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ConfigManager, DEFAULT_CONFIG_DIR } from '../../src/core/config.js';
+import { ConfigManager, DEFAULT_CONFIG_DIR, parseTokenSize } from '../../src/core/config.js';
 
 describe('ConfigManager', () => {
   let testDir: string;
@@ -68,7 +68,18 @@ describe('ConfigManager', () => {
         provider: 'deepseek',
         model: 'deepseek-v4-pro',
         system_prompt: 'default',
+        review_model: 'deepseek-v4-flash',
+        reasoning_effort: 'high',
+        thinking: 'enabled',
+        yolo: false,
+        async: false,
+        auto_compact: true,
+        auto_compact_threshold: 0.7,
+        context_window: '1M',
       });
+      // temperature/max_tokens 默认不设置（模板中为注释示例，未激活）
+      expect(mgr.get('defaults.temperature')).toBeUndefined();
+      expect(mgr.get('defaults.max_tokens')).toBeUndefined();
     });
 
     it('取嵌套值', async () => {
@@ -88,6 +99,55 @@ describe('ConfigManager', () => {
     it('未加载时 get 返回 undefined', () => {
       const mgr = ConfigManager.getInstance(testDir);
       expect(mgr.get('defaults.model')).toBeUndefined();
+    });
+  });
+
+  describe('旧配置自动补全', () => {
+    it('已有 config.toml 缺失 defaults 键时自动补全（保留已有值）', async () => {
+      // 预置旧版 config.toml（只有 provider/model/system_prompt 三键）
+      const { writeFileSync, mkdirSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      mkdirSync(testDir, { recursive: true });
+      writeFileSync(join(testDir, 'config.toml'), [
+        '# 旧配置',
+        '[paths]',
+        'providers = "./providers.toml"',
+        'pricing = "./pricing.toml"',
+        'system_prompt = "./system-prompt.toml"',
+        'sessions = "./sessions"',
+        '[defaults]',
+        'provider = "deepseek"',
+        'model = "deepseek-v4-pro"',
+        'system_prompt = "default"',
+        '',
+      ].join('\n'));
+      // providers.toml 也要有（load 解析跳转引用）
+      writeFileSync(join(testDir, 'providers.toml'), 'deepseek = { base_url = "https://api.deepseek.com", api_key = "sk-old" }\n');
+
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+
+      // 缺失键被补全为默认值
+      expect(mgr.get('defaults.reasoning_effort')).toBe('high');
+      expect(mgr.get('defaults.thinking')).toBe('enabled');
+      expect(mgr.get('defaults.review_model')).toBe('deepseek-v4-flash');
+      expect(mgr.get('defaults.yolo')).toBe(false);
+      expect(mgr.get('defaults.async')).toBe(false);
+      expect(mgr.get('defaults.auto_compact')).toBe(true);
+      expect(mgr.get('defaults.auto_compact_threshold')).toBe(0.7);
+      expect(mgr.get('defaults.context_window')).toBe('1M');
+      // 已有值保留
+      expect(mgr.get('defaults.provider')).toBe('deepseek');
+      expect(mgr.get('defaults.model')).toBe('deepseek-v4-pro');
+      // temperature/max_tokens 不补全（保持未设置语义）
+      expect(mgr.get('defaults.temperature')).toBeUndefined();
+      expect(mgr.get('defaults.max_tokens')).toBeUndefined();
+
+      // 持久化验证：文件已写入补全键
+      const { readFileSync } = await import('node:fs');
+      const content = readFileSync(join(testDir, 'config.toml'), 'utf-8');
+      expect(content).toContain('reasoning_effort');
+      expect(content).toContain('auto_compact');
     });
   });
 
@@ -120,6 +180,35 @@ describe('ConfigManager', () => {
     });
   });
 
+  describe('system-prompt 快照', () => {
+    it('首次 load() 自动从项目根 system_prompt.txt 生成 system-prompt.toml', async () => {
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+
+      // 快照模板 default 存在且内容非空（来自项目根 system_prompt.txt）
+      const content = mgr.get<string>('systemPrompts.default.content');
+      expect(content).toBeDefined();
+      expect(content!.length).toBeGreaterThan(0);
+      expect(content!).toContain('Reasoning Effort');
+
+      // toml 文件确实落盘
+      const { access } = await import('node:fs/promises');
+      await expect(access(join(testDir, 'system-prompt.toml'))).resolves.toBeUndefined();
+    });
+
+    it('system-prompt.toml 缺失时 reload() 会重新生成快照', async () => {
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+
+      // 删除快照，模拟缺失
+      const { rm } = await import('node:fs/promises');
+      await rm(join(testDir, 'system-prompt.toml'), { force: true });
+
+      await mgr.reload();
+      expect(mgr.get<string>('systemPrompts.default.content')).toBeDefined();
+    });
+  });
+
   describe('reload() 热重载', () => {
     it('reload 后会读取文件的最新内容', async () => {
       const mgr = ConfigManager.getInstance(testDir);
@@ -147,6 +236,31 @@ describe('ConfigManager', () => {
       const dir = mgr.getSessionsDir();
       expect(dir).toContain('sessions');
       expect(dir).toContain(testDir);
+    });
+  });
+
+  describe('parseTokenSize()', () => {
+    it('纯数字原样返回', () => {
+      expect(parseTokenSize(5000)).toBe(5000);
+      expect(parseTokenSize(1_000_000)).toBe(1_000_000);
+    });
+
+    it('带单位写法（十进制：K=千 M=百万 G=十亿）', () => {
+      expect(parseTokenSize('1M')).toBe(1_000_000);
+      expect(parseTokenSize('256K')).toBe(256_000);
+      expect(parseTokenSize('1.5M')).toBe(1_500_000);
+      expect(parseTokenSize('2G')).toBe(2_000_000_000);
+    });
+
+    it('大小写与空白容错', () => {
+      expect(parseTokenSize('1m')).toBe(1_000_000);
+      expect(parseTokenSize(' 256k ')).toBe(256_000);
+    });
+
+    it('无法解析返回 undefined', () => {
+      expect(parseTokenSize(undefined)).toBeUndefined();
+      expect(parseTokenSize('abc')).toBeUndefined();
+      expect(parseTokenSize('')).toBeUndefined();
     });
   });
 });

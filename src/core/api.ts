@@ -30,6 +30,10 @@ export class ApiClient implements ModelProvider {
 	private mirrorUrl?: string;
 	/** 当前会话 ID（用于镜像请求的 X-Session-Id 头） */
 	private sessionId: string | null = null;
+	/** 请求超时（毫秒），默认 120s；chatStream 未显式传 timeoutMs 时使用 */
+	private timeoutMs: number;
+	/** 最大重试次数，默认 2；chatStream 未显式传 maxRetries 时使用 */
+	private maxRetries: number;
 
 	/**
 	 * @param baseUrl   API 基地址，如 "https://api.deepseek.com"
@@ -38,12 +42,25 @@ export class ApiClient implements ModelProvider {
 	 * @param mirrorUrl 请求镜像监听地址（可选）。设置后每次发 API 请求都会
 	 *                  同步把相同请求体 POST 给该地址，供监听进程原样保存。
 	 *                  镜像请求失败不影响主请求。
+	 * @param timeoutMs 请求超时（毫秒，默认 120_000）。仅作为 chatStream 的默认值，
+	 *                  调用方可传 options.timeoutMs 覆盖。
+	 * @param maxRetries 最大重试次数（默认 2）。仅作为 chatStream 的默认值，
+	 *                   调用方可传 options.maxRetries 覆盖。
 	 */
-	constructor(baseUrl: string, apiKey: string, defaultModel: string, mirrorUrl?: string) {
+	constructor(
+		baseUrl: string,
+		apiKey: string,
+		defaultModel: string,
+		mirrorUrl?: string,
+		timeoutMs = 120_000,
+		maxRetries = 2,
+	) {
 		this.baseUrl = baseUrl.replace(/\/+$/, '');
 		this.apiKey = apiKey;
 		this.defaultModel = defaultModel;
 		this.mirrorUrl = mirrorUrl?.replace(/\/+$/, '');
+		this.timeoutMs = timeoutMs;
+		this.maxRetries = maxRetries;
 	}
 
 	/** 切换默认模型 */
@@ -120,6 +137,15 @@ export class ApiClient implements ModelProvider {
 		if (options?.max_tokens !== undefined) {
 			body.max_tokens = options.max_tokens;
 		}
+		if (options?.top_p !== undefined) {
+			body.top_p = options.top_p;
+		}
+		if (options?.thinking !== undefined) {
+			body.thinking = options.thinking;
+		}
+		if (options?.reasoning_effort !== undefined) {
+			body.reasoning_effort = options.reasoning_effort;
+		}
 		if (options?.tools?.length) {
 			body.tools = options.tools;
 		}
@@ -174,8 +200,8 @@ export class ApiClient implements ModelProvider {
 		messages: Message[],
 		options?: StreamChatOptions,
 	): AsyncGenerator<StreamChunk> {
-		const timeoutMs = options?.timeoutMs ?? 120_000;
-		const maxRetries = options?.maxRetries ?? 2;
+		const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
+		const maxRetries = options?.maxRetries ?? this.maxRetries;
 		const externalSignal = options?.signal;
 
 		// 外部 signal 已 abort：直接抛出
@@ -190,7 +216,14 @@ export class ApiClient implements ModelProvider {
 		};
 		if (options?.temperature !== undefined) body.temperature = options.temperature;
 		if (options?.max_tokens !== undefined) body.max_tokens = options.max_tokens;
+		if (options?.top_p !== undefined) body.top_p = options.top_p;
+		if (options?.thinking !== undefined) body.thinking = options.thinking;
+		if (options?.reasoning_effort !== undefined) body.reasoning_effort = options.reasoning_effort;
 		if (options?.tools?.length) body.tools = options.tools;
+		// P0：流式末尾附带 usage 块（token 统计依赖 chunk.usage；默认开启，可显式关闭）
+		if (options?.includeUsage !== false) {
+			body.stream_options = { include_usage: true };
+		}
 
 		const url = `${this.baseUrl}${CHAT_ENDPOINT}`;
 

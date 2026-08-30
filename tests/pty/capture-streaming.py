@@ -150,7 +150,7 @@ def main():
 
     try:
         # ═══ 阶段 0: 等待 TUI 启动 ═══
-        time.sleep(0.6)
+        time.sleep(1.5)
         buf = read_all(master_fd, timeout=0.5)
         clean = save_frame(buf, 'frame-00-initial')
 

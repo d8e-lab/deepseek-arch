@@ -507,6 +507,67 @@ describe('ApiClient', () => {
       expect(body.max_tokens).toBe(100);
     });
 
+    it('流式请求默认携带 stream_options.include_usage 与可选生成参数', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        body: mockSSEStream([]),
+      });
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      for await (const _ of client.chatStream([{ role: 'user', content: 'test' }], {
+        top_p: 0.9,
+        thinking: { type: 'enabled' },
+        reasoning_effort: 'max',
+      })) {
+        // consume
+      }
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.stream_options).toEqual({ include_usage: true });
+      expect(body.top_p).toBe(0.9);
+      expect(body.thinking).toEqual({ type: 'enabled' });
+      expect(body.reasoning_effort).toBe('max');
+    });
+
+    it('includeUsage=false 时不发送 stream_options', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        body: mockSSEStream([]),
+      });
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      for await (const _ of client.chatStream([{ role: 'user', content: 'test' }], {
+        includeUsage: false,
+      })) {
+        // consume
+      }
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.stream_options).toBeUndefined();
+    });
+
+    it('非流式 chat 支持 thinking/reasoning_effort/top_p', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(successResponse()),
+      });
+      globalThis.fetch = mockFetch;
+
+      const client = createClient();
+      await client.chat([{ role: 'user', content: 'test' }], {
+        top_p: 0.8,
+        thinking: { type: 'disabled' },
+        reasoning_effort: 'low',
+      });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.top_p).toBe(0.8);
+      expect(body.thinking).toEqual({ type: 'disabled' });
+      expect(body.reasoning_effort).toBe('low');
+    });
+
     it('空响应体抛出错误', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,

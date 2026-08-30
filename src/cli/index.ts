@@ -11,7 +11,7 @@
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
-import { ConfigManager, DEFAULT_CONFIG_DIR } from '../core/config.js';
+import { ConfigManager, DEFAULT_CONFIG_DIR, parseTokenSize } from '../core/config.js';
 import { ApiClient } from '../core/api.js';
 import { MockProvider } from '../core/mock-provider.js';
 import { SessionManager } from '../core/session.js';
@@ -43,7 +43,10 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	const providerName = cfg.get<string>('defaults.provider') ?? 'deepseek';
 	const model = cfg.get<string>('defaults.model') ?? 'deepseek-v4-pro';
 	const baseUrl = cfg.get<string>(`providers.${providerName}.base_url`) ?? 'https://api.deepseek.com';
-	const apiKey = cfg.get<string>(`providers.${providerName}.api_key`) ?? '';
+	// api_key：配置优先，回退到 DEEPSEEK_API_KEY 环境变量
+	const apiKey = cfg.get<string>(`providers.${providerName}.api_key`)
+		?? process.env.DEEPSEEK_API_KEY
+		?? '';
 	// 审查模型：可从配置读取，默认用 flash（更便宜）
 	const reviewModel = cfg.get<string>('defaults.review_model') ?? 'deepseek-v4-flash';
 
@@ -53,19 +56,39 @@ async function createTuiConfig(): Promise<TuiConfig> {
 		baseUrl,
 		apiKey,
 		version: PACKAGE_VERSION,
+		systemPrompt: cfg.get<string>('defaults.system_prompt') ?? 'default',
 		reviewModel,
 	};
 }
 
 async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false, monitorUrl?: string, mock = false): Promise<SessionManager> {
+	const cfg = ConfigManager.getInstance();
+	// 供应商级超时/重试配置（可选，默认 120s / 2 次）
+	const timeoutMs = cfg.get<number>(`providers.${config.provider}.timeout_ms`) ?? 120_000;
+	const maxRetries = cfg.get<number>(`providers.${config.provider}.max_retries`) ?? 2;
 	const provider = mock
 		? new MockProvider('mock-chat', 50)
-		: new ApiClient(config.baseUrl, config.apiKey, config.model, monitorUrl);
-	const cfg = ConfigManager.getInstance();
+		: new ApiClient(config.baseUrl, config.apiKey, config.model, monitorUrl, timeoutMs, maxRetries);
 	const sessionsDir = cfg.getSessionsDir();
 	const storage = new Storage(sessionsDir);
 
 	const sessionMgr = new SessionManager(storage, provider, tools);
+
+	// 注入生成参数默认值（temperature/max_tokens/top_p/thinking/reasoning_effort）
+	const chatDefaults = {
+		...(cfg.get<number>('defaults.temperature') !== undefined ? { temperature: cfg.get<number>('defaults.temperature') } : {}),
+		...(cfg.get<number>('defaults.max_tokens') !== undefined ? { max_tokens: cfg.get<number>('defaults.max_tokens') } : {}),
+		...(cfg.get<string>('defaults.reasoning_effort') ? { reasoning_effort: cfg.get<string>('defaults.reasoning_effort') } : {}),
+		...(cfg.get<string>('defaults.thinking') ? { thinking: { type: cfg.get<string>('defaults.thinking') } as { type: 'enabled' | 'disabled' } } : {}),
+	};
+	sessionMgr.setChatDefaults(chatDefaults);
+
+	// 自动 compact 配置（默认开启 70%/1M；context_window 支持 "1M"/"256K" 等单位写法）
+	sessionMgr.setAutoCompact({
+		enabled: cfg.get<boolean>('defaults.auto_compact') ?? true,
+		threshold: cfg.get<number>('defaults.auto_compact_threshold') ?? 0.7,
+		contextWindow: parseTokenSize(cfg.get<number | string>('defaults.context_window')) ?? 1_000_000,
+	});
 
 	// 注入子代理执行器（懒绑定，解决循环依赖）
 	setSubagentRunner((name, task) => sessionMgr.runSubagent(name, task));
@@ -77,6 +100,8 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	sessionMgr.setSubagentAsync(asyncMode);
 
 	// 设置 system prompt
+	// 来源：system-prompt.toml 模板（ConfigManager.load() 启动时已保证存在——
+	// 缺失时从项目根 system_prompt.txt 生成快照，见 ensureSystemPromptSnapshot）
 	const defaultPrompt = cfg.get<string>('defaults.system_prompt') ?? 'default';
 	const sysContent = cfg.get<string>(`systemPrompts.${defaultPrompt}.content`);
 	if (sysContent) {
@@ -92,6 +117,9 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 			role: 'system',
 			content: sysContent + '\n' + envContext + listingSection,
 		});
+	} else {
+		// 模板缺失（defaults.system_prompt 指向了未定义的模板名）→ 提示但不注入
+		process.stderr.write(`[warn] system prompt 模板 "${defaultPrompt}" 未定义于 system-prompt.toml，本次未注入 system prompt\r\n`);
 	}
 
 	return sessionMgr;
@@ -120,7 +148,10 @@ program
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
 	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
-			const asyncMode = options.async ?? false;
+			// YOLO / async：CLI 参数优先，回退到配置文件 defaults（重启保持）
+			const cfg = ConfigManager.getInstance();
+			const yolo = options.yolo ?? cfg.get<boolean>('defaults.yolo') ?? false;
+			const asyncMode = options.async ?? cfg.get<boolean>('defaults.async') ?? false;
 			const debug = options.debug ?? false;
 			// 请求镜像监听地址：CLI 参数优先，回退到环境变量
 			const monitorUrl = options.monitor ?? process.env.DEEPSEEK_API_MONITOR_URL;
@@ -155,7 +186,7 @@ program
 					process.exit(1);
 				}
 				await sessionMgr.resumeSession(session.meta.id);
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo, options.mock);
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock);
 				if (options.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -167,7 +198,7 @@ program
 			}
 
 			// 新会话
-			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), options.yolo, options.mock);
+			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock);
 			if (options.selfInteraction) {
 				app.setSelfInteraction(true);
 			}
@@ -222,12 +253,13 @@ program
 	.description('List all sessions or resume a specific one')
 	.option('--browser', 'show browser window (instead of headless)')
 	.option('--cdp <url>', 'connect to host browser via CDP')
+	.option('--yolo', 'skip all tool confirmations (auto-approve edit/shell)')
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
 	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
 	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; yolo?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
@@ -250,13 +282,15 @@ program
 				}
 
 				const tuiConfig = await createTuiConfig();
-				const asyncMode = options?.async ?? false;
+				const cfg = ConfigManager.getInstance();
+				const yolo = options?.yolo ?? cfg.get<boolean>('defaults.yolo') ?? false;
+				const asyncMode = options?.async ?? cfg.get<boolean>('defaults.async') ?? false;
 				const debug = options?.debug ?? false;
 				const tools = loadMasterTools(debug, options?.selfInteraction);
 				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
 				await sessionMgr.resumeSession(session.meta.id);
 
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), undefined, options?.mock);
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock);
 				if (options?.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -314,12 +348,15 @@ program
 			}
 
 			const tuiConfig = await createTuiConfig();
+			const cfg = ConfigManager.getInstance();
+			const yolo = options?.yolo ?? cfg.get<boolean>('defaults.yolo') ?? false;
+			const asyncMode = options?.async ?? cfg.get<boolean>('defaults.async') ?? false;
 			const debug = options?.debug ?? false;
 			const tools = loadMasterTools(debug, options?.selfInteraction);
-			const sessionMgr = await createSessionManager(tuiConfig, tools, undefined, monitorUrl, options?.mock);
+			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
 			await sessionMgr.resumeSession(session.meta.id);
 
-			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), undefined, options?.mock);
+			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock);
 			if (options?.selfInteraction) {
 				app.setSelfInteraction(true);
 			}
@@ -327,6 +364,38 @@ program
 				setCaptureFn(() => app.captureScreen());
 			}
 			await app.start(session);
+		} catch (err: any) {
+			console.error('Failed:', err?.message ?? err);
+			process.exit(1);
+		}
+	});
+
+// ─── init 子命令 ─────────────────────────────────
+// 显式初始化/迁移配置：生成缺失的 config.toml/providers.toml/pricing.toml，
+// 自动补全 defaults 缺失键；--force 备份并重新生成 config.toml。
+
+program
+	.command('init')
+	.description('Initialize or migrate configuration files (config.toml/providers.toml/pricing.toml)')
+	.option('-f, --force', 'backup and regenerate config.toml from default template')
+	.action(async (options: { force?: boolean }) => {
+		try {
+			const cfg = ConfigManager.getInstance();
+			const report = await cfg.init(!!options.force);
+			console.log(`Config directory: ${report.configDir}`);
+			if (report.forceBackup) console.log(`Backup created: ${report.forceBackup}`);
+			if (report.created) {
+				console.log('config.toml: created from default template');
+			} else {
+				console.log('config.toml: exists (defaults checked)');
+			}
+			if (report.addedDefaults.length > 0) {
+				console.log(`Added default keys: ${report.addedDefaults.join(', ')}`);
+			}
+			for (const f of report.createdFiles) {
+				console.log(`Created missing file: ${f}`);
+			}
+			console.log('Next: set your API key in providers.toml, then run: deepseek-arch chat');
 		} catch (err: any) {
 			console.error('Failed:', err?.message ?? err);
 			process.exit(1);
@@ -380,7 +449,7 @@ function generateBashCompletion(): void {
 		'',
 		"\t# 第一级子命令",
 		"\tif [[ " + D + "cword -eq 1 ]]; then",
-		"\t\tCOMPREPLY=($(compgen -W \"chat resume clear completion\" -- \"" + D + "cur\"))",
+		"\t\tCOMPREPLY=($(compgen -W \"chat resume clear init completion\" -- \"" + D + "cur\"))",
 		"\t\treturn",
 		"\tfi",
 		'',
@@ -388,12 +457,12 @@ function generateBashCompletion(): void {
 		"\tcase \"" + D + "{words[1]}\" in",
 		"\t\tchat)",
 		"\t\t\tif [[ \"" + D + "cur\" == -* ]]; then",
-		"\t\t\t\tCOMPREPLY=($(compgen -W \"--resume --yolo --browser --cdp --async\" -- \"" + D + "cur\"))",
+		"\t\t\t\tCOMPREPLY=($(compgen -W \"--resume --yolo --browser --cdp --async --debug --self-interaction --mock --monitor\" -- \"" + D + "cur\"))",
 		"\t\t\tfi",
 		"\t\t\t;;",
 		"\t\tresume)",
 		"\t\t\tif [[ \"" + D + "cur\" == -* ]]; then",
-		"\t\t\t\tCOMPREPLY=($(compgen -W \"--browser --cdp --async\" -- \"" + D + "cur\"))",
+		"\t\t\t\tCOMPREPLY=($(compgen -W \"--browser --cdp --yolo --async --debug --self-interaction --mock --monitor\" -- \"" + D + "cur\"))",
 		"\t\t\tfi",
 		"\t\t\t;;",
 		"\t\tcompletion)",
@@ -439,13 +508,22 @@ function generateZshCompletion(): void {
 		"\t\t\t\t\t\t'--yolo[Skip all tool confirmations]' \\",
 		"\t\t\t\t\t\t'--browser[Show browser window]' \\",
 		"\t\t\t\t\t\t'--cdp=[Connect to browser via CDP]:url' \\",
-		"\t\t\t\t\t\t'--async[Async subagent mode]'",
+		"\t\t\t\t\t\t'--async[Async subagent mode]' \\",
+		"\t\t\t\t\t\t'--debug[Enable TUI debug tools]' \\",
+		"\t\t\t\t\t\t'--self-interaction[Enable TUI session PTY tools]' \\",
+		"\t\t\t\t\t\t'--mock[Use MockProvider]' \\",
+		"\t\t\t\t\t\t'--monitor=[Mirror API requests]:url'",
 		"\t\t\t\t\t;;",
 		"\t\t\t\tresume)",
 		"\t\t\t\t\t_arguments \\",
 		"\t\t\t\t\t\t'--browser[Show browser window]' \\",
 		"\t\t\t\t\t\t'--cdp=[Connect to browser via CDP]:url' \\",
-		"\t\t\t\t\t\t'--async[Async subagent mode]'",
+		"\t\t\t\t\t\t'--yolo[Skip all tool confirmations]' \\",
+		"\t\t\t\t\t\t'--async[Async subagent mode]' \\",
+		"\t\t\t\t\t\t'--debug[Enable TUI debug tools]' \\",
+		"\t\t\t\t\t\t'--self-interaction[Enable TUI session PTY tools]' \\",
+		"\t\t\t\t\t\t'--mock[Use MockProvider]' \\",
+		"\t\t\t\t\t\t'--monitor=[Mirror API requests]:url'",
 		"\t\t\t\t\t;;",
 		"\t\t\t\tcompletion)",
 		"\t\t\t\t\t_arguments '1:shell type:(bash zsh)'",

@@ -55,11 +55,11 @@ import { isInteractiveCommand } from '../tools/utils.js';
 /** 输入框最大可见行数 */
 const MAX_INPUT_ROWS = 5;
 
-/** 可选模型列表 */
-const AVAILABLE_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
+/** 可选模型列表（运行时从配置动态生成，见 TuiApp 构造函数；此为兜底） */
+const FALLBACK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
 /** 可用命令列表 */
-const AVAILABLE_COMMANDS = ['/model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/compact', '/exit'];
+const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/review_model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/compact', '/exit'];
 
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
@@ -71,6 +71,8 @@ export class TuiApp {
 	private tools: Tool[];
 	private yolo: boolean;
 	private reviewModel?: string;
+	/** 可选模型列表（从配置 pricing/providers 动态生成） */
+	private availableModels: string[] = FALLBACK_MODELS;
 	/** 子代理异步模式 */
 	private asyncMode = false;
 	private conversation: ConversationView;
@@ -90,10 +92,18 @@ export class TuiApp {
 	private lastVisibleInputRows = 1;
 	/** 上次渲染后的光标所在输入行号（0-based，用于下次回到起点） */
 	private lastCursorDisplayRow = 0;
+	/** 上次渲染的底部区域总行数（命令结果区 + 输入区）；用于判断区域是否在屏 */
+	private lastBottomRows = 0;
+	/** 上次渲染的命令结果区行数；与 lastCursorDisplayRow 构成回到区域顶部的上移基准 */
+	private lastCmdRows = 0;
 	/** 命令补全建议列表的行数（用于清理） */
 	private suggestionLinesCount = 0;
 	/** 双工交互：流式输出期间用户 Enter 排入的待发送消息（中断当前输出后发送） */
 	private nextMessage: string | null = null;
+	/** 命令结果区：最近一次 / 命令的输出（固定显示在输入区下方，完整保留，发送消息后清空） */
+	private commandResultLines: string[] = [];
+	/** 命令执行期间输出捕获标志（true 时 cmdOut 写入 commandResultLines 而非 scrollback） */
+	private commandResultActive = false;
 	/** 当前轮完整 think 内容（Ctrl+O 查看完整思考用） */
 	private fullThink: string[] = [];
 	/** think 是否已折叠（超出可见行数） */
@@ -106,6 +116,20 @@ export class TuiApp {
 	private readonly MAX_VISIBLE_THINK = 5;
 	/** 全屏浏览视图是否激活（Ctrl+O） */
 	private viewerActive = false;
+	/** 视图模式：conversation（Ctrl+O 对话浏览）| subagents（Ctrl+T 子代理总览） */
+	private viewerMode: 'conversation' | 'subagents' = 'conversation';
+	/** subagents 视图：当前选中 subagent 索引 */
+	private viewerSubagentIndex = 0;
+	/** subagents 视图：底部输入缓冲（发送给选中 subagent） */
+	private subagentViewInput = '';
+	/** subagents 视图：实时刷新定时器 */
+	private subagentViewTimer: ReturnType<typeof setInterval> | null = null;
+	/** subagents 视图：发送中标志（阻止并发 send） */
+	private subagentViewBusy = false;
+	/** subagents 视图：最近一次发送错误（显示在底部） */
+	private subagentViewError: string | null = null;
+	/** subagents 视图：vim 式输入模式（false=命令模式：n/p/数字导航；true=insert：字符进输入缓冲） */
+	private subagentViewInsertMode = false;
 	/** 视图滚动偏移（行） */
 	private viewerScrollOffset = 0;
 	/** 视图预渲染行 */
@@ -151,6 +175,14 @@ export class TuiApp {
 		this.asyncMode = sessionMgr.getSubagentAsync();
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
+
+		// 模型候选列表：从配置 pricing.<provider> 键动态生成（含当前模型兜底）
+		if (this.configMgr) {
+			const pricing = this.configMgr.get<Record<string, Record<string, unknown>>>(`pricing.${config.provider}`);
+			const configured = pricing ? Object.keys(pricing) : [];
+			const merged = [...new Set([...configured, config.model, ...FALLBACK_MODELS])];
+			this.availableModels = merged.length > 0 ? merged : FALLBACK_MODELS;
+		}
 	}
 
 	/** 设置自我交互模式（在 start() 之前调用） */
@@ -360,14 +392,18 @@ export class TuiApp {
 		// 仅空闲态重绘输入区域（流式/确认态的输出已在 scrollback 中）
 		if (this.state !== AppState.IDLE) return;
 		// 回到输入区域起点 → 清到屏底 → 重画 → 重渲染
-		if (this.lastCursorDisplayRow > 0) {
-			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		// 上移基准：光标在输入区行（相对区域顶部 lastCursorDisplayRow）；命令结果区在输入区下方
+		const upRows = this.lastCursorDisplayRow;
+		if (upRows > 0) {
+			process.stdout.write(`\x1b[${upRows}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
 		this.drawInputArea();
 		process.stdout.write('\r');
 		this.lastCursorDisplayRow = 0;
+		this.lastCmdRows = 0;
+		this.lastBottomRows = 0;
 		this.renderInput();
 	};
 
@@ -388,22 +424,38 @@ export class TuiApp {
 			await this.waitForViewerClose();
 			return;
 		}
+		// 视图关闭后残留的排队消息（视图期间/前排队的普通文本）：
+		// 由主循环统一发送（closeViewer 不再 fire-and-forget 启动流，避免双流并发）
+		if (this.nextMessage) {
+			const next = this.nextMessage;
+			this.nextMessage = null;
+			this.clearCommandResult(false); // 输入区已重建，不重绘避免错位
+			this.collapseInputArea();       // 收起重建的输入区（closeViewer 已重置 lastCmdRows）
+			process.stdout.write(green('[You] ') + next + '\r\n\r\n');
+			await this.sendMessageStream(next);
+			// 视图可能在发送期间打开：跳过 UI 收尾（主循环等待视图关闭后重新进入）
+			if (this.viewerActive) return;
+			this.printSeparator();
+			return;
+		}
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
 
-		// 画输入区域
-		this.drawInputArea();
-		process.stdout.write('\r');
-
 		this.input.clear();
+		// 重建底部区域：输入区 + 命令结果区（若仍有内容，如未发送消息的清空场景），
+		// 避免输出结束后命令结果区消失（drawInputArea 只画输入区）
+		this.renderInput();
 		let content = await this.readUserInput();
 
 		// 清除输入区域：回到起点（无历史记录时即当前行），清到屏底
-		if (this.lastCursorDisplayRow > 0) {
-			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		const upRows = this.lastCursorDisplayRow;
+		if (upRows > 0) {
+			process.stdout.write(`\x1b[${upRows}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
+		this.lastCmdRows = 0;
+		this.lastBottomRows = 0;
 
 		if (content === null) {
 			this.running = false;
@@ -416,16 +468,21 @@ export class TuiApp {
 			if (!handled) {
 				// F-9：// 前缀转义——去掉一个 / 后按普通消息发送（如 "//usr/bin 在哪" → "/usr/bin 在哪"）
 				const sendContent = content.startsWith('//') ? content.slice(1) : content;
+				this.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
 				process.stdout.write(green('[You] ') + sendContent + '\r\n\r\n');
 				await this.sendMessageStream(sendContent);
 			}
 			// 视图可能在命令处理/输出期间打开：跳过 UI 收尾（视图接管）
 			if (this.viewerActive) return;
-			this.printSeparator();
+			// 命令执行完毕：清空输入区（命令文本已在 dispatchCommand 提交，避免残留显示/误操作）
+			this.input.clear();
+			// 命令结果区已渲染在底部：收起 → 写分隔线 → 重画底部（避免覆盖）
+			this.printSeparatorKeepBottom();
 			return;
 		}
 
 		// 打印用户消息（绿色）
+		this.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
 		process.stdout.write(green('[You] ') + content + '\r\n\r\n');
 
 		// 拼接待发送的 shell 上下文（仅模型可见）
@@ -454,14 +511,54 @@ export class TuiApp {
 			return false;
 		}
 
+		// 命令输出捕获：命令内的 cmdOut 写入命令结果区（固定底部、替换式刷新）
+		this.commandResultLines = [];
+		this.commandResultActive = true;
+		try {
+			return await this.dispatchCommand(content);
+		} finally {
+			this.commandResultActive = false;
+			// 渲染由调用方统一处理：
+			//  - inputCycle 命令路径 → printSeparatorKeepBottom（收起→分隔线→重画）
+			//  - handleCommandDuringStream（流式）→ renderCommandResultBar
+		}
+	}
+
+	/**
+	 * 流式期间执行 / 命令（全双工）：不中断当前输出，命令结果进命令结果区。
+	 * /compact 流式期间不可用（上下文状态冲突）；/exit 中断输出并退出。
+	 */
+	private async handleCommandDuringStream(content: string): Promise<void> {
+		if (content === '/compact') {
+			this.writeOutputLine(dim('(输出进行中，/compact 不可用，请等待完成后使用)'));
+			return;
+		}
+		if (content === '/exit') {
+			this.abortController?.abort();
+			this.nextMessage = null;
+			this.running = false;
+			return;
+		}
+		const handled = await this.handleCommand(content);
+		if (!handled) {
+			// // 转义 → 排队发送（输出结束后自动发送）
+			this.nextMessage = content.startsWith('//') ? content.slice(1) : content;
+		}
+		// 流式期间：命令结果区立即渲染（光标在输入区，上移重绘）
+		this.renderCommandResultBar();
+	}
+
+	/** 命令分派（handleCommand 内部：输出经 cmdOut 捕获到命令结果区） */
+	private async dispatchCommand(content: string): Promise<boolean> {
+
 		if (content.startsWith('/model')) {
 			const arg = content.slice(6).trim();
-			if (arg && AVAILABLE_MODELS.includes(arg)) {
+			if (arg && this.availableModels.includes(arg)) {
 				return await this.switchModel(arg);
 			}
 
 			// 交互式选择
-			const options: SelectOption<string>[] = AVAILABLE_MODELS.map((m) => ({
+			const options: SelectOption<string>[] = this.availableModels.map((m) => ({
 				label: m,
 				value: m,
 			}));
@@ -476,6 +573,18 @@ export class TuiApp {
 				return await this.switchModel(selected);
 			}
 			return true;
+		}
+
+		if (content.startsWith('/provider')) {
+			return await this.switchProvider(content.slice(9).trim());
+		}
+
+		if (content.startsWith('/system')) {
+			return await this.switchSystemPrompt(content.slice(7).trim());
+		}
+
+		if (content.startsWith('/review_model')) {
+			return await this.switchReviewModel(content.slice(13).trim());
 		}
 
 		if (content.startsWith('/help')) {
@@ -509,15 +618,15 @@ export class TuiApp {
 		}
 
 		if (content === '/exit') {
-			process.stdout.write(green('Goodbye!') + '\r\n');
+			this.cmdOut(green('Goodbye!'));
 			this.running = false;
 			return true;
 		}
 
 		// 未知命令 — 不再发送给模型，显示错误提示
 		const errMsg = `Unknown command: ${content.split(/\s+/)[0]}`;
-		process.stdout.write(red(errMsg) + '\r\n');
-		process.stdout.write(dim(`  Available: ${AVAILABLE_COMMANDS.join(', ')}`) + '\r\n');
+		this.cmdOut(red(errMsg));
+		this.cmdOut(dim(`  Available: ${AVAILABLE_COMMANDS.join(', ')}`));
 		return true;
 	}
 
@@ -530,8 +639,104 @@ export class TuiApp {
 			await this.configMgr.set('defaults.model', modelName);
 		}
 
-		process.stdout.write(green(`[Model switched: ${modelName}]`) + '\r\n');
+		this.cmdOut(green(`[Model switched: ${modelName}]`));
 		this.printHeader();
+		return true;
+	}
+
+	/**
+	 * /provider [name] — 切换默认供应商（写回 defaults.provider）
+	 * 无参数时列出可选供应商并交互选择；不存在的供应商会报错。
+	 */
+	private async switchProvider(name: string): Promise<boolean> {
+		if (!this.configMgr) {
+			this.cmdOut(red('[Provider switch unavailable: no config manager]'));
+			return true;
+		}
+
+		const providers = this.configMgr.get<Record<string, { base_url?: string }>>('providers') ?? {};
+		const names = Object.keys(providers);
+
+		if (!name) {
+			// 交互式选择
+			if (names.length === 0) {
+				this.cmdOut(red('No providers configured.'));
+				return true;
+			}
+			const options: SelectOption<string>[] = names.map((n) => ({ label: n, value: n }));
+			const selector = new Selector(options, terminalIO, 'Select a provider (↑↓ navigate, Enter confirm):');
+			const selected = await selector.select(
+				() => this.stdinHandler,
+				(h) => { this.stdinHandler = h; },
+			);
+			if (!selected) return true;
+			name = selected;
+		}
+
+		if (!providers[name]) {
+			this.cmdOut(red(`Provider "${name}" not found. Available: ${names.join(', ') || '(none)'}`));
+			return true;
+		}
+
+		this.config.provider = name;
+		await this.configMgr.set('defaults.provider', name);
+		this.cmdOut(green(`[Provider switched: ${name}]`));
+		this.printHeader();
+		return true;
+	}
+
+	/**
+	 * /system [name] — 切换 system prompt 模板（写回 defaults.system_prompt）
+	 * 无参数时列出模板；/system list 等价。
+	 */
+	private async switchSystemPrompt(name: string): Promise<boolean> {
+		if (!this.configMgr) {
+			this.cmdOut(red('[System prompt switch unavailable: no config manager]'));
+			return true;
+		}
+
+		const prompts = this.configMgr.get<Record<string, unknown>>('systemPrompts') ?? {};
+		const names = Object.keys(prompts);
+
+		if (!name || name === 'list') {
+			if (names.length === 0) {
+				this.cmdOut(dim('No system prompt templates configured.'));
+				return true;
+			}
+			this.cmdOut(yellow('System prompt templates:'));
+			for (const n of names) {
+				const marker = n === this.config.systemPrompt ? ' *' : '';
+				this.cmdOut(`  ${green(n)}${dim(marker)}`);
+			}
+			return true;
+		}
+
+		if (!prompts[name]) {
+			this.cmdOut(red(`System prompt "${name}" not found. Available: ${names.join(', ') || '(none)'}`));
+			return true;
+		}
+
+		this.config.systemPrompt = name;
+		await this.configMgr.set('defaults.system_prompt', name);
+		this.cmdOut(green(`[System prompt switched: ${name}]`));
+		this.printHeader();
+		return true;
+	}
+
+	/** /review_model [name] — 切换 YOLO 审查模型（写回 defaults.review_model） */
+	private async switchReviewModel(name: string): Promise<boolean> {
+		if (!name) {
+			const current = this.reviewModel ?? '(unset, default deepseek-v4-flash)';
+			this.cmdOut(dim(`Current review model: ${current}`));
+			this.cmdOut(dim('Usage: /review_model <model-name>'));
+			return true;
+		}
+
+		this.reviewModel = name;
+		if (this.configMgr) {
+			await this.configMgr.set('defaults.review_model', name);
+		}
+		this.cmdOut(green(`[Review model switched: ${name}]`));
 		return true;
 	}
 
@@ -539,11 +744,14 @@ export class TuiApp {
 	private showHelp(): true {
 		const cols = getTermSize().cols;
 		const w = Math.max(1, cols - 1);
-		process.stdout.write(yellow('Commands') + '\r\n');
-		process.stdout.write('─'.repeat(w) + '\r\n');
+		this.cmdOut(yellow('Commands'));
+		this.cmdOut('─'.repeat(w));
 
 		const cmds: [string, string][] = [
 			['/model [name]', 'Switch model (interactive picker if no arg)'],
+			['/provider [name]', 'Switch provider (interactive picker if no arg)'],
+			['/system [name]', 'List/switch system prompt template'],
+			['/review_model [name]', 'Show/set YOLO review model'],
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
 			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
@@ -558,7 +766,7 @@ export class TuiApp {
 		for (const [cmd, desc] of cmds) {
 			const line = `  ${green(cmd.padEnd(24))} ${dim(desc)}`;
 			// 截断到终端宽度避免 auto-wrap
-			process.stdout.write(line + '\r\n');
+			this.cmdOut(line);
 		}
 		return true;
 	}
@@ -571,16 +779,18 @@ export class TuiApp {
 
 		const cols = getTermSize().cols;
 		const w = Math.max(1, cols - 1);
-		process.stdout.write(yellow('Session Context') + '\r\n');
-		process.stdout.write('─'.repeat(w) + '\r\n');
+		this.cmdOut(yellow('Session Context'));
+		this.cmdOut('─'.repeat(w));
 
 		// 基本信息
-		process.stdout.write(`  Provider:  ${this.config.provider}\r\n`);
-		process.stdout.write(`  Model:     ${this.config.model}\r\n`);
-		process.stdout.write(`  YOLO mode: ${this.yolo ? green('ON') : dim('OFF')}\r\n`);
-		process.stdout.write(`  Subagent:  ${this.asyncMode ? green('async') : dim('sync')}\r\n`);
-		process.stdout.write(`  Session:   ${meta?.id ?? '—'}${meta?.title ? ' "' + dim(meta.title) + '"' : ''}\r\n`);
-		process.stdout.write(`  Turns:     ${meta?.turnCount ?? turns.length}\r\n`);
+		this.cmdOut(`  Provider:  ${this.config.provider}`);
+		this.cmdOut(`  Model:     ${this.config.model}`);
+		this.cmdOut(`  System:    ${this.config.systemPrompt ?? 'default'}`);
+		this.cmdOut(`  Review:    ${this.reviewModel ?? '(default flash)'}`);
+		this.cmdOut(`  YOLO mode: ${this.yolo ? green('ON') : dim('OFF')}`);
+		this.cmdOut(`  Subagent:  ${this.asyncMode ? green('async') : dim('sync')}`);
+		this.cmdOut(`  Session:   ${meta?.id ?? '—'}${meta?.title ? ' "' + dim(meta.title) + '"' : ''}`);
+		this.cmdOut(`  Turns:     ${meta?.turnCount ?? turns.length}`);
 
 		// Token 汇总
 		let totalPrompt = 0;
@@ -600,24 +810,24 @@ export class TuiApp {
 			}
 		}
 		const grandTotal = totalPrompt + totalCompletion;
-		process.stdout.write('  ── Token Usage ──\r\n');
-		process.stdout.write(`  Total:       ${grandTotal.toLocaleString()} tokens (${totalPrompt.toLocaleString()} in + ${totalCompletion.toLocaleString()} out)\r\n`);
+		this.cmdOut('  ── Token Usage ──');
+		this.cmdOut(`  Total:       ${grandTotal.toLocaleString()} tokens (${totalPrompt.toLocaleString()} in + ${totalCompletion.toLocaleString()} out)`);
 		if (totalCacheHit + totalCacheMiss > 0) {
 			const hitRate = totalCacheHit + totalCacheMiss > 0
 				? ((totalCacheHit / (totalCacheHit + totalCacheMiss)) * 100).toFixed(1)
 				: '0.0';
-			process.stdout.write(`  KV Cache:    ${totalCacheHit.toLocaleString()} hit / ${totalCacheMiss.toLocaleString()} miss (${hitRate}%)\r\n`);
+			this.cmdOut(`  KV Cache:    ${totalCacheHit.toLocaleString()} hit / ${totalCacheMiss.toLocaleString()} miss (${hitRate}%)`);
 		}
 
 		// 最后一轮详情
 		const lastUsage = meta?.lastUsage;
 		if (lastUsage && lastUsage.total_tokens > 0) {
-			process.stdout.write(`  Last turn:   ${lastUsage.total_tokens} tokens (${lastUsage.prompt_tokens} in + ${lastUsage.completion_tokens} out)\r\n`);
+			this.cmdOut(`  Last turn:   ${lastUsage.total_tokens} tokens (${lastUsage.prompt_tokens} in + ${lastUsage.completion_tokens} out)`);
 		}
 
 		// 累计费用
 		if (meta && meta.totalCost > 0) {
-			process.stdout.write(`  Total cost:  ¥${meta.totalCost.toFixed(4)}\r\n`);
+			this.cmdOut(`  Total cost:  ¥${meta.totalCost.toFixed(4)}`);
 		}
 
 		return true;
@@ -625,14 +835,12 @@ export class TuiApp {
 
 	/** /compact — 压缩会话上下文（摘要 + 文件重注入，开启新分代） */
 	private async compactSession(): Promise<boolean> {
-		process.stdout.write(dim('Compacting session context...') + '\r\n');
+		this.cmdOut(dim('Compacting session context...'));
 		try {
 			const result = await this.sessionMgr.compactContext();
-			process.stdout.write(
-				green(`[Compacted] → 新分代 #${result.gen}，压缩 ${result.compressedTurns} 轮，重注入 ${result.restoredFiles} 个文件 (${result.restoredTokens} tokens)`) + '\r\n',
-			);
+			this.cmdOut(green(`[Compacted] → 新分代 #${result.gen}，压缩 ${result.compressedTurns} 轮，重注入 ${result.restoredFiles} 个文件 (${result.restoredTokens} tokens)`));
 			if (result.summaryPreview) {
-				process.stdout.write(dim(`  summary: ${result.summaryPreview}`) + '\r\n');
+				this.cmdOut(dim(`  summary: ${result.summaryPreview}`));
 			}
 			// 刷新对话显示（含摘要轮折叠块）
 			const session = this.sessionMgr.getSession();
@@ -648,50 +856,50 @@ export class TuiApp {
 		return true;
 	}
 
-	/** /yolo — 切换 YOLO 模式 */
+	/** /yolo — 切换 YOLO 模式（写回 defaults.yolo） */
 	private async toggleYolo(): Promise<boolean> {
 		this.yolo = !this.yolo;
-		process.stdout.write(
-			green(`[YOLO mode: ${this.yolo ? 'ON' : 'OFF'}]`) +
-			dim(this.yolo ? '  (auto-approve tool executions)' : '  (confirm before tool execution)') +
-			'\r\n',
-		);
+		if (this.configMgr) {
+			try {
+				await this.configMgr.set('defaults.yolo', this.yolo);
+			} catch { /* 写回失败不阻塞切换 */ }
+		}
+		this.cmdOut(green(`[YOLO mode: ${this.yolo ? 'ON' : 'OFF'}]`) + dim(this.yolo ? '  (auto-approve tool executions)' : '  (confirm before tool execution)'));
 		return true;
 	}
 
-	/** /async — 切换子代理异步模式 */
+	/** /async — 切换子代理异步模式（写回 defaults.async） */
 	private async toggleAsync(): Promise<boolean> {
 		this.asyncMode = !this.asyncMode;
 		this.sessionMgr.setSubagentAsync(this.asyncMode);
-		process.stdout.write(
-			green(`[Subagent async: ${this.asyncMode ? 'ON' : 'OFF'}]`) +
-			dim(this.asyncMode
-				? '  (subagent_spawn returns [SPAWNED], use wait/list_subagents)'
-				: '  (subagent_spawn blocks until complete)') +
-			'\r\n',
-		);
+		if (this.configMgr) {
+			try {
+				await this.configMgr.set('defaults.async', this.asyncMode);
+			} catch { /* 写回失败不阻塞切换 */ }
+		}
+		this.cmdOut(green(`[Subagent async: ${this.asyncMode ? 'ON' : 'OFF'}]`) + dim(this.asyncMode
+			? '  (subagent_spawn returns [SPAWNED], use wait/list_subagents)'
+			: '  (subagent_spawn blocks until complete)'));
 		return true;
 	}
 
 	/** /subagent_cancel — 交互式选择要取消的子代理（含"全部取消"选项） */
 	private async cancelSubagentInteractive(): Promise<true> {
-		const store = this.sessionMgr.getSubagentStore();
-		const names = store.list();
-		if (names.length === 0) {
-			process.stdout.write(dim('No subagents to cancel.') + '\r\n');
+		const subs = this.sessionMgr.listSubagents();
+		if (subs.length === 0) {
+			this.cmdOut(dim('No subagents to cancel.'));
 			return true;
 		}
 
 		const options: SelectOption<string>[] = [
-			{ label: `全部取消 (${names.length} 个)`, value: '__all__' },
-			...names.map((n) => {
-				const rec = store.get(n);
-				const status = rec?.status ?? 'running';
+			{ label: `全部取消 (${subs.length} 个)`, value: '__all__' },
+			...subs.map((s) => {
+				const status = s.status;
 				const icon = status === 'running' ? '⏳'
 					: status === 'completed' ? '✓'
 					: status === 'cancelled' ? '✕'
 					: '✗';
-				return { label: `${n}  (${icon} ${status})`, value: n };
+				return { label: `${s.name}  (${icon} ${status})`, value: s.name };
 			}),
 		];
 
@@ -706,79 +914,46 @@ export class TuiApp {
 		if (selected) {
 			const cancelled = this.sessionMgr.cancelSubagent(selected === '__all__' ? 'all' : selected);
 			if (cancelled.length > 0) {
-				process.stdout.write(
-					green(`[cancelled] ${selected === '__all__' ? `全部 ${cancelled.length} 个子代理` : selected}`) + '\r\n',
-				);
+				this.cmdOut(green(`[cancelled] ${selected === '__all__' ? `全部 ${cancelled.length} 个子代理` : selected}`));
 			} else {
-				process.stdout.write(dim(`No running subagent matched.`) + '\r\n');
+				this.cmdOut(dim(`No running subagent matched.`));
 			}
 		}
 		return true;
 	}
 
-	/** /subagent [name] — 显示子代理详情 */
+	/** /subagent [name] — 显示子代理详情（resume 后历史记录已由 SessionManager 恢复） */
 	private async showSubagentDetail(name?: string): Promise<true> {
-		const store = this.sessionMgr.getSubagentStore();
-		let names = store.list();
+		const records = this.sessionMgr.listSubagentRecords();
 
-		// 如果内存中没有，尝试从存储加载历史记录
-		if (names.length === 0) {
-			const sessionId = this.sessionMgr.getSessionId();
-			if (sessionId && this.configMgr) {
-				try {
-					const { Storage } = await import('../core/storage.js');
-					const sessionsDir = this.configMgr.getSessionsDir();
-					if (sessionsDir) {
-						const storage = new Storage(sessionsDir);
-						names = await storage.listSubagentRecords(sessionId);
-						// 加载到内存 store 以便后续 get()
-						for (const n of names) {
-							const record = await storage.loadSubagentRecord(sessionId, n);
-							if (record) {
-								store.start(n, record.task);
-								for (const entry of record.entries) {
-									store.push(n, entry);
-								}
-								store.finish(n, record.result ?? '', record.status === 'cancelled' ? 'cancelled' : record.status === 'failed' ? 'failed' : 'completed');
-							}
-						}
-					}
-				} catch { /* 存储不可用，忽略 */ }
-			}
-		}
-
-		if (names.length === 0) {
-			process.stdout.write(dim('No subagents in current session.\r\n'));
+		if (records.length === 0) {
+			this.cmdOut(dim('No subagents in current session.'));
 			return true;
 		}
 
 		if (!name) {
 			// 无参数：列出所有子代理
-			process.stdout.write(yellow('Subagents') + '\r\n');
-			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
-			for (const n of names) {
-				const record = store.get(n);
-				if (!record) continue;
+			this.cmdOut(yellow('Subagents'));
+			this.cmdOut(dim('─'.repeat(40)));
+			for (const record of records) {
 				const icon = record.status === 'running' ? '⏳'
 					: record.status === 'completed' ? green('✓')
 					: red('✗');
 				const elapsed = record.endMs
 					? `${((record.endMs - record.startMs) / 1000).toFixed(1)}s`
 					: `${((Date.now() - record.startMs) / 1000).toFixed(1)}s`;
-				process.stdout.write(
-					`  ${icon} ${cyan(n)} ${dim(`(${record.status}, ${elapsed})`)}\r\n`,
-				);
-				process.stdout.write(dim(`     ${record.task.slice(0, 80)}${record.task.length > 80 ? '...' : ''}`) + '\r\n');
+				this.cmdOut(`  ${icon} ${cyan(record.name)} ${dim(`(${record.status}, ${elapsed})`)}`);
+				this.cmdOut(dim(`     ${record.task.slice(0, 80)}${record.task.length > 80 ? '...' : ''}`));
 			}
-			process.stdout.write(dim('─'.repeat(40)) + '\r\n');
-			process.stdout.write(dim(`/subagent <name> for full detail  |  ${names.length} total`) + '\r\n');
+			this.cmdOut(dim('─'.repeat(40)));
+			this.cmdOut(dim(`/subagent <name> for full detail  |  ${records.length} total`));
 			return true;
 		}
 
 		// 指定名称：显示完整输出
-		const record = store.get(name);
+		const record = this.sessionMgr.getSubagentRecord(name);
 		if (!record) {
-			process.stdout.write(red(`Subagent "${name}" not found. Use /subagent (no args) to list.`) + '\r\n');
+			this.cmdOut(red(`Subagent "${name}" not found. Use /subagent (no args) to list.`));
 			return true;
 		}
 
@@ -791,7 +966,7 @@ export class TuiApp {
 		const view = new SubagentRecordView();
 		const { cols } = getTermSize();
 		for (const line of view.render(record, cols)) {
-			process.stdout.write(line + '\r\n');
+			this.cmdOut(line);
 		}
 	}
 
@@ -878,6 +1053,8 @@ export class TuiApp {
 		this.printSeparator();
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
+		this.lastCmdRows = 0;
+		this.lastBottomRows = 0;
 		this.drawInputArea();
 		process.stdout.write('\r');
 	}
@@ -905,16 +1082,9 @@ export class TuiApp {
 			return;
 		}
 
-		// Ctrl+T: toggle subagent detail view
+		// Ctrl+T: 打开 subagent 总览视图（任意状态可用；流式期间 master 后台静默）
 		if (data === '\x14') {
-			if (this.state === AppState.IDLE) {
-				this.showSubagentDetail();
-				this.printSeparator();
-				this.lastVisibleInputRows = 1;
-				this.lastCursorDisplayRow = 0;
-				this.drawInputArea();
-				process.stdout.write('\r');
-			}
+			this.openSubagentsView();
 			return;
 		}
 
@@ -930,6 +1100,8 @@ export class TuiApp {
 				this.printSeparator();
 				this.lastVisibleInputRows = 1;
 				this.lastCursorDisplayRow = 0;
+				this.lastCmdRows = 0;
+				this.lastBottomRows = 0;
 				this.drawInputArea();
 				process.stdout.write('\r');
 				this.input.clear();
@@ -1039,7 +1211,11 @@ export class TuiApp {
 				}
 				if (this.input.isEmpty()) continue;
 				const content = this.input.buildSubmitContent();
-				this.stdinHandler = null;
+				// 双工模式（流式期间提交）：保留 handler 继续监听（否则键盘全部失效）；
+				// 主循环模式：置空让 inputCycle 接管
+				if (this.state !== AppState.STREAMING && this.state !== AppState.SENDING) {
+					this.stdinHandler = null;
+				}
 				resolve(content);
 				return;
 			}
@@ -1088,7 +1264,7 @@ export class TuiApp {
 					if (ch === '/') {
 						this.input.insertChar(ch);
 						this.input.enterCommandMode(AVAILABLE_COMMANDS);
-						this.renderInput();
+						// 不在此渲染：循环末尾统一 renderInput（避免双重渲染）
 						continue;
 					}
 				}
@@ -1116,7 +1292,10 @@ export class TuiApp {
 			// 已知命令：退出命令模式并提交
 			this.input.exitCommandMode();
 			this.clearSuggestions();
-			this.stdinHandler = null;
+			// 双工模式（流式期间 / 命令）：保留 handler 继续监听；主循环模式：置空让 inputCycle 接管
+			if (this.state !== AppState.STREAMING && this.state !== AppState.SENDING) {
+				this.stdinHandler = null;
+			}
 			resolve(content);
 		} else {
 			// 未知命令：显示错误，不清除输入，让用户继续编辑
@@ -1128,6 +1307,8 @@ export class TuiApp {
 			this.printSeparator();
 			this.lastVisibleInputRows = 1;
 			this.lastCursorDisplayRow = 0;
+			this.lastCmdRows = 0;
+			this.lastBottomRows = 0;
 			this.drawInputArea();
 			this.renderInput();
 		}
@@ -1207,21 +1388,50 @@ export class TuiApp {
 		this.input.setWrapWidth(availWidth);
 		hideCursor();
 
+		// 回到底部区域起始行（输入区顶部）：上移光标所在输入行偏移。
+		// 命令结果区/建议列表在输入区下方，被 CLEAR_TO_END 从输入区顶部清掉。
+		const upRows = this.lastCursorDisplayRow;
+		if (upRows > 0) {
+			process.stdout.write(`\x1b[${upRows}A`);
+		}
+		process.stdout.write('\r');
+		// 清除旧底部区域（输入区 + 命令结果区/建议列表：从区域顶部清到屏底）
+		process.stdout.write(CLEAR_TO_END);
+
+		this.drawBottomArea(cols, availWidth);
+	}
+
+	/**
+	 * 输出后/命令后：光标已在输出末尾（底部区域已收起），直接绘制底部区域。
+	 * 与 IDLE 态 renderInput 不同：不做上移（上移会跑到输出区里），
+	 * 从当前光标位置画命令结果区 + 输入区，使其视觉上固定在屏幕底部。
+	 */
+	private renderInputDuringStream(): void {
+		this.lastCursorDisplayRow = 0;
+		const cols = getTermSize().cols;
+		const availWidth = cols - 1;
+		this.input.setWrapWidth(availWidth);
+		hideCursor();
+		process.stdout.write(CLEAR_TO_END);
+		this.drawBottomArea(cols, availWidth);
+	}
+
+	/**
+	 * 绘制底部区域：输入区 + 命令结果区/建议列表（均固定在输入区下方，类似建议列表），
+	 * 不随对话滚动、不截断；结束后更新 lastBottomRows。
+	 * 命令模式：输入区下方显示建议列表（命令结果区暂隐藏，避免两者抢占空间）；
+	 * 非命令模式：输入区下方显示命令结果区（完整内容）。
+	 */
+	private drawBottomArea(cols: number, availWidth: number): void {
 		const inputLines = this.input.getDisplayLines();
 		const cursorPos = this.input.getCursorDisplayPos();
 		const visibleLines = Math.max(1, Math.min(inputLines.length, MAX_INPUT_ROWS));
 		const linesToDraw = Math.max(visibleLines, this.lastVisibleInputRows);
 
-		// 回到输入区域起始行：从上次光标位置向上移动
-		if (this.lastCursorDisplayRow > 0) {
-			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
-		}
-		process.stdout.write('\r');
-
 		const bgStart = this.shellMode ? PINK_BG_START : GRAY_BG_START;
 		const bgEnd = this.shellMode ? PINK_BG_END : GRAY_BG_END;
 
-		// 绘制每一行
+		// 1. 输入区（区域顶部）
 		for (let r = 0; r < linesToDraw; r++) {
 			clearLine();
 			if (r < inputLines.length && r < MAX_INPUT_ROWS) {
@@ -1234,45 +1444,81 @@ export class TuiApp {
 		}
 		this.lastVisibleInputRows = visibleLines;
 
-		// 绘制建议列表（在输入区域下方）
+		// 2. 输入区下方：命令模式 → 建议列表；否则 → 命令结果区（完整，不截断）
+		let belowRows = 0;
 		if (this.input.isInCommandMode()) {
 			const suggestIdx = this.input.getSuggestionIndex();
 			const suggestions = this.input.getSuggestions();
-			const oldSuggCount = this.suggestionLinesCount;
-			const totalSuggestLines = this.renderSuggestions(suggestions, suggestIdx, availWidth);
-			// 清除旧建议的残留行（新列表变短时）
-			if (totalSuggestLines < oldSuggCount) {
-				for (let r = totalSuggestLines; r < oldSuggCount; r++) {
+			// 旧建议列表已被上移后的 CLEAR_TO_END 清除，无需残留清理（\r\n 在屏底会触发滚动）
+			this.suggestionLinesCount = this.renderSuggestions(suggestions, suggestIdx, availWidth);
+			belowRows = this.suggestionLinesCount;
+		} else {
+			// 命令结果区：从输入区下一行开始画。每行按可用宽度折行（ANSI-aware），
+			// 避免超宽行触发终端自动 wrap 破坏物理行数/光标定位；完整显示不截断。
+			let physicalRows = 0;
+			for (const line of this.commandResultLines) {
+				const wrapped = wrapText(line, Math.max(1, availWidth - 2)); // '│ ' 前缀占 2 列
+				for (const wl of wrapped) {
 					process.stdout.write('\r\n');
 					clearLine();
-				}
-				// 回到新建议的最后一行
-				if (oldSuggCount - totalSuggestLines > 0) {
-					process.stdout.write(`\x1b[${oldSuggCount - totalSuggestLines}A`);
+					process.stdout.write(dim('│ ') + wl);
+					physicalRows++;
 				}
 			}
-			this.suggestionLinesCount = totalSuggestLines;
-		} else if (this.suggestionLinesCount > 0) {
-			// 非命令模式：清除旧的建议列表（光标当前在输入区末尾，清到屏底即可）
-			process.stdout.write(CLEAR_TO_END);
 			this.suggestionLinesCount = 0;
+			belowRows = physicalRows;
 		}
 
 		// 定位光标：
-		// for 循环结束后，光标在最后一行行首（每行末 \r\n 回到下行行首）。
-		// 如果有建议列表，光标在建议列表之后，需先上移建议行数回到输入区
-		//   1. \r 归零列
-		//   2. 上移 linesToDraw-1 行回到第一个输入行
-		//   3. 如果绘制了建议，上移建议行数回到输入区域下方
-		//   4. 下移 cursorPos.row，右移 cursorPos.col
+		// 绘制结束后光标在最后一行行首（下方区域最后一行不换行 → 光标在最后一行行尾，
+		// \r 归零列）。上移 (linesToDraw-1) + belowRows 回到输入区第一行，
+		// 再下移 cursorPos.row、右移 cursorPos.col 到输入区光标位置。
 		process.stdout.write('\r');
-		const totalUp = (linesToDraw - 1) + this.suggestionLinesCount;
-		if (totalUp > 0) process.stdout.write(`\x1b[${totalUp}A`);
+		const cursorUp = (linesToDraw - 1) + belowRows;
+		if (cursorUp > 0) process.stdout.write(`\x1b[${cursorUp}A`);
 		if (cursorPos.row > 0) process.stdout.write(`\x1b[${cursorPos.row}B`);
 		if (cursorPos.col > 0) process.stdout.write(`\x1b[${cursorPos.col}C`);
 
 		this.lastCursorDisplayRow = cursorPos.row;
+		// 记录底部区域总高度（输入区 + 下方区域），供区域是否在屏判断
+		this.lastBottomRows = linesToDraw + belowRows;
 		showCursor();
+	}
+
+	// ─── 命令结果区（固定底部，替换式刷新）───────────
+
+	/** 命令输出捕获：命令执行期间写入 commandResultLines（完整保留，不截断），否则写 scrollback */
+	private cmdOut(line: string): void {
+		if (this.commandResultActive) {
+			this.commandResultLines.push(line);
+			return;
+		}
+		this.writeOutputLine(line);
+	}
+
+	/** 重绘命令结果区 + 输入区（命令执行后调用）：
+	 *  - 底部区域已收起（IDLE 命令，光标在输出末尾）→ 直接画
+	 *  - 底部区域在屏（流式命令，光标在输入区）→ 上移旧高度重绘 */
+	private renderCommandResultBar(): void {
+		if (this.lastBottomRows > 0) {
+			this.renderInput();
+		} else {
+			this.renderInputDuringStream();
+		}
+	}
+
+	/** 收起底部 → 写分隔线 → 重画底部（命令执行后使用，避免分隔线覆盖命令结果区/输入区） */
+	private printSeparatorKeepBottom(): void {
+		this.collapseInputArea();
+		this.printSeparator();
+		this.renderInputDuringStream();
+	}
+
+	/** 清空命令结果区（发送普通消息后调用；redraw=false 时输入区已清除，避免错位重绘） */
+	private clearCommandResult(redraw = true): void {
+		if (this.commandResultLines.length === 0) return;
+		this.commandResultLines = [];
+		if (redraw) this.renderInput();
 	}
 
 	// ─── Bug 1：流式输出期间输入区固定在底部 ──────
@@ -1282,23 +1528,16 @@ export class TuiApp {
 	 * 输出开始前/每条输出行前调用，使输出从原输入区位置开始写。
 	 */
 	private collapseInputArea(): void {
-		if (this.lastCursorDisplayRow > 0) {
-			process.stdout.write(`\x1b[${this.lastCursorDisplayRow}A`);
+		// 收起底部区域（输入区 + 命令结果区/建议列表）：光标上移到底部区域起点（输入区顶部），清到屏底
+		const upRows = this.lastCursorDisplayRow;
+		if (upRows > 0) {
+			process.stdout.write(`\x1b[${upRows}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
-	}
-
-	/**
-	 * 输出期间：从当前光标位置（输出区末尾）重绘输入区。
-	 * 与 IDLE 态 renderInput 不同：强制 lastCursorDisplayRow=0，不做上移回退，
-	 * 直接在光标下方绘制输入区，使其视觉上固定在屏幕底部。
-	 */
-	private renderInputDuringStream(): void {
-		this.lastCursorDisplayRow = 0;
-		this.renderInput();
+		this.lastBottomRows = 0;
 	}
 
 	/** 输出一行到 scrollback，并在底部重绘输入区（Bug 1）；视图打开时缓冲（流式静默） */
@@ -1345,8 +1584,8 @@ export class TuiApp {
 	private updateThinkCollapseLine(): void {
 		if (!this.thinkFolded) return;
 		const dots = '·'.repeat(this.thinkAnimStep);
-		// 光标在输入区，上移到折叠提示行更新后移回
-		const up = (this.lastCursorDisplayRow ?? 0) + 1;
+		// 光标在输入区，上移到折叠提示行更新后移回（跨过命令结果区）
+		const up = (this.lastCursorDisplayRow ?? 0) + 1 + this.commandResultLines.length;
 		process.stdout.write(`\x1b[${up}A`);
 		process.stdout.write('\r');
 		clearLine();
@@ -1363,7 +1602,7 @@ export class TuiApp {
 			this.thinkAnimTimer = null;
 		}
 		const foldedCount = Math.max(0, this.fullThink.length - this.MAX_VISIBLE_THINK);
-		const up = (this.lastCursorDisplayRow ?? 0) + 1;
+		const up = (this.lastCursorDisplayRow ?? 0) + 1 + this.commandResultLines.length;
 		process.stdout.write(`\x1b[${up}A`);
 		process.stdout.write('\r');
 		clearLine();
@@ -1381,6 +1620,7 @@ export class TuiApp {
 	private openViewer(): void {
 		if (this.viewerActive) return;
 		this.viewerActive = true;
+		this.viewerMode = 'conversation';
 		// 记录打开时状态（退出时据此补渲染）
 		const session = this.sessionMgr.getSession();
 		this.viewerOpenTurnCount = session?.turns.length ?? 0;
@@ -1435,20 +1675,14 @@ export class TuiApp {
 		this.printSeparator();
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
+		this.lastCmdRows = 0;
+		this.lastBottomRows = 0;
 		this.drawInputArea();
 		process.stdout.write('\r');
 		this.renderInput();
-		// 输出已结束：恢复 IDLE 状态并发送视图期间/前排队的消息
+		// 输出已结束：恢复 IDLE 状态（nextMessage 保留，交给主循环 inputCycle 统一发送，避免双流并发）
 		if (!this.abortController) {
 			this.setState(AppState.IDLE);
-			const next = this.nextMessage;
-			this.nextMessage = null;
-			if (next) {
-				this.printSeparator();
-				process.stdout.write(green('[You] ') + next + '\r\n\r\n');
-				// fire-and-forget：sendMessageStream 内部处理异常与后续状态
-				void this.sendMessageStream(next);
-			}
 		}
 		// 通知等待中的 inputCycle：视图已关闭
 		this.viewerClosedResolve?.();
@@ -1605,6 +1839,286 @@ export class TuiApp {
 		else if (seq === 'D') this.viewerJumpTurn(-1);
 		else if (seq === '5~') this.viewerPageScroll(-1);
 		else if (seq === '6~') this.viewerPageScroll(1);
+	}
+
+	// ─── Ctrl+T Subagents 总览视图（全屏，实时刷新 + 视图内交互）────
+
+	/** 打开 Subagents 总览视图（任意状态可用；流式期间 master 后台静默缓冲） */
+	private openSubagentsView(): void {
+		if (this.viewerActive) return;
+		this.viewerActive = true;
+		this.viewerMode = 'subagents';
+		this.viewerSubagentIndex = 0;
+		this.subagentViewInput = '';
+		this.subagentViewBusy = false;
+		this.subagentViewError = null;
+		this.subagentViewInsertMode = false;
+		// 记录打开时状态（退出时据此补渲染 master 输出）
+		const session = this.sessionMgr.getSession();
+		this.viewerOpenTurnCount = session?.turns.length ?? 0;
+		this.viewerOpenedDuringStream = this.state !== AppState.IDLE;
+		this.viewerOpenedTurnDone = false;
+		this.viewerOpenedTurnLines = [];
+		this.streamLines = [];
+		// 暂停 think 折叠动画（其直接写 stdout，会污染主 buffer）
+		if (this.thinkAnimTimer) {
+			clearInterval(this.thinkAnimTimer);
+			this.thinkAnimTimer = null;
+		}
+		// 保存当前 stdinHandler，切换为视图 handler
+		this.viewerPrevHandler = this.stdinHandler;
+		this.viewerHandler = (data: string) => this.handleSubagentsViewInput(data);
+		this.stdinHandler = this.viewerHandler;
+		// 建立视图关闭等待（inputCycle 在视图打开时等待）
+		this.viewerClosedPromise = new Promise<void>((r) => { this.viewerClosedResolve = r; });
+		// 切换 alternate screen 并渲染
+		process.stdout.write('\x1b[?1049h');
+		this.renderSubagentsView();
+		// 实时刷新：500ms 重渲染（状态条 + 选中 subagent 输出）
+		this.subagentViewTimer = setInterval(() => {
+			if (this.viewerActive && this.viewerMode === 'subagents') {
+				this.renderSubagentsView();
+			}
+		}, 500);
+	}
+
+	/** 退出 Subagents 视图：恢复主 buffer + 补渲染 master 后台输出 + 恢复输入 */
+	private closeSubagentsView(): void {
+		if (!this.viewerActive || this.viewerMode !== 'subagents') return;
+		if (this.subagentViewTimer) {
+			clearInterval(this.subagentViewTimer);
+			this.subagentViewTimer = null;
+		}
+		this.viewerActive = false;
+		this.viewerMode = 'conversation';
+		// 恢复 stdinHandler（同 closeViewer 逻辑）
+		if (this.stdinHandler === this.viewerHandler) {
+			if (!this.viewerOpenedDuringStream) {
+				this.stdinHandler = this.viewerPrevHandler;
+			} else if (this.abortController) {
+				this.stdinHandler = this.viewerPrevHandler;
+			} else {
+				this.stdinHandler = null;
+			}
+		}
+		this.viewerHandler = null;
+		this.viewerPrevHandler = null;
+		// 恢复主 buffer（alternate screen 保存的主 TUI 内容还原）
+		process.stdout.write('\x1b[?1049l');
+		// 补渲染视图期间的静默输出（master 后台输出）
+		this.replayViewerOutput();
+		// 重建输入区
+		this.printSeparator();
+		this.lastVisibleInputRows = 1;
+		this.lastCursorDisplayRow = 0;
+		this.lastCmdRows = 0;
+		this.lastBottomRows = 0;
+		this.drawInputArea();
+		process.stdout.write('\r');
+		this.renderInput();
+		// 输出已结束：恢复 IDLE 状态（nextMessage 保留，交给主循环 inputCycle 统一发送，避免双流并发）
+		if (!this.abortController) {
+			this.setState(AppState.IDLE);
+		}
+		// 通知等待中的 inputCycle：视图已关闭
+		this.viewerClosedResolve?.();
+		this.viewerClosedResolve = null;
+		this.viewerClosedPromise = null;
+	}
+
+	/** 渲染 Subagents 总览视图（顶部状态条 + 选中 subagent 输出 + 底部输入） */
+	private renderSubagentsView(): void {
+		const { rows, cols } = getTermSize();
+		const subs = this.sessionMgr.listSubagents();
+
+		process.stdout.write('\x1b[2J\x1b[H');
+
+		if (subs.length === 0) {
+			process.stdout.write(yellow('═══ Subagents ═══') + '\r\n');
+			process.stdout.write(dim('(当前会话没有 subagent。master agent 可通过 subagent_spawn 创建。)') + '\r\n');
+			process.stdout.write('\r\n');
+			process.stdout.write(dim('  [q] 返回 master') + '\r\n');
+			return;
+		}
+
+		// 校正选中索引（subagent 可能被取消/移除）
+		if (this.viewerSubagentIndex >= subs.length) this.viewerSubagentIndex = 0;
+		const current = subs[this.viewerSubagentIndex];
+		const record = current.toRecord();
+
+		// ── 顶部状态条（无进度条：状态 + 耗时）──
+		const curIcon = current.status === 'running' ? '⏳'
+			: current.status === 'completed' ? '✓' : '✗';
+		process.stdout.write(yellow(`═══ Subagents (${subs.length}) — 选中: ${current.name} ${curIcon} ═══`) + '\r\n');
+		subs.forEach((s, i) => {
+			const icon = s.status === 'running' ? '●'
+				: s.status === 'completed' ? green('✓')
+				: red('✗');
+			const elapsed = ((Date.now() - s.startMs) / 1000).toFixed(1);
+			const marker = i === this.viewerSubagentIndex ? green('▸') : ' ';
+			const name = i === this.viewerSubagentIndex ? cyan(s.name) : s.name;
+			process.stdout.write(`  ${marker} ${icon} ${name} ${dim(`(${s.status}, ${elapsed}s)`)}` + '\r\n');
+		});
+		process.stdout.write(dim('─'.repeat(Math.max(20, cols - 2))) + '\r\n');
+
+		// ── 选中 subagent 输出（复用 SubagentRecordView，显示末尾 N 行 = 最新）──
+		const view = new SubagentRecordView();
+		const lines = view.render(record, cols);
+		const visible = Math.max(1, rows - 7); // 状态条区 + 提示行 + 输入行
+		const start = Math.max(0, lines.length - visible);
+		for (let r = 0; r < visible; r++) {
+			const idx = start + r;
+			process.stdout.write('\r\x1b[2K');
+			if (idx < lines.length) {
+				process.stdout.write(lines[idx].slice(0, cols - 1));
+			}
+			if (r < visible - 1) process.stdout.write('\r\n');
+		}
+
+		// ── 底部：快捷键提示 + 输入区 ──
+		process.stdout.write('\r\n\x1b[2K');
+		if (this.subagentViewInsertMode) {
+			process.stdout.write(dim(`  [Enter] 发送  [ESC] 退出输入`) + '\r\n');
+		} else {
+			process.stdout.write(dim(`  [n] next  [p] previous  [1-${Math.min(subs.length, 9)}] 跳转  [i] 输入  [q] 返回 master`) + '\r\n');
+		}
+		process.stdout.write('\x1b[2K');
+		if (this.subagentViewBusy) {
+			process.stdout.write(dim(`  ⏳ 正在发送给 ${current.name}... (ESC 中断)`));
+		} else if (this.subagentViewInsertMode) {
+			const prefix = `  > ${this.subagentViewInput}`;
+			process.stdout.write(green(prefix) + dim('  [Enter] 发送  [ESC] 退出'));
+			if (this.subagentViewError) {
+				process.stdout.write(red(`  ⚠ ${this.subagentViewError}`));
+			}
+		} else {
+			const prefix = `  > ${this.subagentViewInput}`;
+			process.stdout.write(dim(prefix) + dim('  按 [i] 进入输入模式'));
+			if (this.subagentViewError) {
+				process.stdout.write(red(`  ⚠ ${this.subagentViewError}`));
+			}
+		}
+	}
+
+	/** Subagents 视图输入处理：vim 式双模式
+	 *  - 命令模式（默认）：n/p/数字 切换、i 进入 insert、q/ESC 返回 master
+	 *  - insert 模式（按 i 进入）：字符进输入缓冲（n/p 等不再被捕捉），
+	 *    Enter 发送、ESC 退出到命令模式 */
+	private handleSubagentsViewInput(data: string): void {
+		const subs = this.sessionMgr.listSubagents();
+		for (let i = 0; i < data.length; i++) {
+			const ch = data[i];
+
+			// ESC 序列（方向键等暂不支持）——两种模式都跳过
+			if (ch === '\x1b') {
+				if (data[i + 1] !== '[') {
+					// 单独 ESC：insert → 退出到命令模式；命令模式 → 关闭视图
+					if (this.subagentViewBusy) {
+						this.closeSubagentsView();
+					} else if (this.subagentViewInsertMode) {
+						this.subagentViewInsertMode = false;
+						this.renderSubagentsView();
+					} else {
+						this.closeSubagentsView();
+					}
+					return;
+				}
+				i++;
+				while (i < data.length) {
+					const sc = data.charCodeAt(i);
+					i++;
+					if (sc >= 0x40 && sc <= 0x7e) break;
+				}
+				i--;
+				continue;
+			}
+
+			// 发送中：忽略其他输入（ESC 已处理）
+			if (this.subagentViewBusy) continue;
+
+			if (this.subagentViewInsertMode) {
+				// ── insert 模式：所有字符进输入缓冲，n/p 等不解释为命令 ──
+				if (ch === '\x0d' || ch === '\x0a') {
+					// Enter 发送给当前选中 subagent（发送后回命令模式，vim 式）
+					const text = this.subagentViewInput.trim();
+					this.subagentViewInput = '';
+					this.subagentViewInsertMode = false;
+					if (text) {
+						void this.sendToSubagentFromView(text);
+					} else {
+						this.renderSubagentsView();
+					}
+					continue;
+				}
+				if (ch === '\x7f' || ch === '\x08') {
+					// Backspace
+					this.subagentViewInput = this.subagentViewInput.slice(0, -1);
+					this.renderSubagentsView();
+					continue;
+				}
+				// 可打印字符（含中文等单码元字符）追加到输入缓冲
+				if (ch >= ' ') {
+					this.subagentViewInput += ch;
+					this.renderSubagentsView();
+					continue;
+				}
+				continue;
+			}
+
+			// ── 命令模式：导航键 + i 进入 insert ──
+			if (ch === 'q' || ch === 'Q') { this.closeSubagentsView(); return; }
+			if (ch === 'i' || ch === 'I') {
+				this.subagentViewInsertMode = true;
+				this.subagentViewError = null;
+				this.renderSubagentsView();
+				continue;
+			}
+			if (ch === 'n') {
+				if (subs.length > 0) {
+					this.viewerSubagentIndex = (this.viewerSubagentIndex + 1) % subs.length;
+					this.subagentViewError = null;
+					this.renderSubagentsView();
+				}
+				continue;
+			}
+			if (ch === 'p') {
+				if (subs.length > 0) {
+					this.viewerSubagentIndex = (this.viewerSubagentIndex - 1 + subs.length) % subs.length;
+					this.subagentViewError = null;
+					this.renderSubagentsView();
+				}
+				continue;
+			}
+			if (ch >= '1' && ch <= '9') {
+				const idx = Number(ch) - 1;
+				if (idx < subs.length) {
+					this.viewerSubagentIndex = idx;
+					this.subagentViewError = null;
+					this.renderSubagentsView();
+				}
+				continue;
+			}
+			// 命令模式：其他字符忽略（不进入输入缓冲）
+		}
+	}
+
+	/** 视图内：向选中 subagent 发送消息（同步等待续跑，期间视图显示发送中） */
+	private async sendToSubagentFromView(text: string): Promise<void> {
+		const subs = this.sessionMgr.listSubagents();
+		const current = subs[this.viewerSubagentIndex];
+		if (!current) { this.renderSubagentsView(); return; }
+		this.subagentViewBusy = true;
+		this.subagentViewError = null;
+		this.renderSubagentsView();
+		try {
+			await this.sessionMgr.sendToSubagent(current.name, text);
+			// 结果已追加到 record.entries/result，重渲染显示最新输出
+		} catch (err) {
+			this.subagentViewError = err instanceof Error ? err.message : String(err);
+		} finally {
+			this.subagentViewBusy = false;
+			this.renderSubagentsView();
+		}
 	}
 
 	/** 视图搜索输入模式（逐字符） */
@@ -1840,18 +2354,22 @@ export class TuiApp {
 		// 表格渲染器：检测 markdown 表格块并格式化为 box-drawing
 		const mdRenderer = new MarkdownTableRenderer();
 
-		// 双工交互：流式期间支持编辑输入框，Enter 中断当前输出并排队新消息（Bug 3）
+		// 全双工交互：流式期间输入框始终可编辑
+		// - / 命令：立即执行（不中断输出），输出进命令结果区（固定底部）
+		// - 普通文本 / !shell：排队（不中断当前输出），输出结束后自动发送
 		const prevHandler = this.stdinHandler;
 		this.stdinHandler = (data: string) => {
 			this.handleInputData(data, (content) => {
 				if (content === null) return; // Ctrl+C 已在 handleInputData 内处理（STREAMING 态 abort）
-				// 流式期间 Enter：/ 命令不可用（UI 状态冲突），普通文本排队发送
+				// 提交成功（Enter / 已知命令）：清空输入区，避免后续输入追加到已排队内容
+				this.input.clear();
 				if (content.startsWith('/')) {
-					this.writeOutputLine(dim('(输出进行中，命令不可用，请等待完成后使用)'));
+					// / 命令：内部渲染命令结果区（含输入区重绘）
+					void this.handleCommandDuringStream(content);
 					return;
 				}
-				// 中断当前输出，新消息在 finally 中发送
-				this.abortController?.abort();
+				// 排队（不中断当前输出，输出结束后在 finally 中自动发送）
+				this.renderCommandResultBar();
 				this.nextMessage = content;
 			});
 		};
@@ -2024,6 +2542,19 @@ export class TuiApp {
 						case 'subagent_update':
 							// 增量更新（detail view 通过 store 自行拉取，此处不渲染）
 							break;
+						case 'auto_compact': {
+							flush(true);
+
+							this.finalizeThinkCollapse();
+							const gen = event.compactGen;
+							const n = event.compressedTurns;
+							const files = event.restoredFiles;
+							const detail = gen !== undefined
+								? ` gen=${gen}, 压缩 ${n ?? 0} 轮, 恢复 ${files ?? 0} 个文件`
+								: '';
+							this.writeOutputLine(dim(`[Auto-compact] ${event.text ?? ''}${detail}`));
+							break;
+						}
 						case 'done':
 							flush(true);
 
@@ -2071,10 +2602,11 @@ export class TuiApp {
 				this.lastVisibleInputRows = 1;
 				this.lastCursorDisplayRow = 0;
 				this.setState(AppState.IDLE);
-				// 双工交互（Bug 3）：输出期间用户 Enter 排入的新消息 → 中断后继续发送
+				// 全双工：输出结束后自动发送排队消息（普通文本 / !shell / // 转义）
 				const next = this.nextMessage;
 				this.nextMessage = null;
 				if (next) {
+					this.clearCommandResult(false); // 输入区已收起，不重绘
 					this.printSeparator();
 					process.stdout.write(green('[You] ') + next + '\r\n\r\n');
 					await this.sendMessageStream(next);
