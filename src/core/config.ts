@@ -25,6 +25,7 @@ import type {
 	ProvidersConfig,
 	PricingConfig,
 	SystemPromptConfig,
+	ConfigDefaults,
 } from '../types/index.js';
 
 /** 配置目录（默认 ~/.deepseek-arch） */
@@ -269,11 +270,37 @@ export class ConfigManager {
 			appConfig = parsedConfig;
 		}
 
-		// 2. 每次启动：确保 system-prompt.toml 存在——缺失时从项目根 system_prompt.txt
+		// 2. 兼容旧配置：自动补全 defaults 缺失键（有明确默认值的键，与模板/README 一致）。
+		//    temperature/max_tokens 保持"未设置"（默认不传，交 API 侧默认；模板中为注释示例）。
+		//    已设置的值保留；写回会规范化文件（旧配置无注释可丢，新模板键齐不触发）。
+		const DEFAULT_DEFAULTS: Partial<ConfigDefaults> = {
+			review_model: 'deepseek-v4-flash',
+			reasoning_effort: 'high',
+			thinking: 'enabled',
+			yolo: false,
+			async: false,
+			auto_compact: true,
+			auto_compact_threshold: 0.7,
+			context_window: 1_000_000,
+		};
+		const defaults = appConfig.defaults ?? {};
+		const defaultsRecord = defaults as unknown as Record<string, unknown>;
+		const missing = Object.entries(DEFAULT_DEFAULTS).filter(
+			([k]) => defaultsRecord[k] === undefined,
+		);
+		if (missing.length > 0) {
+			for (const [k, v] of missing) {
+				defaultsRecord[k] = v;
+			}
+			appConfig.defaults = defaults;
+			await this.writeTomlFile(mainConfigPath, appConfig as unknown as Record<string, unknown>);
+		}
+
+		// 3. 每次启动：确保 system-prompt.toml 存在——缺失时从项目根 system_prompt.txt
 		//    生成快照（运行时一律以 toml 为准，不直接读 txt 或硬编码）
 		await this.ensureSystemPromptSnapshot(appConfig.paths.system_prompt);
 
-		// 3. 解析跳转引用
+		// 4. 解析跳转引用
 		const providersPath = this.resolvePath(appConfig.paths.providers);
 		const pricingPath = this.resolvePath(appConfig.paths.pricing);
 		const systemPromptPath = this.resolvePath(appConfig.paths.system_prompt);
@@ -284,7 +311,7 @@ export class ConfigManager {
 			this.loadTomlFile<SystemPromptConfig>(systemPromptPath),
 		]);
 
-		// 4. 合并
+		// 5. 合并
 		this.resolved = {
 			paths: appConfig.paths,
 			defaults: appConfig.defaults,

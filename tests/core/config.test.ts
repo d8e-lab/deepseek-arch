@@ -102,6 +102,55 @@ describe('ConfigManager', () => {
     });
   });
 
+  describe('旧配置自动补全', () => {
+    it('已有 config.toml 缺失 defaults 键时自动补全（保留已有值）', async () => {
+      // 预置旧版 config.toml（只有 provider/model/system_prompt 三键）
+      const { writeFileSync, mkdirSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      mkdirSync(testDir, { recursive: true });
+      writeFileSync(join(testDir, 'config.toml'), [
+        '# 旧配置',
+        '[paths]',
+        'providers = "./providers.toml"',
+        'pricing = "./pricing.toml"',
+        'system_prompt = "./system-prompt.toml"',
+        'sessions = "./sessions"',
+        '[defaults]',
+        'provider = "deepseek"',
+        'model = "deepseek-v4-pro"',
+        'system_prompt = "default"',
+        '',
+      ].join('\n'));
+      // providers.toml 也要有（load 解析跳转引用）
+      writeFileSync(join(testDir, 'providers.toml'), 'deepseek = { base_url = "https://api.deepseek.com", api_key = "sk-old" }\n');
+
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+
+      // 缺失键被补全为默认值
+      expect(mgr.get('defaults.reasoning_effort')).toBe('high');
+      expect(mgr.get('defaults.thinking')).toBe('enabled');
+      expect(mgr.get('defaults.review_model')).toBe('deepseek-v4-flash');
+      expect(mgr.get('defaults.yolo')).toBe(false);
+      expect(mgr.get('defaults.async')).toBe(false);
+      expect(mgr.get('defaults.auto_compact')).toBe(true);
+      expect(mgr.get('defaults.auto_compact_threshold')).toBe(0.7);
+      expect(mgr.get('defaults.context_window')).toBe(1_000_000);
+      // 已有值保留
+      expect(mgr.get('defaults.provider')).toBe('deepseek');
+      expect(mgr.get('defaults.model')).toBe('deepseek-v4-pro');
+      // temperature/max_tokens 不补全（保持未设置语义）
+      expect(mgr.get('defaults.temperature')).toBeUndefined();
+      expect(mgr.get('defaults.max_tokens')).toBeUndefined();
+
+      // 持久化验证：文件已写入补全键
+      const { readFileSync } = await import('node:fs');
+      const content = readFileSync(join(testDir, 'config.toml'), 'utf-8');
+      expect(content).toContain('reasoning_effort');
+      expect(content).toContain('auto_compact');
+    });
+  });
+
   describe('set() 配置持久化', () => {
     it('写入并持久化 defaults 段', async () => {
       const mgr = ConfigManager.getInstance(testDir);
