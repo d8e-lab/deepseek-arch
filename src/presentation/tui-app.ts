@@ -424,6 +424,20 @@ export class TuiApp {
 			await this.waitForViewerClose();
 			return;
 		}
+		// 视图关闭后残留的排队消息（视图期间/前排队的普通文本）：
+		// 由主循环统一发送（closeViewer 不再 fire-and-forget 启动流，避免双流并发）
+		if (this.nextMessage) {
+			const next = this.nextMessage;
+			this.nextMessage = null;
+			this.clearCommandResult(false); // 输入区已重建，不重绘避免错位
+			this.collapseInputArea();       // 收起重建的输入区（closeViewer 已重置 lastCmdRows）
+			process.stdout.write(green('[You] ') + next + '\r\n\r\n');
+			await this.sendMessageStream(next);
+			// 视图可能在发送期间打开：跳过 UI 收尾（主循环等待视图关闭后重新进入）
+			if (this.viewerActive) return;
+			this.printSeparator();
+			return;
+		}
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
 
@@ -1196,7 +1210,11 @@ export class TuiApp {
 				}
 				if (this.input.isEmpty()) continue;
 				const content = this.input.buildSubmitContent();
-				this.stdinHandler = null;
+				// 双工模式（流式期间提交）：保留 handler 继续监听（否则键盘全部失效）；
+				// 主循环模式：置空让 inputCycle 接管
+				if (this.state !== AppState.STREAMING && this.state !== AppState.SENDING) {
+					this.stdinHandler = null;
+				}
 				resolve(content);
 				return;
 			}
@@ -1273,7 +1291,10 @@ export class TuiApp {
 			// 已知命令：退出命令模式并提交
 			this.input.exitCommandMode();
 			this.clearSuggestions();
-			this.stdinHandler = null;
+			// 双工模式（流式期间 / 命令）：保留 handler 继续监听；主循环模式：置空让 inputCycle 接管
+			if (this.state !== AppState.STREAMING && this.state !== AppState.SENDING) {
+				this.stdinHandler = null;
+			}
 			resolve(content);
 		} else {
 			// 未知命令：显示错误，不清除输入，让用户继续编辑
@@ -1657,18 +1678,9 @@ export class TuiApp {
 		this.drawInputArea();
 		process.stdout.write('\r');
 		this.renderInput();
-		// 输出已结束：恢复 IDLE 状态并发送视图期间/前排队的消息
+		// 输出已结束：恢复 IDLE 状态（nextMessage 保留，交给主循环 inputCycle 统一发送，避免双流并发）
 		if (!this.abortController) {
 			this.setState(AppState.IDLE);
-			const next = this.nextMessage;
-			this.nextMessage = null;
-			if (next) {
-				this.clearCommandResult(false); // 输入区已重建，不重绘避免错位
-				this.printSeparator();
-				process.stdout.write(green('[You] ') + next + '\r\n\r\n');
-				// fire-and-forget：sendMessageStream 内部处理异常与后续状态
-				void this.sendMessageStream(next);
-			}
 		}
 		// 通知等待中的 inputCycle：视图已关闭
 		this.viewerClosedResolve?.();
@@ -1901,17 +1913,9 @@ export class TuiApp {
 		this.drawInputArea();
 		process.stdout.write('\r');
 		this.renderInput();
-		// 输出已结束：恢复 IDLE 状态并发送视图期间/前排队的消息
+		// 输出已结束：恢复 IDLE 状态（nextMessage 保留，交给主循环 inputCycle 统一发送，避免双流并发）
 		if (!this.abortController) {
 			this.setState(AppState.IDLE);
-			const next = this.nextMessage;
-			this.nextMessage = null;
-			if (next) {
-				this.clearCommandResult(false);
-				this.printSeparator();
-				process.stdout.write(green('[You] ') + next + '\r\n\r\n');
-				void this.sendMessageStream(next);
-			}
 		}
 		// 通知等待中的 inputCycle：视图已关闭
 		this.viewerClosedResolve?.();
@@ -2317,11 +2321,15 @@ export class TuiApp {
 		this.stdinHandler = (data: string) => {
 			this.handleInputData(data, (content) => {
 				if (content === null) return; // Ctrl+C 已在 handleInputData 内处理（STREAMING 态 abort）
+				// 提交成功（Enter / 已知命令）：清空输入区，避免后续输入追加到已排队内容
+				this.input.clear();
 				if (content.startsWith('/')) {
+					// / 命令：内部渲染命令结果区（含输入区重绘）
 					void this.handleCommandDuringStream(content);
 					return;
 				}
 				// 排队（不中断当前输出，输出结束后在 finally 中自动发送）
+				this.renderCommandResultBar();
 				this.nextMessage = content;
 			});
 		};

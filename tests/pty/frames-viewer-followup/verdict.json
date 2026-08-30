@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "total_checks": 8,
+  "passed_checks": 8,
+  "details": {
+    "first_user_msg": true,
+    "followup_sent": true,
+    "followup_once": true,
+    "second_reply": true,
+    "user_msg_order": true,
+    "viewer_closed": true,
+    "followup_completed_first": true,
+    "second_completed": true
+  }
+}
