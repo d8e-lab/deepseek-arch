@@ -92,8 +92,10 @@ export class TuiApp {
 	private lastVisibleInputRows = 1;
 	/** 上次渲染后的光标所在输入行号（0-based，用于下次回到起点） */
 	private lastCursorDisplayRow = 0;
-	/** 上次渲染的底部区域总行数（命令结果区 + 输入区）；上移基准 */
+	/** 上次渲染的底部区域总行数（命令结果区 + 输入区）；用于判断区域是否在屏 */
 	private lastBottomRows = 0;
+	/** 上次渲染的命令结果区行数；与 lastCursorDisplayRow 构成回到区域顶部的上移基准 */
+	private lastCmdRows = 0;
 	/** 命令补全建议列表的行数（用于清理） */
 	private suggestionLinesCount = 0;
 	/** 双工交互：流式输出期间用户 Enter 排入的待发送消息（中断当前输出后发送） */
@@ -390,14 +392,17 @@ export class TuiApp {
 		// 仅空闲态重绘输入区域（流式/确认态的输出已在 scrollback 中）
 		if (this.state !== AppState.IDLE) return;
 		// 回到输入区域起点 → 清到屏底 → 重画 → 重渲染
-		if (this.lastBottomRows > 0) {
-			process.stdout.write(`\x1b[${this.lastBottomRows}A`);
+		// 上移基准：光标在输入区行（相对区域顶部 lastCursorDisplayRow），命令结果区在其上方 lastCmdRows 行
+		const upRows = this.lastCmdRows + this.lastCursorDisplayRow;
+		if (upRows > 0) {
+			process.stdout.write(`\x1b[${upRows}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
 		this.drawInputArea();
 		process.stdout.write('\r');
 		this.lastCursorDisplayRow = 0;
+		this.lastCmdRows = 0;
 		this.lastBottomRows = 0;
 		this.renderInput();
 	};
@@ -430,11 +435,13 @@ export class TuiApp {
 		let content = await this.readUserInput();
 
 		// 清除输入区域：回到起点（无历史记录时即当前行），清到屏底
-		if (this.lastBottomRows > 0) {
-			process.stdout.write(`\x1b[${this.lastBottomRows}A`);
+		const upRows = this.lastCmdRows + this.lastCursorDisplayRow;
+		if (upRows > 0) {
+			process.stdout.write(`\x1b[${upRows}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
+		this.lastCmdRows = 0;
 		this.lastBottomRows = 0;
 
 		if (content === null) {
@@ -1031,6 +1038,8 @@ export class TuiApp {
 		this.printSeparator();
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
+		this.lastCmdRows = 0;
+		this.lastBottomRows = 0;
 		this.drawInputArea();
 		process.stdout.write('\r');
 	}
@@ -1076,6 +1085,8 @@ export class TuiApp {
 				this.printSeparator();
 				this.lastVisibleInputRows = 1;
 				this.lastCursorDisplayRow = 0;
+				this.lastCmdRows = 0;
+				this.lastBottomRows = 0;
 				this.drawInputArea();
 				process.stdout.write('\r');
 				this.input.clear();
@@ -1234,7 +1245,7 @@ export class TuiApp {
 					if (ch === '/') {
 						this.input.insertChar(ch);
 						this.input.enterCommandMode(AVAILABLE_COMMANDS);
-						this.renderInput();
+						// 不在此渲染：循环末尾统一 renderInput（避免双重渲染）
 						continue;
 					}
 				}
@@ -1274,6 +1285,8 @@ export class TuiApp {
 			this.printSeparator();
 			this.lastVisibleInputRows = 1;
 			this.lastCursorDisplayRow = 0;
+			this.lastCmdRows = 0;
+			this.lastBottomRows = 0;
 			this.drawInputArea();
 			this.renderInput();
 		}
@@ -1353,12 +1366,13 @@ export class TuiApp {
 		this.input.setWrapWidth(availWidth);
 		hideCursor();
 
-		// 回到底部区域起始行：上移上次底部区域总高度（命令结果区 + 输入区）
-		if (this.lastBottomRows > 0) {
-			process.stdout.write(`\x1b[${this.lastBottomRows}A`);
+		// 回到底部区域起始行：上移命令结果区行数 + 光标所在输入行偏移（光标在输入区行，非区域外）
+		const upRows = this.lastCmdRows + this.lastCursorDisplayRow;
+		if (upRows > 0) {
+			process.stdout.write(`\x1b[${upRows}A`);
 		}
 		process.stdout.write('\r');
-		// 清除旧底部区域（命令结果区 + 输入区）
+		// 清除旧底部区域（命令结果区 + 输入区 + 建议列表：从区域顶部清到屏底）
 		process.stdout.write(CLEAR_TO_END);
 
 		this.drawBottomArea(cols, availWidth);
@@ -1435,7 +1449,9 @@ export class TuiApp {
 		if (cursorPos.col > 0) process.stdout.write(`\x1b[${cursorPos.col}C`);
 
 		this.lastCursorDisplayRow = cursorPos.row;
-		// 记录底部区域总高度（命令结果区 + 输入区 + 建议列表），供下次上移
+		// 记录命令结果区行数（下次上移基准的一部分）
+		this.lastCmdRows = cmdRows;
+		// 记录底部区域总高度（命令结果区 + 输入区 + 建议列表），供区域是否在屏判断
 		this.lastBottomRows = cmdRows + linesToDraw + this.suggestionLinesCount;
 		showCursor();
 	}
@@ -1489,13 +1505,15 @@ export class TuiApp {
 	 */
 	private collapseInputArea(): void {
 		// 收起底部区域（命令结果区 + 输入区 + 建议列表）：光标上移到底部区域起点，清到屏底
-		if (this.lastBottomRows > 0) {
-			process.stdout.write(`\x1b[${this.lastBottomRows}A`);
+		const upRows = this.lastCmdRows + this.lastCursorDisplayRow;
+		if (upRows > 0) {
+			process.stdout.write(`\x1b[${upRows}A`);
 		}
 		process.stdout.write('\r');
 		process.stdout.write(CLEAR_TO_END);
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
+		this.lastCmdRows = 0;
 		this.lastBottomRows = 0;
 	}
 
@@ -1634,6 +1652,8 @@ export class TuiApp {
 		this.printSeparator();
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
+		this.lastCmdRows = 0;
+		this.lastBottomRows = 0;
 		this.drawInputArea();
 		process.stdout.write('\r');
 		this.renderInput();
@@ -1876,6 +1896,8 @@ export class TuiApp {
 		this.printSeparator();
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
+		this.lastCmdRows = 0;
+		this.lastBottomRows = 0;
 		this.drawInputArea();
 		process.stdout.write('\r');
 		this.renderInput();

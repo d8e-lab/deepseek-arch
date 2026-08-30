@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "total_checks": 12,
+  "passed_checks": 12,
+  "details": {
+    "initial_input_row": true,
+    "plain-char-1": true,
+    "plain-char-2": true,
+    "plain-char-3": true,
+    "cmd-char-1": true,
+    "cmd-char-2": true,
+    "cmd-char-3": true,
+    "cmd-char-4": true,
+    "cmd-char-5": true,
+    "cmd-char-6": true,
+    "cmd-char-7": true,
+    "cmd-char-8": true
+  }
+}
