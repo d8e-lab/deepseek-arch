@@ -35,6 +35,18 @@ npm run build --silent
 echo "    npm prune --production ..."
 npm prune --production --silent
 
+# 3.5 校验并同步 node-pty Linux 原生模块（N-API，跨 Node ABI）
+#     node-pty 无 linux-x64 官方预编译，必须确认构建机已编译成功，
+#     否则 AUR 用户会因 pty.node 缺失而崩溃。
+echo "    verifying node-pty native module ..."
+if [ ! -f node_modules/node-pty/build/Release/pty.node ]; then
+    echo "ERROR: node_modules/node-pty/build/Release/pty.node missing — node-pty 编译失败" >&2
+    exit 1
+fi
+mkdir -p node_modules/node-pty/prebuilds/linux-x64
+cp node_modules/node-pty/build/Release/pty.node node_modules/node-pty/prebuilds/linux-x64/
+echo "    OK: pty.node present (linux-x64)"
+
 # 4. 打包运行时文件
 echo "    tar czf ${DEST} ..."
 tar czf "$DEST" \
