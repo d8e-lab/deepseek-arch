@@ -30,20 +30,40 @@ import type {
 /** 配置目录（默认 ~/.deepseek-arch） */
 export const DEFAULT_CONFIG_DIR = resolve(homedir(), '.deepseek-arch');
 
-/** 默认配置内容（首次运行自动创建） */
-const DEFAULT_MAIN_CONFIG: AppConfig = {
-	paths: {
-		providers: './providers.toml',
-		pricing: './pricing.toml',
-		system_prompt: './system-prompt.toml',
-		sessions: './sessions',
-	},
-	defaults: {
-		provider: 'deepseek',
-		model: 'deepseek-v4-pro',
-		system_prompt: 'default',
-	},
-};
+/** 默认配置内容（首次运行自动创建；字符串模板保留注释，完整展示可配置项） */
+const DEFAULT_MAIN_CONFIG: string = `# DeepSeek Arch 主配置
+# 路径均为相对本文件目录（~/.deepseek-arch/）的相对路径
+
+[paths]
+providers = "./providers.toml"
+pricing = "./pricing.toml"
+system_prompt = "./system-prompt.toml"
+sessions = "./sessions"
+
+# ── 默认参数 ──────────────────────────────────────────
+[defaults]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+system_prompt = "default"
+review_model = "deepseek-v4-flash"
+
+# 生成参数：默认不设置（= 交由 API 侧默认值）。
+# 注意：deepseek-v4 思考模式下 temperature 不生效。
+# 取消注释即可自定义：
+# temperature = 0.7
+# max_tokens = 8192
+reasoning_effort = "high"   # 推理强度：low / high / max
+thinking = "enabled"        # 思考模式：enabled / disabled
+
+# 运行时状态（/yolo /async 命令写回）
+yolo = false
+async = false
+
+# 自动 compact（上下文超阈值时压缩）
+auto_compact = true
+auto_compact_threshold = 0.7
+context_window = 1000000
+`;
 
 const DEFAULT_PROVIDERS: ProvidersConfig = {
 	deepseek: {
@@ -192,9 +212,9 @@ export class ConfigManager {
 		}
 	}
 
-	/** 写入 TOML 文件 */
-	private async writeTomlFile(filePath: string, data: Record<string, unknown>): Promise<void> {
-		const content = tomlStringify(data);
+	/** 写入 TOML 文件（支持对象序列化或原始字符串模板） */
+	private async writeTomlFile(filePath: string, data: Record<string, unknown> | string): Promise<void> {
+		const content = typeof data === 'string' ? data : tomlStringify(data);
 		await writeFile(filePath, content, { mode: 0o600 });
 	}
 
@@ -229,10 +249,10 @@ export class ConfigManager {
 		let appConfig = await this.loadTomlFile<AppConfig>(mainConfigPath);
 
 		if (!appConfig) {
-			// 首次运行：写入默认配置文件
+			// 首次运行：写入默认配置文件（字符串模板保留注释）
 			// system-prompt.toml 由下方 ensureSystemPromptSnapshot 统一处理
 			// （缺失时从项目根 system_prompt.txt 生成快照），此处不重复创建。
-			await this.writeTomlFile(mainConfigPath, DEFAULT_MAIN_CONFIG as unknown as Record<string, unknown>);
+			await this.writeTomlFile(mainConfigPath, DEFAULT_MAIN_CONFIG);
 			await this.writeTomlFile(
 				this.resolvePath('providers.toml'),
 				DEFAULT_PROVIDERS as unknown as Record<string, unknown>,
@@ -243,7 +263,10 @@ export class ConfigManager {
 			);
 			// 复制 skill 文件到配置目录（首次运行）
 			await copySkillDir(this.configDir);
-			appConfig = DEFAULT_MAIN_CONFIG;
+			// 从刚写入的模板重新解析（字符串模板含注释，需经 TOML 解析还原对象）
+			const parsedConfig = await this.loadTomlFile<AppConfig>(mainConfigPath);
+			if (!parsedConfig) throw new Error('默认配置写入失败，无法解析 config.toml');
+			appConfig = parsedConfig;
 		}
 
 		// 2. 每次启动：确保 system-prompt.toml 存在——缺失时从项目根 system_prompt.txt

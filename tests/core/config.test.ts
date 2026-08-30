@@ -68,7 +68,18 @@ describe('ConfigManager', () => {
         provider: 'deepseek',
         model: 'deepseek-v4-pro',
         system_prompt: 'default',
+        review_model: 'deepseek-v4-flash',
+        reasoning_effort: 'high',
+        thinking: 'enabled',
+        yolo: false,
+        async: false,
+        auto_compact: true,
+        auto_compact_threshold: 0.7,
+        context_window: 1000000,
       });
+      // temperature/max_tokens 默认不设置（模板中为注释示例，未激活）
+      expect(mgr.get('defaults.temperature')).toBeUndefined();
+      expect(mgr.get('defaults.max_tokens')).toBeUndefined();
     });
 
     it('取嵌套值', async () => {
