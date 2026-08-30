@@ -441,11 +441,10 @@ export class TuiApp {
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
 
-		// 画输入区域
-		this.drawInputArea();
-		process.stdout.write('\r');
-
 		this.input.clear();
+		// 重建底部区域：输入区 + 命令结果区（若仍有内容，如未发送消息的清空场景），
+		// 避免输出结束后命令结果区消失（drawInputArea 只画输入区）
+		this.renderInput();
 		let content = await this.readUserInput();
 
 		// 清除输入区域：回到起点（无历史记录时即当前行），清到屏底
