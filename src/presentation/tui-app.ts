@@ -7,6 +7,7 @@
  */
 
 import type { Session } from '../types/index.js';
+import { ScreenBuffer } from './screen-buffer.js';
 import { SessionManager } from '../core/session.js';
 import type { StreamEvent } from '../types/index.js';
 import type { Tool } from '../tools/types.js';
@@ -65,6 +66,8 @@ const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/review_model', '
 const CLEAR_TO_END = '\x1b[0J';
 
 export class TuiApp {
+	/** 屏幕输出缓冲（所有终端输出唯一通道） */
+	private out: ScreenBuffer;
 	private sessionMgr: SessionManager;
 	private config: TuiConfig;
 	private configMgr: ConfigManager | null;
@@ -165,6 +168,7 @@ export class TuiApp {
 	private streamLines: string[] = [];
 
 	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean, mock?: boolean) {
+		this.out = new ScreenBuffer();
 		this.sessionMgr = sessionMgr;
 		this.config = config;
 		this.configMgr = configMgr ?? null;
@@ -229,7 +233,7 @@ export class TuiApp {
 		if (this.mockMode) modeTags.push('MOCK');
 		const modeStr = modeTags.length > 0 ? `  |  [${modeTags.join(', ')}]` : '';
 
-		process.stdout.write(
+		this.out.write(
 			`deepseek-arch v${this.config.version}  |  Provider: ${this.config.provider}  |  Model: ${this.config.model}${modeStr}\r\n`,
 		);
 
@@ -237,28 +241,28 @@ export class TuiApp {
 		if (lastUsage && lastUsage.total_tokens > 0) {
 			infoStr += `  |  Last tokens: ${lastUsage.prompt_tokens} in + ${lastUsage.completion_tokens} out`;
 		}
-		process.stdout.write(dim(infoStr) + '\r\n');
+		this.out.write(dim(infoStr) + '\r\n');
 	}
 
 	private printSeparator(): void {
 		const cols = getTermSize().cols;
 		// cols-1 避免 auto-wrap，\r\n 确保 raw mode 下正确换行
-		process.stdout.write('─'.repeat(cols - 1) + '\r\n');
+		this.out.write('─'.repeat(cols - 1) + '\r\n');
 	}
 
 	private printConversation(turns: import('../types/index.js').TurnRecord[]): void {
 		const cols = getTermSize().cols;
 		const lines = this.conversation.render(turns, cols);
 		for (const line of lines) {
-			process.stdout.write(line + '\r\n');
+			this.out.write(line + '\r\n');
 		}
 	}
 
 	private printExitInfo(): void {
 		const sessionId = this.sessionMgr.getSessionId();
 		if (sessionId) {
-			process.stdout.write(`Session saved: ${sessionId}\r\n`);
-			process.stdout.write(`To resume: deepseek-arch chat --resume ${sessionId}\r\n`);
+			this.out.write(`Session saved: ${sessionId}\r\n`);
+			this.out.write(`To resume: deepseek-arch chat --resume ${sessionId}\r\n`);
 		}
 	}
 
@@ -395,12 +399,12 @@ export class TuiApp {
 		// 上移基准：光标在输入区行（相对区域顶部 lastCursorDisplayRow）；命令结果区在输入区下方
 		const upRows = this.lastCursorDisplayRow;
 		if (upRows > 0) {
-			process.stdout.write(`\x1b[${upRows}A`);
+			this.out.write(`\x1b[${upRows}A`);
 		}
-		process.stdout.write('\r');
-		process.stdout.write(CLEAR_TO_END);
+		this.out.write('\r');
+		this.out.write(CLEAR_TO_END);
 		this.drawInputArea();
-		process.stdout.write('\r');
+		this.out.write('\r');
 		this.lastCursorDisplayRow = 0;
 		this.lastCmdRows = 0;
 		this.lastBottomRows = 0;
@@ -431,7 +435,7 @@ export class TuiApp {
 			this.nextMessage = null;
 			this.clearCommandResult(false); // 输入区已重建，不重绘避免错位
 			this.collapseInputArea();       // 收起重建的输入区（closeViewer 已重置 lastCmdRows）
-			process.stdout.write(green('[You] ') + next + '\r\n\r\n');
+			this.out.write(green('[You] ') + next + '\r\n\r\n');
 			await this.sendMessageStream(next);
 			// 视图可能在发送期间打开：跳过 UI 收尾（主循环等待视图关闭后重新进入）
 			if (this.viewerActive) return;
@@ -450,10 +454,10 @@ export class TuiApp {
 		// 清除输入区域：回到起点（无历史记录时即当前行），清到屏底
 		const upRows = this.lastCursorDisplayRow;
 		if (upRows > 0) {
-			process.stdout.write(`\x1b[${upRows}A`);
+			this.out.write(`\x1b[${upRows}A`);
 		}
-		process.stdout.write('\r');
-		process.stdout.write(CLEAR_TO_END);
+		this.out.write('\r');
+		this.out.write(CLEAR_TO_END);
 		this.lastCmdRows = 0;
 		this.lastBottomRows = 0;
 
@@ -469,7 +473,7 @@ export class TuiApp {
 				// F-9：// 前缀转义——去掉一个 / 后按普通消息发送（如 "//usr/bin 在哪" → "/usr/bin 在哪"）
 				const sendContent = content.startsWith('//') ? content.slice(1) : content;
 				this.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
-				process.stdout.write(green('[You] ') + sendContent + '\r\n\r\n');
+				this.out.write(green('[You] ') + sendContent + '\r\n\r\n');
 				await this.sendMessageStream(sendContent);
 			}
 			// 视图可能在命令处理/输出期间打开：跳过 UI 收尾（视图接管）
@@ -483,7 +487,7 @@ export class TuiApp {
 
 		// 打印用户消息（绿色）
 		this.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
-		process.stdout.write(green('[You] ') + content + '\r\n\r\n');
+		this.out.write(green('[You] ') + content + '\r\n\r\n');
 
 		// 拼接待发送的 shell 上下文（仅模型可见）
 		if (this.pendingShellContext.length > 0) {
@@ -849,7 +853,7 @@ export class TuiApp {
 				this.printSeparator();
 			}
 		} catch (err) {
-			process.stdout.write(
+			this.out.write(
 				red(`[Compact failed] ${err instanceof Error ? err.message : String(err)}`) + '\r\n',
 			);
 		}
@@ -980,7 +984,7 @@ export class TuiApp {
 	/** 执行 shell 命令并收集输出（F-4：异步 spawn，不阻塞事件循环——长命令期间 Ctrl+C 仍可响应） */
 	private executeShellCommand(cmd: string): void {
 		// 打印命令到 scrollback（cmd 已包含前导 !）
-		process.stdout.write(PINK_BG_START + cmd + PINK_BG_END + '\r\n');
+		this.out.write(PINK_BG_START + cmd + PINK_BG_END + '\r\n');
 
 		// 去掉前导 ! 后执行
 		const shellCmd = cmd.startsWith('!') ? cmd.slice(1).trimStart() : cmd;
@@ -988,7 +992,7 @@ export class TuiApp {
 		// ── 交互式命令禁止 ──────────────────────────
 		const interactiveBlocked = isInteractiveCommand(shellCmd);
 		if (interactiveBlocked) {
-			process.stdout.write(red(`  Blocked: ${interactiveBlocked}`) + '\r\n');
+			this.out.write(red(`  Blocked: ${interactiveBlocked}`) + '\r\n');
 			return;
 		}
 
@@ -1029,7 +1033,7 @@ export class TuiApp {
 		if (stdout) {
 			const lines = stdout.split('\n');
 			for (const line of lines) {
-				process.stdout.write(dim(' │ ' + line) + '\r\n');
+				this.out.write(dim(' │ ' + line) + '\r\n');
 			}
 		}
 
@@ -1037,7 +1041,7 @@ export class TuiApp {
 		if (stderr) {
 			const lines = stderr.split('\n');
 			for (const line of lines) {
-				process.stdout.write(red(' │ ' + line) + '\r\n');
+				this.out.write(red(' │ ' + line) + '\r\n');
 			}
 		}
 
@@ -1056,7 +1060,7 @@ export class TuiApp {
 		this.lastCmdRows = 0;
 		this.lastBottomRows = 0;
 		this.drawInputArea();
-		process.stdout.write('\r');
+		this.out.write('\r');
 	}
 
 	private readUserInput(): Promise<string | null> {
@@ -1103,7 +1107,7 @@ export class TuiApp {
 				this.lastCmdRows = 0;
 				this.lastBottomRows = 0;
 				this.drawInputArea();
-				process.stdout.write('\r');
+				this.out.write('\r');
 				this.input.clear();
 				return;
 			}
@@ -1300,8 +1304,8 @@ export class TuiApp {
 		} else {
 			// 未知命令：显示错误，不清除输入，让用户继续编辑
 			const errMsg = `Unknown command: ${content}`;
-			process.stdout.write(red(errMsg) + '\r\n');
-			process.stdout.write(dim(`  Available: ${AVAILABLE_COMMANDS.join(', ')}`) + '\r\n');
+			this.out.write(red(errMsg) + '\r\n');
+			this.out.write(dim(`  Available: ${AVAILABLE_COMMANDS.join(', ')}`) + '\r\n');
 			// 不清除输入，不清除 stdinHandler，用户可继续修改/重试
 			// 重新渲染输入区域
 			this.printSeparator();
@@ -1339,7 +1343,7 @@ export class TuiApp {
 	/** 清除建议列表显示（从当前光标位置清到屏幕底部） */
 	private clearSuggestions(): void {
 		if (this.suggestionLinesCount > 0) {
-			process.stdout.write(CLEAR_TO_END);
+			this.out.write(CLEAR_TO_END);
 			this.suggestionLinesCount = 0;
 		}
 	}
@@ -1378,7 +1382,7 @@ export class TuiApp {
 		const bgStart = this.shellMode ? PINK_BG_START : GRAY_BG_START;
 		const bgEnd = this.shellMode ? PINK_BG_END : GRAY_BG_END;
 		const empty = ' '.repeat(cols - 1);
-		process.stdout.write(bgStart + empty + bgEnd);
+		this.out.write(bgStart + empty + bgEnd);
 	}
 
 	/** 原地刷新输入区域 */
@@ -1392,11 +1396,11 @@ export class TuiApp {
 		// 命令结果区/建议列表在输入区下方，被 CLEAR_TO_END 从输入区顶部清掉。
 		const upRows = this.lastCursorDisplayRow;
 		if (upRows > 0) {
-			process.stdout.write(`\x1b[${upRows}A`);
+			this.out.write(`\x1b[${upRows}A`);
 		}
-		process.stdout.write('\r');
+		this.out.write('\r');
 		// 清除旧底部区域（输入区 + 命令结果区/建议列表：从区域顶部清到屏底）
-		process.stdout.write(CLEAR_TO_END);
+		this.out.write(CLEAR_TO_END);
 
 		this.drawBottomArea(cols, availWidth);
 	}
@@ -1412,7 +1416,7 @@ export class TuiApp {
 		const availWidth = cols - 1;
 		this.input.setWrapWidth(availWidth);
 		hideCursor();
-		process.stdout.write(CLEAR_TO_END);
+		this.out.write(CLEAR_TO_END);
 		this.drawBottomArea(cols, availWidth);
 	}
 
@@ -1437,10 +1441,10 @@ export class TuiApp {
 			if (r < inputLines.length && r < MAX_INPUT_ROWS) {
 				// 软换行后的段已由 InputEditor 截断，只做右侧填充
 				const text = padToWidth(inputLines[r], availWidth);
-				process.stdout.write(bgStart + text + bgEnd);
+				this.out.write(bgStart + text + bgEnd);
 			}
 			// r >= inputLines.length: 清除残留行（不用灰底）
-			if (r < linesToDraw - 1) process.stdout.write('\r\n');
+			if (r < linesToDraw - 1) this.out.write('\r\n');
 		}
 		this.lastVisibleInputRows = visibleLines;
 
@@ -1459,9 +1463,9 @@ export class TuiApp {
 			for (const line of this.commandResultLines) {
 				const wrapped = wrapText(line, Math.max(1, availWidth - 2)); // '│ ' 前缀占 2 列
 				for (const wl of wrapped) {
-					process.stdout.write('\r\n');
+					this.out.write('\r\n');
 					clearLine();
-					process.stdout.write(dim('│ ') + wl);
+					this.out.write(dim('│ ') + wl);
 					physicalRows++;
 				}
 			}
@@ -1473,11 +1477,11 @@ export class TuiApp {
 		// 绘制结束后光标在最后一行行首（下方区域最后一行不换行 → 光标在最后一行行尾，
 		// \r 归零列）。上移 (linesToDraw-1) + belowRows 回到输入区第一行，
 		// 再下移 cursorPos.row、右移 cursorPos.col 到输入区光标位置。
-		process.stdout.write('\r');
+		this.out.write('\r');
 		const cursorUp = (linesToDraw - 1) + belowRows;
-		if (cursorUp > 0) process.stdout.write(`\x1b[${cursorUp}A`);
-		if (cursorPos.row > 0) process.stdout.write(`\x1b[${cursorPos.row}B`);
-		if (cursorPos.col > 0) process.stdout.write(`\x1b[${cursorPos.col}C`);
+		if (cursorUp > 0) this.out.write(`\x1b[${cursorUp}A`);
+		if (cursorPos.row > 0) this.out.write(`\x1b[${cursorPos.row}B`);
+		if (cursorPos.col > 0) this.out.write(`\x1b[${cursorPos.col}C`);
 
 		this.lastCursorDisplayRow = cursorPos.row;
 		// 记录底部区域总高度（输入区 + 下方区域），供区域是否在屏判断
@@ -1531,10 +1535,10 @@ export class TuiApp {
 		// 收起底部区域（输入区 + 命令结果区/建议列表）：光标上移到底部区域起点（输入区顶部），清到屏底
 		const upRows = this.lastCursorDisplayRow;
 		if (upRows > 0) {
-			process.stdout.write(`\x1b[${upRows}A`);
+			this.out.write(`\x1b[${upRows}A`);
 		}
-		process.stdout.write('\r');
-		process.stdout.write(CLEAR_TO_END);
+		this.out.write('\r');
+		this.out.write(CLEAR_TO_END);
 		this.lastVisibleInputRows = 1;
 		this.lastCursorDisplayRow = 0;
 		this.lastBottomRows = 0;
@@ -1548,7 +1552,7 @@ export class TuiApp {
 			return;
 		}
 		this.collapseInputArea();
-		process.stdout.write(line + '\r\n');
+		this.out.write(line + '\r\n');
 		this.renderInputDuringStream();
 	}
 
@@ -1561,7 +1565,7 @@ export class TuiApp {
 		}
 		this.collapseInputArea();
 		for (const l of lines) {
-			process.stdout.write(l + '\r\n');
+			this.out.write(l + '\r\n');
 		}
 		this.renderInputDuringStream();
 	}
@@ -1586,12 +1590,12 @@ export class TuiApp {
 		const dots = '·'.repeat(this.thinkAnimStep);
 		// 光标在输入区，上移到折叠提示行更新后移回（跨过命令结果区）
 		const up = (this.lastCursorDisplayRow ?? 0) + 1 + this.commandResultLines.length;
-		process.stdout.write(`\x1b[${up}A`);
-		process.stdout.write('\r');
+		this.out.write(`\x1b[${up}A`);
+		this.out.write('\r');
 		clearLine();
-		process.stdout.write(dim(`[Think] 思考中 ${dots}  (Ctrl+O 查看完整)`));
-		process.stdout.write(`\x1b[${up}B`);
-		process.stdout.write('\r');
+		this.out.write(dim(`[Think] 思考中 ${dots}  (Ctrl+O 查看完整)`));
+		this.out.write(`\x1b[${up}B`);
+		this.out.write('\r');
 	}
 
 	/** 定稿折叠行（think 阶段结束：content 过渡/工具调用/done 时调用） */
@@ -1603,11 +1607,11 @@ export class TuiApp {
 		}
 		const foldedCount = Math.max(0, this.fullThink.length - this.MAX_VISIBLE_THINK);
 		const up = (this.lastCursorDisplayRow ?? 0) + 1 + this.commandResultLines.length;
-		process.stdout.write(`\x1b[${up}A`);
-		process.stdout.write('\r');
+		this.out.write(`\x1b[${up}A`);
+		this.out.write('\r');
 		clearLine();
-		process.stdout.write(dim(`[Think] 已折叠 ${foldedCount} 行 (Ctrl+O 查看完整)`));
-		process.stdout.write('\r\n');
+		this.out.write(dim(`[Think] 已折叠 ${foldedCount} 行 (Ctrl+O 查看完整)`));
+		this.out.write('\r\n');
 		this.thinkFolded = false;
 		// 光标在折叠行下一行（输出末尾），后续 writeOutputLine 从这继续
 		this.lastVisibleInputRows = 1;
@@ -1640,7 +1644,7 @@ export class TuiApp {
 		// 建立视图关闭等待（inputCycle 在视图打开时等待）
 		this.viewerClosedPromise = new Promise<void>((r) => { this.viewerClosedResolve = r; });
 		// 切换 alternate screen 并渲染
-		process.stdout.write('\x1b[?1049h');
+		this.out.write('\x1b[?1049h');
 		this.buildViewerLines();
 		this.viewerScrollOffset = 0;
 		this.renderViewer();
@@ -1668,7 +1672,7 @@ export class TuiApp {
 		this.viewerHandler = null;
 		this.viewerPrevHandler = null;
 		// 恢复主 buffer（alternate screen 保存的主 TUI 内容还原）
-		process.stdout.write('\x1b[?1049l');
+		this.out.write('\x1b[?1049l');
 		// 补渲染视图期间的静默输出
 		this.replayViewerOutput();
 		// 重建输入区
@@ -1678,7 +1682,7 @@ export class TuiApp {
 		this.lastCmdRows = 0;
 		this.lastBottomRows = 0;
 		this.drawInputArea();
-		process.stdout.write('\r');
+		this.out.write('\r');
 		this.renderInput();
 		// 输出已结束：恢复 IDLE 状态（nextMessage 保留，交给主循环 inputCycle 统一发送，避免双流并发）
 		if (!this.abortController) {
@@ -1756,23 +1760,23 @@ export class TuiApp {
 	private renderViewer(): void {
 		const { rows, cols } = getTermSize();
 		const visible = Math.max(1, rows - 2);
-		process.stdout.write('\x1b[2J\x1b[H');
-		process.stdout.write(dim(` 对话浏览  ←→ 轮次  |  ↑↓ 滚动  |  PgUp/PgDn 翻页  |  / 搜索  |  q 退出`) + '\r\n');
+		this.out.write('\x1b[2J\x1b[H');
+		this.out.write(dim(` 对话浏览  ←→ 轮次  |  ↑↓ 滚动  |  PgUp/PgDn 翻页  |  / 搜索  |  q 退出`) + '\r\n');
 		for (let r = 0; r < visible; r++) {
 			const idx = this.viewerScrollOffset + r;
-			process.stdout.write('\r\x1b[2K');
+			this.out.write('\r\x1b[2K');
 			if (idx < this.viewerLines.length) {
 				let line = this.viewerLines[idx];
 				// 搜索匹配行高亮（反转色）
 				if (this.viewerSearchQuery && this.viewerSearchMatches.includes(idx)) {
 					line = `\x1b[7m${stripAnsi(line)}\x1b[0m`;
 				}
-				process.stdout.write(line.slice(0, cols - 1));
+				this.out.write(line.slice(0, cols - 1));
 			}
-			if (r < visible - 1) process.stdout.write('\r\n');
+			if (r < visible - 1) this.out.write('\r\n');
 		}
 		// 底部状态行
-		process.stdout.write('\r\n\x1b[2K');
+		this.out.write('\r\n\x1b[2K');
 		const total = this.viewerLines.length;
 		const pct = total > 0 ? Math.round(((this.viewerScrollOffset + visible) / total) * 100) : 0;
 		let status = dim(` ${Math.min(this.viewerScrollOffset + 1, total)}/${total} 行 (${pct}%)`);
@@ -1784,7 +1788,7 @@ export class TuiApp {
 		} else if (this.viewerSearchActive) {
 			status += dim(`  搜索: ${this.viewerSearchInput}▌`);
 		}
-		process.stdout.write(status);
+		this.out.write(status);
 	}
 
 	/** 视图输入处理（逐字符：方向键/翻页/搜索/退出） */
@@ -1872,7 +1876,7 @@ export class TuiApp {
 		// 建立视图关闭等待（inputCycle 在视图打开时等待）
 		this.viewerClosedPromise = new Promise<void>((r) => { this.viewerClosedResolve = r; });
 		// 切换 alternate screen 并渲染
-		process.stdout.write('\x1b[?1049h');
+		this.out.write('\x1b[?1049h');
 		this.renderSubagentsView();
 		// 实时刷新：500ms 重渲染（状态条 + 选中 subagent 输出）
 		this.subagentViewTimer = setInterval(() => {
@@ -1904,7 +1908,7 @@ export class TuiApp {
 		this.viewerHandler = null;
 		this.viewerPrevHandler = null;
 		// 恢复主 buffer（alternate screen 保存的主 TUI 内容还原）
-		process.stdout.write('\x1b[?1049l');
+		this.out.write('\x1b[?1049l');
 		// 补渲染视图期间的静默输出（master 后台输出）
 		this.replayViewerOutput();
 		// 重建输入区
@@ -1914,7 +1918,7 @@ export class TuiApp {
 		this.lastCmdRows = 0;
 		this.lastBottomRows = 0;
 		this.drawInputArea();
-		process.stdout.write('\r');
+		this.out.write('\r');
 		this.renderInput();
 		// 输出已结束：恢复 IDLE 状态（nextMessage 保留，交给主循环 inputCycle 统一发送，避免双流并发）
 		if (!this.abortController) {
@@ -1931,13 +1935,13 @@ export class TuiApp {
 		const { rows, cols } = getTermSize();
 		const subs = this.sessionMgr.listSubagents();
 
-		process.stdout.write('\x1b[2J\x1b[H');
+		this.out.write('\x1b[2J\x1b[H');
 
 		if (subs.length === 0) {
-			process.stdout.write(yellow('═══ Subagents ═══') + '\r\n');
-			process.stdout.write(dim('(当前会话没有 subagent。master agent 可通过 subagent_spawn 创建。)') + '\r\n');
-			process.stdout.write('\r\n');
-			process.stdout.write(dim('  [q] 返回 master') + '\r\n');
+			this.out.write(yellow('═══ Subagents ═══') + '\r\n');
+			this.out.write(dim('(当前会话没有 subagent。master agent 可通过 subagent_spawn 创建。)') + '\r\n');
+			this.out.write('\r\n');
+			this.out.write(dim('  [q] 返回 master') + '\r\n');
 			return;
 		}
 
@@ -1949,7 +1953,7 @@ export class TuiApp {
 		// ── 顶部状态条（无进度条：状态 + 耗时）──
 		const curIcon = current.status === 'running' ? '⏳'
 			: current.status === 'completed' ? '✓' : '✗';
-		process.stdout.write(yellow(`═══ Subagents (${subs.length}) — 选中: ${current.name} ${curIcon} ═══`) + '\r\n');
+		this.out.write(yellow(`═══ Subagents (${subs.length}) — 选中: ${current.name} ${curIcon} ═══`) + '\r\n');
 		subs.forEach((s, i) => {
 			const icon = s.status === 'running' ? '●'
 				: s.status === 'completed' ? green('✓')
@@ -1957,9 +1961,9 @@ export class TuiApp {
 			const elapsed = ((Date.now() - s.startMs) / 1000).toFixed(1);
 			const marker = i === this.viewerSubagentIndex ? green('▸') : ' ';
 			const name = i === this.viewerSubagentIndex ? cyan(s.name) : s.name;
-			process.stdout.write(`  ${marker} ${icon} ${name} ${dim(`(${s.status}, ${elapsed}s)`)}` + '\r\n');
+			this.out.write(`  ${marker} ${icon} ${name} ${dim(`(${s.status}, ${elapsed}s)`)}` + '\r\n');
 		});
-		process.stdout.write(dim('─'.repeat(Math.max(20, cols - 2))) + '\r\n');
+		this.out.write(dim('─'.repeat(Math.max(20, cols - 2))) + '\r\n');
 
 		// ── 选中 subagent 输出（复用 SubagentRecordView，显示末尾 N 行 = 最新）──
 		const view = new SubagentRecordView();
@@ -1968,34 +1972,34 @@ export class TuiApp {
 		const start = Math.max(0, lines.length - visible);
 		for (let r = 0; r < visible; r++) {
 			const idx = start + r;
-			process.stdout.write('\r\x1b[2K');
+			this.out.write('\r\x1b[2K');
 			if (idx < lines.length) {
-				process.stdout.write(lines[idx].slice(0, cols - 1));
+				this.out.write(lines[idx].slice(0, cols - 1));
 			}
-			if (r < visible - 1) process.stdout.write('\r\n');
+			if (r < visible - 1) this.out.write('\r\n');
 		}
 
 		// ── 底部：快捷键提示 + 输入区 ──
-		process.stdout.write('\r\n\x1b[2K');
+		this.out.write('\r\n\x1b[2K');
 		if (this.subagentViewInsertMode) {
-			process.stdout.write(dim(`  [Enter] 发送  [ESC] 退出输入`) + '\r\n');
+			this.out.write(dim(`  [Enter] 发送  [ESC] 退出输入`) + '\r\n');
 		} else {
-			process.stdout.write(dim(`  [n] next  [p] previous  [1-${Math.min(subs.length, 9)}] 跳转  [i] 输入  [q] 返回 master`) + '\r\n');
+			this.out.write(dim(`  [n] next  [p] previous  [1-${Math.min(subs.length, 9)}] 跳转  [i] 输入  [q] 返回 master`) + '\r\n');
 		}
-		process.stdout.write('\x1b[2K');
+		this.out.write('\x1b[2K');
 		if (this.subagentViewBusy) {
-			process.stdout.write(dim(`  ⏳ 正在发送给 ${current.name}... (ESC 中断)`));
+			this.out.write(dim(`  ⏳ 正在发送给 ${current.name}... (ESC 中断)`));
 		} else if (this.subagentViewInsertMode) {
 			const prefix = `  > ${this.subagentViewInput}`;
-			process.stdout.write(green(prefix) + dim('  [Enter] 发送  [ESC] 退出'));
+			this.out.write(green(prefix) + dim('  [Enter] 发送  [ESC] 退出'));
 			if (this.subagentViewError) {
-				process.stdout.write(red(`  ⚠ ${this.subagentViewError}`));
+				this.out.write(red(`  ⚠ ${this.subagentViewError}`));
 			}
 		} else {
 			const prefix = `  > ${this.subagentViewInput}`;
-			process.stdout.write(dim(prefix) + dim('  按 [i] 进入输入模式'));
+			this.out.write(dim(prefix) + dim('  按 [i] 进入输入模式'));
 			if (this.subagentViewError) {
-				process.stdout.write(red(`  ⚠ ${this.subagentViewError}`));
+				this.out.write(red(`  ⚠ ${this.subagentViewError}`));
 			}
 		}
 	}
@@ -2247,15 +2251,15 @@ export class TuiApp {
 		}
 
 		// 从输入行的下一行开始绘制（避免 \r+clearLine 覆盖输入行）
-		process.stdout.write('\r\n');
+		this.out.write('\r\n');
 
 		// 绘制每一行
 		for (let i = 0; i < lines.length; i++) {
 			const isLast = i === lines.length - 1;
-			process.stdout.write('\r');
+			this.out.write('\r');
 			clearLine();
-			process.stdout.write(lines[i]);
-			if (!isLast) process.stdout.write('\r\n');
+			this.out.write(lines[i]);
+			if (!isLast) this.out.write('\r\n');
 		}
 
 		return lines.length;
@@ -2271,12 +2275,12 @@ export class TuiApp {
 		this.setState(AppState.CONFIRMING);
 		return new Promise((resolve) => {
 			const command = String(params.command ?? '');
-			process.stdout.write(yellow(`\r\n[Confirm] ${command}\r\n`));
-			process.stdout.write(yellow('Execute? [y/N] '));
+			this.out.write(yellow(`\r\n[Confirm] ${command}\r\n`));
+			this.out.write(yellow('Execute? [y/N] '));
 
 			const prevHandler = this.stdinHandler;
 			this.stdinHandler = (data: string) => {
-				process.stdout.write('\r\n');
+				this.out.write('\r\n');
 				this.stdinHandler = prevHandler;
 				if (data === '\x03') {
 					// Ctrl+C = deny + abort
@@ -2346,7 +2350,7 @@ export class TuiApp {
 				}
 				// 非 force 且无完整行且不超长：半行留在 pending（输入区保持可见，不输出）
 			} else {
-				process.stdout.write(pending);
+				this.out.write(pending);
 				pending = '';
 			}
 		};
@@ -2608,7 +2612,7 @@ export class TuiApp {
 				if (next) {
 					this.clearCommandResult(false); // 输入区已收起，不重绘
 					this.printSeparator();
-					process.stdout.write(green('[You] ') + next + '\r\n\r\n');
+					this.out.write(green('[You] ') + next + '\r\n\r\n');
 					await this.sendMessageStream(next);
 				}
 			}
