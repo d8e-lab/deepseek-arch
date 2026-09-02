@@ -130,6 +130,14 @@ export class TuiApp {
 	private subagentViewError: string | null = null;
 	/** subagents 视图：vim 式输入模式（false=命令模式：n/p/数字导航；true=insert：字符进输入缓冲） */
 	private subagentViewInsertMode = false;
+	/** subagents 视图：轨迹滚动偏移（相对选中 subagent 完整记录行数组） */
+	private subagentViewScrollOffset = 0;
+	/** subagents 视图：是否跟随最新输出（贴底；上滚后关闭，切 subagent/滚到底恢复） */
+	private subagentViewFollowTail = true;
+	/** subagents 视图：上次渲染的轨迹总行数（滚动 clamp 用） */
+	private subagentViewTotal = 0;
+	/** subagents 视图：上次渲染的选中索引（切换 subagent 时回到最新） */
+	private subagentViewRenderedIndex = -1;
 	/** 视图滚动偏移（行） */
 	private viewerScrollOffset = 0;
 	/** 视图预渲染行 */
@@ -1685,6 +1693,10 @@ export class TuiApp {
 		this.subagentViewBusy = false;
 		this.subagentViewError = null;
 		this.subagentViewInsertMode = false;
+		this.subagentViewScrollOffset = 0;
+		this.subagentViewFollowTail = true;
+		this.subagentViewTotal = 0;
+		this.subagentViewRenderedIndex = -1;
 		// 记录打开时状态（退出时据此补渲染 master 输出）
 		const session = this.sessionMgr.getSession();
 		this.overlay.setOpenTurnCount(session?.turns.length ?? 0);
@@ -1731,11 +1743,21 @@ export class TuiApp {
 		// 底部列表高度（预留标题 1 + 输出 ≥3 + 分隔线 1 + 提示/输入 2 行）
 		const maxListRows = Math.max(1, Math.min(subs.length, rows - 8));
 
-		// ── 选中 subagent 输出（复用 SubagentRecordView，显示末尾 N 行 = 最新，占据主区域）──
+		// ── 选中 subagent 轨迹（完整渲染；默认贴底显示最新，可 ↑↓/PgUp/PgDn 滚动）──
 		const view = new SubagentRecordView();
 		const outLines = view.render(record, cols);
-		const visible = Math.max(1, rows - 1 - (1 + maxListRows + 2));
-		const start = Math.max(0, outLines.length - visible);
+		this.subagentViewTotal = outLines.length;
+		const visible = this.subagentOutputRows();
+		const maxOffset = Math.max(0, this.subagentViewTotal - visible);
+		// 跟随末尾或切换了 subagent：回到最新；否则维持用户滚动位置（仅 clamp）
+		if (this.subagentViewFollowTail || this.subagentViewRenderedIndex !== this.viewerSubagentIndex) {
+			this.subagentViewScrollOffset = maxOffset;
+			this.subagentViewFollowTail = true;
+		}
+		this.subagentViewScrollOffset = Math.min(Math.max(0, this.subagentViewScrollOffset), maxOffset);
+		if (this.subagentViewScrollOffset >= maxOffset) this.subagentViewFollowTail = true;
+		this.subagentViewRenderedIndex = this.viewerSubagentIndex;
+		const start = this.subagentViewScrollOffset;
 		for (let r = 0; r < visible; r++) {
 			const idx = start + r;
 			this.out.write('\r\x1b[2K');
@@ -1773,8 +1795,17 @@ export class TuiApp {
 		if (this.subagentViewInsertMode) {
 			this.out.write(dim(`  [Enter] 发送  [ESC] 退出输入`) + '\r\n');
 		} else {
-			this.out.write(dim(`  [n] next  [p] previous  [1-${Math.min(subs.length, 9)}] 跳转  [i] 输入  [q] 返回 master`) + '\r\n');
+			// 命令模式提示：切换 + 轨迹滚动 + 输入/返回（保留 '[n] next' 兼容旧提示）
+			let hint = `  [n] next  [p] prev  [1-${Math.min(subs.length, 9)}] 跳转`;
+			if (this.subagentViewTotal > visible) {
+				hint += `  [↑↓/PgUp/PgDn] 滚动`;
+				const endIdx = Math.min(start + visible, this.subagentViewTotal);
+				hint += `  ${start + 1}-${endIdx}/${this.subagentViewTotal}`;
+			}
+			hint += `  [i] 输入  [q] 返回`;
+			this.out.write(dim(hint.slice(0, Math.max(1, cols - 1))));
 		}
+		this.out.write('\r\n');
 		this.out.write('\x1b[2K');
 		if (this.subagentViewBusy) {
 			this.out.write(dim(`  ⏳ 正在发送给 ${current.name}... (ESC 中断)`));
@@ -1802,28 +1833,35 @@ export class TuiApp {
 		for (let i = 0; i < data.length; i++) {
 			const ch = data[i];
 
-			// ESC 序列（方向键等暂不支持）——两种模式都跳过
+			// ESC 序列：↑↓ 单行滚动、PgUp/PgDn 翻页（命令模式与输入模式均可用）
 			if (ch === '\x1b') {
-				if (data[i + 1] !== '[') {
-					// 单独 ESC：insert → 退出到命令模式；命令模式 → 关闭视图
-					if (this.subagentViewBusy) {
-						this.closeSubagentsView();
-					} else if (this.subagentViewInsertMode) {
-						this.subagentViewInsertMode = false;
-						this.renderSubagentsView();
-					} else {
-						this.closeSubagentsView();
+				if (data[i + 1] === '[') {
+					i += 2;
+					let seq = '';
+					while (i < data.length) {
+						const sc = data.charCodeAt(i);
+						if (sc >= 0x40 && sc <= 0x7e) { seq += data[i]; i++; break; }
+						seq += data[i];
+						i++;
 					}
-					return;
+					i--;
+					if (this.subagentViewBusy) continue; // 发送中忽略
+					if (seq === 'A') this.subagentScrollBy(-1);
+					else if (seq === 'B') this.subagentScrollBy(1);
+					else if (seq === '5~') this.subagentScrollPage(-1);
+					else if (seq === '6~') this.subagentScrollPage(1);
+					continue;
 				}
-				i++;
-				while (i < data.length) {
-					const sc = data.charCodeAt(i);
-					i++;
-					if (sc >= 0x40 && sc <= 0x7e) break;
+				// 单独 ESC：insert → 退出到命令模式；命令模式 → 关闭视图
+				if (this.subagentViewBusy) {
+					this.closeSubagentsView();
+				} else if (this.subagentViewInsertMode) {
+					this.subagentViewInsertMode = false;
+					this.renderSubagentsView();
+				} else {
+					this.closeSubagentsView();
 				}
-				i--;
-				continue;
+				return;
 			}
 
 			// 发送中：忽略其他输入（ESC 已处理）
@@ -1870,6 +1908,7 @@ export class TuiApp {
 				if (subs.length > 0) {
 					this.viewerSubagentIndex = (this.viewerSubagentIndex + 1) % subs.length;
 					this.subagentViewError = null;
+					this.subagentViewFollowTail = true; // 切换 subagent：从最新输出看起
 					this.renderSubagentsView();
 				}
 				continue;
@@ -1878,6 +1917,7 @@ export class TuiApp {
 				if (subs.length > 0) {
 					this.viewerSubagentIndex = (this.viewerSubagentIndex - 1 + subs.length) % subs.length;
 					this.subagentViewError = null;
+					this.subagentViewFollowTail = true;
 					this.renderSubagentsView();
 				}
 				continue;
@@ -1887,12 +1927,41 @@ export class TuiApp {
 				if (idx < subs.length) {
 					this.viewerSubagentIndex = idx;
 					this.subagentViewError = null;
+					this.subagentViewFollowTail = true;
 					this.renderSubagentsView();
 				}
 				continue;
 			}
 			// 命令模式：其他字符忽略（不进入输入缓冲）
 		}
+	}
+
+	/** 输出窗口可见行数（与底部标题/列表/提示/输入行高联动） */
+	private subagentOutputRows(): number {
+		const { rows } = getTermSize();
+		const subs = this.sessionMgr.listSubagents();
+		const maxListRows = Math.max(1, Math.min(subs.length, rows - 8));
+		return Math.max(1, rows - 1 - (1 + maxListRows + 2));
+	}
+
+	/** 滚动选中 subagent 轨迹（±delta 行）；贴底时恢复跟随最新 */
+	private subagentScrollBy(delta: number): void {
+		const subs = this.sessionMgr.listSubagents();
+		if (subs.length === 0) return;
+		const visible = this.subagentOutputRows();
+		const maxOffset = Math.max(0, this.subagentViewTotal - visible);
+		this.subagentViewFollowTail = false;
+		this.subagentViewScrollOffset = Math.max(0, Math.min(this.subagentViewScrollOffset + delta, maxOffset));
+		if (this.subagentViewScrollOffset >= maxOffset) this.subagentViewFollowTail = true;
+		this.renderSubagentsView();
+	}
+
+	/** 翻页滚动轨迹（PgUp/PgDn） */
+	private subagentScrollPage(dir: 1 | -1): void {
+		const subs = this.sessionMgr.listSubagents();
+		if (subs.length === 0) return;
+		const visible = this.subagentOutputRows();
+		this.subagentScrollBy(dir * Math.max(1, visible - 1));
 	}
 
 	/** 视图内：向选中 subagent 发送消息（同步等待续跑，期间视图显示发送中） */
