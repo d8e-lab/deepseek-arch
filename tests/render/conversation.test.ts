@@ -91,4 +91,49 @@ describe('ConversationView', () => {
 		expect(firstIdx).toBeGreaterThanOrEqual(0);
 		expect(secondIdx).toBeGreaterThan(firstIdx);
 	});
+
+	/** 构造带工具调用的轮次 */
+	function makeToolTurn(toolCalls: TurnRecord['tool_calls']): TurnRecord {
+		return {
+			...makeTurn('run tools', 'ok'),
+			tool_calls: toolCalls,
+		};
+	}
+
+	it('默认（normal/detail）渲染工具结果内容', () => {
+		const view = new ConversationView();
+		const lines = view.renderToText([makeToolTurn([
+			{ id: 'c1', name: 'shell', arguments: { command: 'ls -la' }, result: 'file1\nfile2', duration_ms: 5 },
+		])], 80);
+		expect(lines.some(l => l.includes('● run shell'))).toBe(true);
+		expect(lines.some(l => l.includes('file1'))).toBe(true);
+	});
+
+	it('short 模式：非文件修改工具结果隐藏，显示成功标记', () => {
+		const view = new ConversationView();
+		const lines = view.renderToText([makeToolTurn([
+			{ id: 'c1', name: 'shell', arguments: { command: 'ls -la' }, result: 'file1\nfile2\nfile3', duration_ms: 5 },
+		])], 80, { mode: 'short' });
+		expect(lines.some(l => l.includes('● run shell'))).toBe(true);
+		expect(lines.some(l => l.includes('file1'))).toBe(false);
+		expect(lines.some(l => l.includes('✓'))).toBe(true);
+	});
+
+	it('short 模式：失败工具仍显示错误标记', () => {
+		const view = new ConversationView();
+		const lines = view.renderToText([makeToolTurn([
+			{ id: 'c1', name: 'shell', arguments: { command: 'false' }, result: '', error: 'exit 1', duration_ms: 5 },
+		])], 80, { mode: 'short' });
+		expect(lines.some(l => l.includes('Error: exit 1'))).toBe(true);
+		expect(lines.some(l => l.includes('✓'))).toBe(false);
+	});
+
+	it('short 模式：文件修改工具保留 diff 预览与结果', () => {
+		const view = new ConversationView();
+		const lines = view.renderToText([makeToolTurn([
+			{ id: 'c1', name: 'edit_file', arguments: { path: 'a.ts' }, preview: '-old\n+new', result: 'ok: updated a.ts', duration_ms: 5 },
+		])], 80, { mode: 'short' });
+		expect(lines.some(l => l.includes('+new'))).toBe(true);
+		expect(lines.some(l => l.includes('ok: updated a.ts'))).toBe(true);
+	});
 });

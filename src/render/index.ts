@@ -5,6 +5,8 @@
  * 用法：`import { ConversationView, wrapText } from 'deepseek-arch/render';`
  */
 export { ConversationView, wrapText, truncateThink, renderToolCallLine, renderToolResultLines, renderToolError } from './conversation.js';
+export { DISPLAY_PRESETS, isFileModTool, isDisplayMode } from './display-mode.js';
+export type { DisplayMode, DisplayPreset } from './display-mode.js';
 export { MarkdownTableRenderer } from './markdown.js';
 export { InputEditor } from './input-editor.js';
 export { Selector } from './selector.js';

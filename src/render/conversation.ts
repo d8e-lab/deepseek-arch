@@ -11,6 +11,8 @@ import type { TurnRecord, TokenUsage } from '../types/index.js';
 import { strDisplayWidth, cyan, dim, green, red, renderDiffLine, stripAnsi, formatToolCallSummary } from './ansi.js';
 import { MarkdownTableRenderer } from './markdown.js';
 import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../utils/turn-utils.js';
+import { DISPLAY_PRESETS, isFileModTool } from './display-mode.js';
+import type { DisplayMode } from './display-mode.js';
 
 /** think 最大显示行数 */
 const THINK_MAX_LINES = 4;
@@ -130,8 +132,9 @@ export class ConversationView {
 	 * 渲染全部对话轮次为行数组
 	 * 调用方负责根据终端高度决定显示哪些行（从底部截取）
 	 * @param opts.fullThink true 时 think 完整显示（Ctrl+O 全屏视图用），默认截断 4 行
+	 * @param opts.mode 展示模式：short 时非文件修改工具的结果内容隐藏（仅成功/失败标记），normal/detail 不区分
 	 */
-	render(turns: TurnRecord[], termWidth: number, opts?: { fullThink?: boolean }): string[] {
+	render(turns: TurnRecord[], termWidth: number, opts?: { fullThink?: boolean; mode?: DisplayMode }): string[] {
 		const lines: string[] = [];
 
 		for (let ti = 0; ti < turns.length; ti++) {
@@ -210,11 +213,24 @@ export class ConversationView {
 							lines.push(renderDiffLine(line, ''));
 						}
 					}
-					if (tcr.error) {
-						lines.push(renderToolError(tcr.error));
-					}
-					if (tcr.result) {
-						lines.push(...renderToolResultLines(tcr.result));
+
+					// short 模式：非文件修改工具不展示结果内容，仅保留成功/失败标记
+					const hideResult = opts?.mode === 'short'
+						&& DISPLAY_PRESETS.short.hideNonFileToolResult
+						&& !isFileModTool(tcr.name);
+					if (hideResult) {
+						if (tcr.error) {
+							lines.push(renderToolError(tcr.error));
+						} else if (tcr.result) {
+							lines.push(green(' ✓'));
+						}
+					} else {
+						if (tcr.error) {
+							lines.push(renderToolError(tcr.error));
+						}
+						if (tcr.result) {
+							lines.push(...renderToolResultLines(tcr.result));
+						}
 					}
 				}
 				lines.push('');
@@ -259,7 +275,7 @@ export class ConversationView {
 	 * 渲染对话历史为纯文本（剥离 ANSI 颜色码）
 	 * 供 tui_capture / tui_render_preview 工具使用，让模型看到结构化渲染结果
 	 */
-	renderToText(turns: TurnRecord[], termWidth: number): string[] {
-		return this.render(turns, termWidth).map(line => stripAnsi(line));
+	renderToText(turns: TurnRecord[], termWidth: number, opts?: { fullThink?: boolean; mode?: DisplayMode }): string[] {
+		return this.render(turns, termWidth, opts).map(line => stripAnsi(line));
 	}
 }
