@@ -2,7 +2,7 @@
  * SubagentRecordView 单元测试
  */
 import { describe, it, expect } from 'vitest';
-import { SubagentRecordView } from '../../src/render/subagent-record-view.js';
+import { SubagentRecordView, isWordFragmentRun } from '../../src/render/subagent-record-view.js';
 import { stripAnsi } from '../../src/render/ansi.js';
 import type { SubagentRecord } from '../../src/types/index.js';
 
@@ -63,6 +63,35 @@ describe('SubagentRecordView', () => {
 		expect(text).toContain('  第一行');
 		expect(text).toContain('  第二行');
 		expect(text).toContain('  第三行');
+	});
+
+	it('旧版词碎片记录：连续 content 直接拼接还原原文（不逐词成行）', () => {
+		// 1b9c1d7 之前的历史记录：每条 = 一个流式 token
+		const words = '以下是按严重度分组的真实缺陷（均有文件:行号证据，已交叉验证）。'.split(/(?<=。|（|）|，|:|)/).filter(Boolean);
+		const frags = words.length > 0 ? words : ['碎片1', '碎片2', '碎片3', '碎片4', '碎片5', '碎片6'];
+		const entries = frags.map((w, i) => ({ type: 'content' as const, content: w, timestamp: i }));
+		const lines = view.renderToText(makeRecord(entries), 80);
+		const text = lines.join('\n');
+		// 词流被拼接成连续文本（同一行/连续 wrap 行内包含前后词），而非每个词单独成行
+		const flat = stripAnsi(text).replace(/\s+/g, '');
+		expect(flat).toContain('以下是按严重度分组的真实缺陷');
+	});
+
+	it('isWordFragmentRun 判定：短碎词流为 true，正常行/过短为 false', () => {
+		expect(isWordFragmentRun(['已', '完成', '排', '查', '。', '以', '下', '是'])).toBe(true);
+		// 不足 5 条 → false（按行处理）
+		expect(isWordFragmentRun(['第一行', '第二行'])).toBe(false);
+		// 含长 token（>40）→ false
+		const longTok = ['x'.repeat(50)];
+		expect(isWordFragmentRun(['短', '词', '流', '但', ...longTok, 'a', 'b', 'c', 'd', 'e'])).toBe(false);
+		// 正常长行（平均 >10）→ false
+		expect(isWordFragmentRun([
+			'这是一个正常长度的文本行内容用于测试',
+			'这是另一行正常长度的文本行内容测试',
+			'第三行也是正常长度的内容用于测试判断',
+			'第四行依旧正常长度的文本内容用于测试',
+			'第五行正常长度的文本内容用于判定函数',
+		])).toBe(false);
 	});
 
 	it('markdown 表格跨 content 条目渲染完整', () => {

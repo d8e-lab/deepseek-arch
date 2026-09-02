@@ -34,12 +34,20 @@ export class SubagentRecordView {
 
 		// ─── 输出条目 ──────────────────────────
 		// 合并连续 content 条目：流式输出被按 chunk/行拆成多条碎 entry，
-		// 合并成完整段落再渲染（markdown 表格跨条目也完整）
+		// 合并成完整段落再渲染（markdown 表格跨条目也完整）。
+		//
+		// 兼容两种 entry 形态：
+		//  1. 按行记录（1b9c1d7 起）：每条 = 一行文本（行尾无 \n）→ 用 '\n' 连接还原行
+		//  2. 词碎片记录（1b9c1d7 之前的历史记录）：每条 = 一个流式 token（如 '已完成'/'排查'/'。'）
+		//     → 用 '' 直接拼接还原原文（token 序列无损；换行也是单独 token，拼回后自然保留）
 		let contentBuffer: string[] = [];
 		const flushContentBuffer = (): void => {
 			if (contentBuffer.length === 0) return;
+			const joined = isWordFragmentRun(contentBuffer)
+				? contentBuffer.join('')
+				: contentBuffer.join('\n');
 			const md = new MarkdownTableRenderer();
-			const rendered = md.feed(contentBuffer.join('\n')) ?? [];
+			const rendered = md.feed(joined) ?? [];
 			rendered.push(...(md.flush() ?? []));
 			for (const rline of rendered) {
 				for (const wline of wrapText(rline, Math.max(1, termWidth - 2))) {
@@ -119,4 +127,25 @@ export class SubagentRecordView {
 	renderToText(record: SubagentRecord, termWidth: number): string[] {
 		return this.render(record, termWidth).map(stripAnsi);
 	}
+}
+
+/**
+ * 判断连续 content 条目是否为「词碎片流」——1b9c1d7 之前的历史记录格式：
+ * 每条 = 一个流式 token（如 '已完成'/'排查'/'。'，极短且海量）。
+ * 词碎片需用 '' 直接拼接还原原文（token 序列无损，换行也是单独 token）；
+ * 按行记录（每条一行、有正常长度/长行）用 '\n' 连接还原行。
+ *
+ * 判定保守：不足 5 条、平均 >10 字符或出现 >40 字符的 token 均视为按行，
+ * 避免误伤正常段落（短列表/短句正文仍按行展示）。
+ */
+export function isWordFragmentRun(parts: string[]): boolean {
+	if (parts.length < 5) return false;
+	let total = 0;
+	let max = 0;
+	for (const p of parts) {
+		total += p.length;
+		if (p.length > max) max = p.length;
+	}
+	const avg = total / parts.length;
+	return avg <= 10 && max <= 40;
 }

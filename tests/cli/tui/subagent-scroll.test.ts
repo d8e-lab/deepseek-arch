@@ -13,11 +13,15 @@ import type { TuiConfig } from '../../../src/presentation/types.js';
 import type { SubagentRecord } from '../../../src/types/index.js';
 import { stripAnsi } from '../../../src/render/ansi.js';
 
-/** 构造带 40 行连续输出的 subagent 记录（超出窗口 → 可滚动） */
+/** 构造带 40 行输出的 subagent 记录（超出窗口 → 可滚动；内容为按行格式的完整句子行） */
 function makeRecord(name = 's1'): SubagentRecord {
 	const entries = [];
 	for (let i = 1; i <= 40; i++) {
-		entries.push({ type: 'content', content: `轨迹内容行${i}`, timestamp: i });
+		entries.push({
+			type: 'content',
+			content: `轨迹内容行${i}：按行格式的完整正文句子，模拟真实记录行粒度。`,
+			timestamp: i,
+		});
 	}
 	return {
 		name,
