@@ -38,10 +38,19 @@ function makeApp(records: SubagentRecord[]): TuiApp {
 		name: r.name,
 		status: r.status,
 		startMs: r.startMs,
+		endMs: r.endMs,
 		toRecord: () => r,
 	}));
+	return makeSubsApp(subs);
+}
+
+/** 用外部可变的 subagent 对象列表构造 TuiApp（测试可模拟 running → completed 转变） */
+function makeSubsApp(
+	subs: Array<{ name: string; status: string; startMs: number; endMs?: number; toRecord: () => SubagentRecord }>,
+): TuiApp {
 	const mgr = {
 		getSubagentAsync: () => false,
+		getSession: () => null,
 		listSubagents: () => subs,
 	} as unknown as SessionManager;
 	const config: TuiConfig = {
@@ -124,5 +133,37 @@ describe('Ctrl+T Subagents 视图轨迹滚动', () => {
 		const afterNav = lastRenderText(beforeNav);
 		expect(afterNav).not.toContain('轨迹内容行1');
 		expect(afterNav).toContain('轨迹内容行40');
+	});
+
+	it('subagent 结束后：耗时固定到 endMs，500ms 刷新定时器停止', () => {
+		const subs = [
+			{ name: 's1', status: 'running', startMs: Date.now() - 5000, toRecord: () => makeRecord('s1') },
+		];
+		const app = makeSubsApp(subs);
+		const anyApp = app as unknown as {
+			openSubagentsView: () => void;
+			closeSubagentsView: () => void;
+			renderSubagentsView: () => void;
+			subagentViewTimer: ReturnType<typeof setInterval> | null;
+		};
+		try {
+			anyApp.openSubagentsView();
+			// running 中：视图刷新定时器在跑
+			expect(anyApp.subagentViewTimer).not.toBeNull();
+
+			// 模拟结束：completed + endMs（startMs 后 1s）
+			subs[0].status = 'completed';
+			subs[0].endMs = Date.now() - 4000;
+			const before = writes.length;
+			anyApp.renderSubagentsView();
+			const out = stripAnsi(writes.slice(before).join(''));
+
+			// 全部结束且主流程空闲 → 定时器停止
+			expect(anyApp.subagentViewTimer).toBeNull();
+			// 耗时固定为 endMs-startMs=1s（而非 now-startMs≈5s 继续跳动）
+			expect(out).toContain('(completed, 1.0s)');
+		} finally {
+			anyApp.closeSubagentsView();
+		}
 	});
 });

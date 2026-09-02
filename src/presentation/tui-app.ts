@@ -1701,12 +1701,9 @@ export class TuiApp {
 		const session = this.sessionMgr.getSession();
 		this.overlay.setOpenTurnCount(session?.turns.length ?? 0);
 		this.overlay.open('subagents', (data: string) => this.handleSubagentsViewInput(data), this.state !== AppState.IDLE);
-		// 渲染由 OverlayPane.render 钩子（renderActiveOverlay）完成；此处启动实时刷新
-		this.subagentViewTimer = setInterval(() => {
-			if (this.overlay.active && this.overlay.currentMode === 'subagents') {
-				this.renderSubagentsView();
-			}
-		}, 500);
+		// 渲染由 OverlayPane.render 钩子（renderActiveOverlay）完成；
+		// 实时刷新由 syncSubagentViewTimer 按需启停（有 running 或主流程在跑才刷新）
+		this.syncSubagentViewTimer();
 	}
 
 	/** 退出 Subagents 视图：公共生命周期由 OverlayPane 统一处理（timer 清理在 cleanup 钩子） */
@@ -1717,6 +1714,8 @@ export class TuiApp {
 
 	/** 渲染 Subagents 总览视图（顶部标题 + 选中输出占主区，subagent 列表沉底 + 输入） */
 	private renderSubagentsView(): void {
+		// 同步刷新定时器（全部结束后停止，避免 completed 列表仍在每 500ms 刷新/耗秒跳动）
+		this.syncSubagentViewTimer();
 		const { rows, cols } = getTermSize();
 		const subs = this.sessionMgr.listSubagents();
 
@@ -1774,7 +1773,9 @@ export class TuiApp {
 			const icon = s.status === 'running' ? '●'
 				: s.status === 'completed' ? green('✓')
 				: red('✗');
-			const elapsed = ((Date.now() - s.startMs) / 1000).toFixed(1);
+			// 已结束的 subagent：耗时固定到 endMs（不再随 now 增长）
+			const endTs = s.endMs ?? Date.now();
+			const elapsed = ((endTs - s.startMs) / 1000).toFixed(1);
 			const marker = i === this.viewerSubagentIndex ? green('▸') : ' ';
 			const name = i === this.viewerSubagentIndex ? cyan(s.name) : s.name;
 			return `  ${marker} ${icon} ${name} ${dim(`(${s.status}, ${elapsed}s)`)}`;
@@ -1942,6 +1943,32 @@ export class TuiApp {
 		const subs = this.sessionMgr.listSubagents();
 		const maxListRows = Math.max(1, Math.min(subs.length, rows - 8));
 		return Math.max(1, rows - 1 - (1 + maxListRows + 2));
+	}
+
+	/**
+	 * 同步视图刷新定时器（500ms）：
+	 * - 存在 running subagent，或主流程仍非 IDLE（后台可能 spawn 新 subagent）→ 保持刷新；
+	 * - 全部 subagent 已结束（completed/failed/cancelled）且主流程 IDLE → 停止刷新，
+	 *   视图画面保留最后状态，耗时不再跳动（cleanup 钩子在视图关闭时兜底清除）。
+	 */
+	private syncSubagentViewTimer(): void {
+		if (!this.overlay.active || this.overlay.currentMode !== 'subagents') return;
+		const subs = this.sessionMgr.listSubagents();
+		const hasRunning = subs.some((s) => s.status === 'running');
+		// 主流程仍持有流（abortController 非空）：后台可能继续输出/spawn 新 subagent
+		const maySpawnMore = this.abortController !== null;
+		if (hasRunning || maySpawnMore) {
+			if (!this.subagentViewTimer) {
+				this.subagentViewTimer = setInterval(() => {
+					if (this.overlay.active && this.overlay.currentMode === 'subagents') {
+						this.renderSubagentsView();
+					}
+				}, 500);
+			}
+		} else if (this.subagentViewTimer) {
+			clearInterval(this.subagentViewTimer);
+			this.subagentViewTimer = null;
+		}
 	}
 
 	/** 滚动选中 subagent 轨迹（±delta 行）；贴底时恢复跟随最新 */
