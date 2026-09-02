@@ -86,6 +86,7 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 - **Session 持久化**：浏览器最后访问的 URL 跨 session 持久化，resume 时自动恢复
 - **流式输出**：SSE 实时增量渲染，Ctrl+C 中断模型输出；模型调用工具前正文实时显示，对话节奏自然
 - **多轮对话**：自动持久化 turn JSON（含 `reasoning_content` 命中 kv-cache + `tool_calls` 记录）
+- **会话标题**：新会话第一条用户消息自动成为标题（≤20 字），resume 列表按标题识别
 - **上下文压缩**：`/compact` 命令 + 自动 compact——分代存储、结构化摘要、Read 文件重注入，磁盘保留全量历史
 - **模型切换**：`/model` 命令切换模型（deepseek-v4-flash / deepseek-v4-pro，候选列表从配置动态生成）
 - **对话恢复**：按 ID 或标题恢复历史会话（含工具调用上下文重建）
@@ -94,7 +95,8 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 - **Subagents 总览视图**：Ctrl+T 任意状态打开全屏实时视图（状态条 + 选中子代理输出 + 视图内输入），n/p/数字切换，master 转入后台静默执行，返回时补渲染
 - **全双工输入**：模型输出期间 `/` 命令立即执行（结果固定显示在底部命令结果区），普通文本/`!shell` 排队不中断输出、结束后自动发送
 - **Skill 机制**：模型可发现并调用技能（plan/release/research），frontmatter 元数据 + 目录加载 + 条件激活（触碰 docs/ 等路径自动出现）
-- **YOLO 审查模型**：`--yolo` 下自动批准工具执行，并在 agent loop 自然终止处审查输出（stalled/deflecting 自动续答）
+- **YOLO 审查模型**：默认 YOLO 模式（`--no-yolo` 关闭）自动批准工具执行，并在 agent loop 自然终止处审查输出（stalled/deflecting 自动续答）
+- **展示模式**：`--detail`（完整实时输出）/ `--normal`（think ≤4 行、结果 ≤6 行，默认）/ `--short`（工具只显示调用与成败，文件修改除外）
 - **命令补全**：输入 `/` 触发命令补全，建议列表支持滚动浏览全部选项
 - **Token 记录**：保存 API 返回的 `usage`，每轮记录 KV cache 命中率日志（5% 异常标记）
 - **API 请求监听**：`--monitor` + `api-monitor` 子命令，完整记录发给 API 的请求体，排查上下文丢失
@@ -155,13 +157,20 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 -r, --resume <id>     按 ID 或名称恢复会话
 --browser             显示浏览器窗口（默认 headless）
 --cdp <url>           连接宿主机浏览器（如 --cdp http://127.0.0.1:9222）
---yolo                跳过所有工具确认（自动批准 shell/edit）
+--yolo                跳过所有工具确认（自动批准 shell/edit；默认已开启）
+--no-yolo             关闭 YOLO 模式（工具执行需 y/N 确认）
+--short               极简展示：think ≤4 行、工具只显示调用与成败（文件修改的 diff/结果除外）
+--normal              平衡展示：think ≤4 行、工具结果 ≤6 行（默认）
+--detail              完整展示：think 5 行后折叠、实时工具输出、结果 ≤12 行（旧行为）
 --async               子代理异步模式（spawn 立即返回，配合 wait/list_subagents）
 --debug               暴露 TUI 捕获/渲染预览工具（模型调试用）
 --self-interaction    暴露子会话 PTY 工具（模型自主验证前端展示）
 --mock                使用 MockProvider（本地测试，无需 API key）
 --monitor <url>       镜像 API 请求到监听服务器
 ```
+
+> `--short` / `--normal` / `--detail` 互斥；展示模式仅影响终端展示，不改变发送给模型的完整上下文。
+> 新会话第一条用户消息自动作为会话标题（≤20 字），可用 `/resume` 列表或 `resume <title>` 按标题恢复。
 
 ## 配置
 
@@ -198,7 +207,7 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 | `temperature` / `max_tokens` | 未设置 | 生成参数（deepseek-v4 思考模式下 temperature 不生效） |
 | `reasoning_effort` | `high` | 推理强度 low/high/max |
 | `thinking` | `enabled` | 思考模式开关 |
-| `yolo` | `false` | YOLO 模式（`/yolo` 写回） |
+| `yolo` | `true` | YOLO 模式（默认开启；`--no-yolo` 临时关闭，`/yolo` 写回） |
 | `async` | `false` | 子代理异步模式（`/async` 写回） |
 | `auto_compact` | `true` | 自动 compact 开关 |
 | `auto_compact_threshold` | `0.7` | 自动 compact 触发阈值（占上下文窗口比例） |
