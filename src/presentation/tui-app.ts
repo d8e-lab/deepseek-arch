@@ -110,6 +110,12 @@ export class TuiApp {
 	private readonly displayMode: DisplayMode;
 	/** think 最多实时显示行数（超出折叠，随展示模式变化；Ctrl+O 查看完整） */
 	private readonly thinkVisibleLines: number;
+	/**
+	 * scrollback 内容最后一行是否为分隔线（printSeparator 去重用）。
+	 * 视图关闭重建底部 / 命令结束收尾时，若上一行已是分隔线且期间无新内容输出，
+	 * 不再重复打印，避免「多一道横线」。
+	 */
+	private outputEndsWithSeparator = false;
 	/** 全屏覆盖层（Ctrl+O 对话浏览 / Ctrl+T Subagents 总览）——公共生命周期收敛至 OverlayPane */
 	private overlay: OverlayPane;
 	/** subagents 视图：当前选中 subagent 索引 */
@@ -265,9 +271,12 @@ export class TuiApp {
 	}
 
 	private printSeparator(): void {
+		// 上一行已是分隔线（期间无新内容输出）→ 不重复打印（视图关闭/命令收尾易触发）
+		if (this.outputEndsWithSeparator) return;
 		const cols = getTermSize().cols;
 		// cols-1 避免 auto-wrap，\r\n 确保 raw mode 下正确换行
 		this.out.write('─'.repeat(cols - 1) + '\r\n');
+		this.outputEndsWithSeparator = true;
 	}
 
 	private printConversation(turns: import('../types/index.js').TurnRecord[]): void {
@@ -279,6 +288,8 @@ export class TuiApp {
 		for (const line of lines) {
 			this.out.write(line + '\r\n');
 		}
+		// 内容是普通文本（非分隔线），后续 printSeparator 可正常打印
+		if (lines.length > 0) this.outputEndsWithSeparator = false;
 	}
 
 	private printExitInfo(): void {
@@ -457,6 +468,7 @@ export class TuiApp {
 			this.bottom.clearCommandResult(false); // 输入区已重建，不重绘避免错位
 			this.bottom.collapse();                // 收起重建的输入区（closeViewer 已重置位置）
 			this.out.write(green('[You] ') + next + '\r\n\r\n');
+			this.outputEndsWithSeparator = false; // 用户消息行：后续输出非分隔线
 			await this.sendMessageStream(next);
 			// 视图可能在发送期间打开：跳过 UI 收尾（主循环等待视图关闭后重新进入）
 			if (this.overlay.active) return;
@@ -493,6 +505,7 @@ export class TuiApp {
 				const sendContent = content.startsWith('//') ? content.slice(1) : content;
 				this.bottom.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
 				this.out.write(green('[You] ') + sendContent + '\r\n\r\n');
+				this.outputEndsWithSeparator = false;
 				await this.sendMessageStream(sendContent);
 			}
 			// 视图可能在命令处理/输出期间打开：跳过 UI 收尾（视图接管）
@@ -507,6 +520,7 @@ export class TuiApp {
 		// 打印用户消息（绿色）
 		this.bottom.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
 		this.out.write(green('[You] ') + content + '\r\n\r\n');
+		this.outputEndsWithSeparator = false;
 
 		// 拼接待发送的 shell 上下文（仅模型可见）
 		if (this.pendingShellContext.length > 0) {
@@ -1005,6 +1019,7 @@ export class TuiApp {
 	private executeShellCommand(cmd: string): void {
 		// 打印命令到 scrollback（cmd 已包含前导 !）
 		this.out.write(PINK_BG_START + cmd + PINK_BG_END + '\r\n');
+		this.outputEndsWithSeparator = false; // 命令行为内容行
 
 		// 去掉前导 ! 后执行
 		const shellCmd = cmd.startsWith('!') ? cmd.slice(1).trimStart() : cmd;
@@ -1064,6 +1079,7 @@ export class TuiApp {
 				this.out.write(red(' │ ' + line) + '\r\n');
 			}
 		}
+		this.outputEndsWithSeparator = false; // 输出均为内容行（可能为空 → cmd 行已置）
 
 		// 构建隐藏上下文块
 		const parts: string[] = ['[shell_start]', cmd];
@@ -1322,6 +1338,7 @@ export class TuiApp {
 			const errMsg = `Unknown command: ${content}`;
 			this.out.write(red(errMsg) + '\r\n');
 			this.out.write(dim(`  Available: ${AVAILABLE_COMMANDS.join(', ')}`) + '\r\n');
+			this.outputEndsWithSeparator = false; // 错误行为内容行（随后正常打分隔线）
 			// 不清除输入，不清除 stdinHandler，用户可继续修改/重试
 			// 重新渲染输入区域
 			this.printSeparator();
@@ -1414,6 +1431,7 @@ export class TuiApp {
 		}
 		this.bottom.collapse();
 		this.out.write(line + '\r\n');
+		this.outputEndsWithSeparator = false;
 		this.bottom.renderAfterOutput();
 	}
 
@@ -1428,6 +1446,7 @@ export class TuiApp {
 		for (const l of lines) {
 			this.out.write(l + '\r\n');
 		}
+		this.outputEndsWithSeparator = false;
 		this.bottom.renderAfterOutput();
 	}
 
@@ -1684,7 +1703,7 @@ export class TuiApp {
 		this.overlay.close();
 	}
 
-	/** 渲染 Subagents 总览视图（顶部状态条 + 选中 subagent 输出 + 底部输入） */
+	/** 渲染 Subagents 总览视图（顶部标题 + 选中输出占主区，subagent 列表沉底 + 输入） */
 	private renderSubagentsView(): void {
 		const { rows, cols } = getTermSize();
 		const subs = this.sessionMgr.listSubagents();
@@ -1704,36 +1723,52 @@ export class TuiApp {
 		const current = subs[this.viewerSubagentIndex];
 		const record = current.toRecord();
 
-		// ── 顶部状态条（无进度条：状态 + 耗时）──
+		// ── 顶部标题（仅一行，其余空间留给选中 subagent 输出）──
 		const curIcon = current.status === 'running' ? '⏳'
 			: current.status === 'completed' ? '✓' : '✗';
 		this.out.write(yellow(`═══ Subagents (${subs.length}) — 选中: ${current.name} ${curIcon} ═══`) + '\r\n');
-		subs.forEach((s, i) => {
+
+		// 底部列表高度（预留标题 1 + 输出 ≥3 + 分隔线 1 + 提示/输入 2 行）
+		const maxListRows = Math.max(1, Math.min(subs.length, rows - 8));
+
+		// ── 选中 subagent 输出（复用 SubagentRecordView，显示末尾 N 行 = 最新，占据主区域）──
+		const view = new SubagentRecordView();
+		const outLines = view.render(record, cols);
+		const visible = Math.max(1, rows - 1 - (1 + maxListRows + 2));
+		const start = Math.max(0, outLines.length - visible);
+		for (let r = 0; r < visible; r++) {
+			const idx = start + r;
+			this.out.write('\r\x1b[2K');
+			if (idx < outLines.length) {
+				this.out.write(outLines[idx].slice(0, cols - 1));
+			}
+			if (r < visible - 1) this.out.write('\r\n');
+		}
+
+		// ── 底部：分隔线 + subagent 列表（状态栏，选中高亮）──
+		this.out.write('\r\n');
+		this.out.write(dim('─'.repeat(Math.max(20, cols - 2))) + '\r\n');
+		const listLines = subs.map((s, i) => {
 			const icon = s.status === 'running' ? '●'
 				: s.status === 'completed' ? green('✓')
 				: red('✗');
 			const elapsed = ((Date.now() - s.startMs) / 1000).toFixed(1);
 			const marker = i === this.viewerSubagentIndex ? green('▸') : ' ';
 			const name = i === this.viewerSubagentIndex ? cyan(s.name) : s.name;
-			this.out.write(`  ${marker} ${icon} ${name} ${dim(`(${s.status}, ${elapsed}s)`)}` + '\r\n');
+			return `  ${marker} ${icon} ${name} ${dim(`(${s.status}, ${elapsed}s)`)}`;
 		});
-		this.out.write(dim('─'.repeat(Math.max(20, cols - 2))) + '\r\n');
-
-		// ── 选中 subagent 输出（复用 SubagentRecordView，显示末尾 N 行 = 最新）──
-		const view = new SubagentRecordView();
-		const lines = view.render(record, cols);
-		const visible = Math.max(1, rows - 7); // 状态条区 + 提示行 + 输入行
-		const start = Math.max(0, lines.length - visible);
-		for (let r = 0; r < visible; r++) {
-			const idx = start + r;
+		const shown = listLines.slice(0, maxListRows);
+		shown.forEach((l, i) => {
 			this.out.write('\r\x1b[2K');
-			if (idx < lines.length) {
-				this.out.write(lines[idx].slice(0, cols - 1));
-			}
-			if (r < visible - 1) this.out.write('\r\n');
+			this.out.write(l);
+			if (i < shown.length - 1) this.out.write('\r\n');
+		});
+		if (listLines.length > shown.length) {
+			this.out.write('\r\n\x1b[2K');
+			this.out.write(dim(`  … 还有 ${listLines.length - shown.length} 个 subagent`));
 		}
 
-		// ── 底部：快捷键提示 + 输入区 ──
+		// ── 最底部：快捷键提示 + 输入区 ──
 		this.out.write('\r\n\x1b[2K');
 		if (this.subagentViewInsertMode) {
 			this.out.write(dim(`  [Enter] 发送  [ESC] 退出输入`) + '\r\n');
@@ -2323,6 +2358,7 @@ export class TuiApp {
 					this.bottom.clearCommandResult(false); // 输入区已收起，不重绘
 					this.printSeparator();
 					this.out.write(green('[You] ') + next + '\r\n\r\n');
+					this.outputEndsWithSeparator = false;
 					await this.sendMessageStream(next);
 				}
 			}

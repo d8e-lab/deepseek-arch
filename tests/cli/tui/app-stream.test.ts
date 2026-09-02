@@ -16,6 +16,7 @@ import type { SessionManager } from '../../../src/core/session.js';
 import type { StreamEvent } from '../../../src/types/index.js';
 import type { TuiConfig } from '../../../src/presentation/types.js';
 import { GRAY_BG_START, stripAnsi } from '../../../src/render/ansi.js';
+import { getTermSize } from '../../../src/presentation/terminal.js';
 
 /** 与 app.ts 中定义的 CLEAR_TO_END 一致（从光标处清除到屏幕底） */
 const CLEAR_TO_END = '\x1b[0J';
@@ -345,6 +346,24 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		expect(out).toContain('res1');
 		expect(out).not.toContain('res2');
 		expect(out).toContain('...');
+	});
+
+	it('printSeparator 幂等：末行已是分隔线时不重复输出，内容后恢复正常（多横线回归）', () => {
+		const app = makeApp();
+		const anyApp = app as unknown as {
+			printSeparator: () => void;
+			writeOutputLine: (l: string) => void;
+		};
+		const sep = '─'.repeat(getTermSize().cols - 1);
+		// 连续两次（如视图关闭重建底部 / 命令收尾）只产生一条
+		anyApp.printSeparator();
+		anyApp.printSeparator();
+		// 输出内容行后（[You]/模型输出/工具行等）恢复正常打线
+		anyApp.writeOutputLine('内容行');
+		anyApp.printSeparator();
+		const out = writes.join('');
+		// 恰好 2 条完整分隔线（第 1 次 + 内容行后 1 次），而非 3 条
+		expect(out.split(sep).length - 1).toBe(2);
 	});
 
 	it('agent loop：assistant 无换行 content + tool_calls 时，content 在 ● run 之前输出（不堆积到 loop 结束）', async () => {
