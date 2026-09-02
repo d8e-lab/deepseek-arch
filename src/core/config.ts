@@ -65,7 +65,7 @@ reasoning_effort = "high"
 thinking = "enabled"
 
 # 运行时状态（/yolo /async 命令写回）
-yolo = false            # YOLO 模式：自动批准工具执行（跳过确认）
+yolo = true             # YOLO 模式：自动批准工具执行（跳过确认；默认开启，可用 --no-yolo 或 /yolo 关闭）
 async = false           # 子代理异步模式：spawn 立即返回，配合 wait/list_subagents
 
 # 自动 compact（上下文超阈值时压缩历史，保留摘要）
@@ -107,7 +107,7 @@ const DEFAULT_DEFAULTS: Partial<ConfigDefaults> = {
 	review_model: 'deepseek-v4-flash',
 	reasoning_effort: 'high',
 	thinking: 'enabled',
-	yolo: false,
+	yolo: true,
 	async: false,
 	auto_compact: true,
 	auto_compact_threshold: 0.7,

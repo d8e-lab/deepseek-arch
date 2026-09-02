@@ -74,6 +74,14 @@ describe('CLI (e2e)', () => {
       expect(stdout).toContain('--yolo');
     });
 
+    it('chat --help 显示 --no-yolo 与展示模式选项', () => {
+      const { stdout } = run(['chat', '--help']);
+      expect(stdout).toContain('--no-yolo');
+      expect(stdout).toContain('--short');
+      expect(stdout).toContain('--normal');
+      expect(stdout).toContain('--detail');
+    });
+
     it('chat --help 显示全部选项（含 debug/self-interaction/monitor）', () => {
       const { stdout } = run(['chat', '--help']);
       expect(stdout).toContain('--debug');
@@ -94,6 +102,8 @@ describe('CLI (e2e)', () => {
     it('resume --help 显示 --yolo 选项（与 chat 对齐）', () => {
       const { stdout } = run(['resume', '--help']);
       expect(stdout).toContain('--yolo');
+      expect(stdout).toContain('--no-yolo');
+      expect(stdout).toContain('--detail');
     });
 
     it('resume 无参数时显示会话列表或空提示', () => {

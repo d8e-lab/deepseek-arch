@@ -71,7 +71,7 @@ describe('ConfigManager', () => {
         review_model: 'deepseek-v4-flash',
         reasoning_effort: 'high',
         thinking: 'enabled',
-        yolo: false,
+        yolo: true,
         async: false,
         auto_compact: true,
         auto_compact_threshold: 0.7,
@@ -131,7 +131,7 @@ describe('ConfigManager', () => {
       expect(mgr.get('defaults.reasoning_effort')).toBe('high');
       expect(mgr.get('defaults.thinking')).toBe('enabled');
       expect(mgr.get('defaults.review_model')).toBe('deepseek-v4-flash');
-      expect(mgr.get('defaults.yolo')).toBe(false);
+      expect(mgr.get('defaults.yolo')).toBe(true);
       expect(mgr.get('defaults.async')).toBe(false);
       expect(mgr.get('defaults.auto_compact')).toBe(true);
       expect(mgr.get('defaults.auto_compact_threshold')).toBe(0.7);

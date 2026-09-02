@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { ConfigManager, DEFAULT_CONFIG_DIR, parseTokenSize } from '../core/config.js';
+import type { DisplayMode } from '../render/display-mode.js';
 import { ApiClient } from '../core/api.js';
 import { MockProvider } from '../core/mock-provider.js';
 import { SessionManager } from '../core/session.js';
@@ -125,6 +126,17 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	return sessionMgr;
 }
 
+/** 解析展示模式：--short/--normal/--detail 互斥；默认 normal（紧凑档） */
+function resolveDisplayMode(opts: { short?: boolean; normal?: boolean; detail?: boolean }): DisplayMode {
+	const flags = (['short', 'normal', 'detail'] as const).filter((k) => opts[k]);
+	if (flags.length > 1) {
+		throw new Error('--short / --normal / --detail 互斥，请只选择一个');
+	}
+	if (opts.short) return 'short';
+	if (opts.detail) return 'detail';
+	return 'normal';
+}
+
 // ─── CLI 定义 ─────────────────────────────────────
 
 const program = new Command();
@@ -139,6 +151,10 @@ program
 	.description('Start a new conversation or resume an existing one')
 	.option('-r, --resume <id>', 'resume a session by ID or name')
 	.option('--yolo', 'skip all tool confirmations (auto-approve edit/shell)')
+	.option('--no-yolo', 'disable YOLO mode (ask for tool confirmations; YOLO is default)')
+	.option('--short', 'compact display: think ≤4 lines, tool output hidden except file edits')
+	.option('--normal', 'balanced display: think ≤4 lines, tool results ≤6 lines (default)')
+	.option('--detail', 'full display (current behavior): live tool output, results ≤12 lines')
 	.option('--browser', 'show browser window (instead of headless)')
 	.option('--cdp <url>', 'connect to host browser via CDP (e.g. http://127.0.0.1:9222)')
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
@@ -146,11 +162,12 @@ program
 	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
 	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (options: { resume?: string; yolo?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.action(async (options: { resume?: string; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
-			// YOLO / async：CLI 参数优先，回退到配置文件 defaults（重启保持）
+			// YOLO：CLI 参数优先（--yolo true / --no-yolo false），回退到配置文件 defaults（重启保持）；默认开启
 			const cfg = ConfigManager.getInstance();
-			const yolo = options.yolo ?? cfg.get<boolean>('defaults.yolo') ?? false;
+			const yolo = options.yolo ?? cfg.get<boolean>('defaults.yolo') ?? true;
+			const displayMode = resolveDisplayMode(options);
 			const asyncMode = options.async ?? cfg.get<boolean>('defaults.async') ?? false;
 			const debug = options.debug ?? false;
 			// 请求镜像监听地址：CLI 参数优先，回退到环境变量
@@ -186,7 +203,7 @@ program
 					process.exit(1);
 				}
 				await sessionMgr.resumeSession(session.meta.id);
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock);
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock, displayMode);
 				if (options.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -198,7 +215,7 @@ program
 			}
 
 			// 新会话
-			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock);
+			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock, displayMode);
 			if (options.selfInteraction) {
 				app.setSelfInteraction(true);
 			}
@@ -254,12 +271,16 @@ program
 	.option('--browser', 'show browser window (instead of headless)')
 	.option('--cdp <url>', 'connect to host browser via CDP')
 	.option('--yolo', 'skip all tool confirmations (auto-approve edit/shell)')
+	.option('--no-yolo', 'disable YOLO mode (ask for tool confirmations; YOLO is default)')
+	.option('--short', 'compact display: think ≤4 lines, tool output hidden except file edits')
+	.option('--normal', 'balanced display: think ≤4 lines, tool results ≤6 lines (default)')
+	.option('--detail', 'full display (current behavior): live tool output, results ≤12 lines')
 	.option('--async', 'async subagent mode (subagent_spawn returns immediately)')
 	.option('--debug', 'enable TUI capture & render preview tools for model debugging')
 	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
 	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; yolo?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
@@ -283,14 +304,15 @@ program
 
 				const tuiConfig = await createTuiConfig();
 				const cfg = ConfigManager.getInstance();
-				const yolo = options?.yolo ?? cfg.get<boolean>('defaults.yolo') ?? false;
+				const yolo = options?.yolo ?? cfg.get<boolean>('defaults.yolo') ?? true;
+				const displayMode = resolveDisplayMode(options ?? {});
 				const asyncMode = options?.async ?? cfg.get<boolean>('defaults.async') ?? false;
 				const debug = options?.debug ?? false;
 				const tools = loadMasterTools(debug, options?.selfInteraction);
 				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
 				await sessionMgr.resumeSession(session.meta.id);
 
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock);
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock, displayMode);
 				if (options?.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -311,15 +333,16 @@ program
 
 			console.log('Saved sessions:');
 			console.log('');
-			console.log('  #    ID                 Title              Updated             Turns');
-			console.log('  ---  -----------------  -----------------  ------------------  -----');
+			// 列宽与行渲染保持一致（Title 最长 20 字）
+			console.log(`  ${'#'.padStart(3)}  ${'ID'.padEnd(18)} ${'Title'.padEnd(21)} ${'Updated'.padEnd(19)} ${'Turns'.padStart(4)}`);
+			console.log(`  ${'---'.padStart(3)}  ${'-'.repeat(18)} ${'-'.repeat(21)} ${'-'.repeat(19)} ${'-'.repeat(4)}`);
 
 			for (const s of sessions) {
 				const shortId = s.id.slice(0, 17);
-				const title = (s.title || '(untitled)').slice(0, 18);
+				const title = (s.title || '(untitled)').slice(0, 20);
 				const updated = s.updated_at.slice(0, 16).replace('T', ' ');
 				console.log(
-					`  ${String(s.index).padStart(3)}  ${shortId.padEnd(18)} ${title.padEnd(19)} ${updated.padEnd(19)} ${String(s.turnCount).padStart(4)}`,
+					`  ${String(s.index).padStart(3)}  ${shortId.padEnd(18)} ${title.padEnd(21)} ${updated.padEnd(19)} ${String(s.turnCount).padStart(4)}`,
 				);
 			}
 
