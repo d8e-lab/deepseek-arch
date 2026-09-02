@@ -73,6 +73,24 @@ auto_compact = true     # 是否启用自动压缩
 auto_compact_threshold = 0.7  # 触发阈值（0~1，占 context_window 比例）
 # 上下文窗口大小（tokens）：支持数字或带单位写法（K=千、M=百万、G=十亿，十进制）
 context_window = "1M"
+
+# ── 展示（可选）────────────────────────────────────────
+# 三档预设：detail（完整实时输出）/ normal（think ≤4 行、结果 ≤6 行）/ short（极简）
+# CLI 启动参数 --short/--normal/--detail 可临时覆盖本段 mode。
+[display]
+mode = "normal"         # 默认展示模式：short / normal / detail
+
+# 各档位参数覆盖（可选；未覆盖字段沿用内置预设）。可配置键：
+#   think_live_lines          实时 think 可见行数（超出折叠，Ctrl+O 查看完整）
+#   show_live_tool_output     是否逐行展示工具实时输出（short 默认 false）
+#   tool_result_max_lines     工具结果最多显示行数（0 = 不显示内容）
+#   hide_non_file_tool_result 是否隐藏非文件修改工具的结果内容（short 默认 true）
+# [display.overrides.short]
+# think_live_lines = 2
+# [display.overrides.normal]
+# tool_result_max_lines = 8
+# [display.overrides.detail]
+# show_live_tool_output = true
 `;
 
 const DEFAULT_PROVIDERS: ProvidersConfig = {
@@ -292,18 +310,22 @@ export class ConfigManager {
 		let appConfig = await this.loadTomlFile<AppConfig>(mainConfigPath);
 
 		if (!appConfig) {
-			// 首次运行：写入默认配置文件（字符串模板保留注释）
-			// system-prompt.toml 由下方 ensureSystemPromptSnapshot 统一处理
-			// （缺失时从项目根 system_prompt.txt 生成快照），此处不重复创建。
+			// 首次运行（或用户删除了 config.toml）：写入默认主配置。
+			// providers.toml 含用户 API key——已存在时绝不覆盖（只缺失才补建默认模板），
+			// pricing.toml 同理保留；system-prompt.toml 由下方 ensureSystemPromptSnapshot 统一处理。
 			await this.writeTomlFile(mainConfigPath, DEFAULT_MAIN_CONFIG);
-			await this.writeTomlFile(
-				this.resolvePath('providers.toml'),
-				DEFAULT_PROVIDERS as unknown as Record<string, unknown>,
-			);
-			await this.writeTomlFile(
-				this.resolvePath('pricing.toml'),
-				DEFAULT_PRICING as unknown as Record<string, unknown>,
-			);
+			if (!(await this.pathExists(this.resolvePath('providers.toml')))) {
+				await this.writeTomlFile(
+					this.resolvePath('providers.toml'),
+					DEFAULT_PROVIDERS as unknown as Record<string, unknown>,
+				);
+			}
+			if (!(await this.pathExists(this.resolvePath('pricing.toml')))) {
+				await this.writeTomlFile(
+					this.resolvePath('pricing.toml'),
+					DEFAULT_PRICING as unknown as Record<string, unknown>,
+				);
+			}
 			// 复制 skill 文件到配置目录（首次运行）
 			await copySkillDir(this.configDir);
 			// 从刚写入的模板重新解析（字符串模板含注释，需经 TOML 解析还原对象）
@@ -343,6 +365,7 @@ export class ConfigManager {
 			providers: providers ?? {},
 			pricing: pricing ?? {},
 			systemPrompts: systemPrompts ?? {},
+			display: appConfig.display,
 		};
 
 		this.loaded = true;

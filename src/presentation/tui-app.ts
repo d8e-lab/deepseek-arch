@@ -149,6 +149,7 @@ export class TuiApp {
 		yolo?: boolean,
 		mock?: boolean,
 		displayMode: DisplayMode = 'detail',
+		displayPreset?: DisplayPreset,
 	) {
 		this.out = new ScreenBuffer();
 		this.sessionMgr = sessionMgr;
@@ -158,7 +159,7 @@ export class TuiApp {
 		this.yolo = yolo ?? false;
 		this.mockMode = mock ?? false;
 		this.displayMode = displayMode;
-		this.preset = DISPLAY_PRESETS[displayMode];
+		this.preset = displayPreset ?? DISPLAY_PRESETS[displayMode];
 		this.thinkVisibleLines = this.preset.thinkLiveLines;
 		this.reviewModel = config.reviewModel;
 		this.asyncMode = sessionMgr.getSubagentAsync();
@@ -271,7 +272,10 @@ export class TuiApp {
 
 	private printConversation(turns: import('../types/index.js').TurnRecord[]): void {
 		const cols = getTermSize().cols;
-		const lines = this.conversation.render(turns, cols, { mode: this.displayMode });
+		const lines = this.conversation.render(turns, cols, {
+			mode: this.displayMode,
+			hideNonFileToolResult: this.preset.hideNonFileToolResult,
+		});
 		for (const line of lines) {
 			this.out.write(line + '\r\n');
 		}

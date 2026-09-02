@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { ConfigManager, DEFAULT_CONFIG_DIR, parseTokenSize } from '../core/config.js';
+import { buildDisplayPreset, isDisplayMode } from '../render/display-mode.js';
 import type { DisplayMode } from '../render/display-mode.js';
 import { ApiClient } from '../core/api.js';
 import { MockProvider } from '../core/mock-provider.js';
@@ -126,15 +127,15 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	return sessionMgr;
 }
 
-/** 解析展示模式：--short/--normal/--detail 互斥；默认 normal（紧凑档） */
-function resolveDisplayMode(opts: { short?: boolean; normal?: boolean; detail?: boolean }): DisplayMode {
+/** 解析展示模式：--short/--normal/--detail 互斥；缺省时回退 configMode（合法）→ 'normal' */
+function resolveDisplayMode(opts: { short?: boolean; normal?: boolean; detail?: boolean }, configMode?: string): DisplayMode {
 	const flags = (['short', 'normal', 'detail'] as const).filter((k) => opts[k]);
 	if (flags.length > 1) {
 		throw new Error('--short / --normal / --detail 互斥，请只选择一个');
 	}
 	if (opts.short) return 'short';
 	if (opts.detail) return 'detail';
-	return 'normal';
+	return isDisplayMode(configMode) ? configMode : 'normal';
 }
 
 // ─── CLI 定义 ─────────────────────────────────────
@@ -164,10 +165,15 @@ program
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
 	.action(async (options: { resume?: string; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
-			// YOLO：CLI 参数优先（--yolo true / --no-yolo false），回退到配置文件 defaults（重启保持）；默认开启
+			// 加载配置（幂等）——必须先于 cfg.get，否则 defaults/display 读不到
 			const cfg = ConfigManager.getInstance();
+			await cfg.load();
+
+			// YOLO：CLI 参数优先（--yolo true / --no-yolo false），回退到配置文件 defaults（重启保持）；默认开启
 			const yolo = options.yolo ?? cfg.get<boolean>('defaults.yolo') ?? true;
-			const displayMode = resolveDisplayMode(options);
+			// 展示模式：CLI flag 优先 → config [display].mode → 默认 normal
+			const displayMode = resolveDisplayMode(options, cfg.get<string>('display.mode'));
+			const displayPreset = buildDisplayPreset(displayMode, cfg.get('display'));
 			const asyncMode = options.async ?? cfg.get<boolean>('defaults.async') ?? false;
 			const debug = options.debug ?? false;
 			// 请求镜像监听地址：CLI 参数优先，回退到环境变量
@@ -203,7 +209,7 @@ program
 					process.exit(1);
 				}
 				await sessionMgr.resumeSession(session.meta.id);
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock, displayMode);
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock, displayMode, displayPreset);
 				if (options.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -215,7 +221,7 @@ program
 			}
 
 			// 新会话
-			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock, displayMode);
+			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options.mock, displayMode, displayPreset);
 			if (options.selfInteraction) {
 				app.setSelfInteraction(true);
 			}
@@ -305,14 +311,15 @@ program
 				const tuiConfig = await createTuiConfig();
 				const cfg = ConfigManager.getInstance();
 				const yolo = options?.yolo ?? cfg.get<boolean>('defaults.yolo') ?? true;
-				const displayMode = resolveDisplayMode(options ?? {});
+				const displayMode = resolveDisplayMode(options ?? {}, cfg.get<string>('display.mode'));
+				const displayPreset = buildDisplayPreset(displayMode, cfg.get('display'));
 				const asyncMode = options?.async ?? cfg.get<boolean>('defaults.async') ?? false;
 				const debug = options?.debug ?? false;
 				const tools = loadMasterTools(debug, options?.selfInteraction);
 				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
 				await sessionMgr.resumeSession(session.meta.id);
 
-				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock, displayMode);
+				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock, displayMode, displayPreset);
 				if (options?.selfInteraction) {
 					app.setSelfInteraction(true);
 				}
@@ -372,14 +379,16 @@ program
 
 			const tuiConfig = await createTuiConfig();
 			const cfg = ConfigManager.getInstance();
-			const yolo = options?.yolo ?? cfg.get<boolean>('defaults.yolo') ?? false;
+			const yolo = options?.yolo ?? cfg.get<boolean>('defaults.yolo') ?? true;
+			const displayMode = resolveDisplayMode(options ?? {}, cfg.get<string>('display.mode'));
+			const displayPreset = buildDisplayPreset(displayMode, cfg.get('display'));
 			const asyncMode = options?.async ?? cfg.get<boolean>('defaults.async') ?? false;
 			const debug = options?.debug ?? false;
 			const tools = loadMasterTools(debug, options?.selfInteraction);
 			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
 			await sessionMgr.resumeSession(session.meta.id);
 
-			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock);
+			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock, displayMode, displayPreset);
 			if (options?.selfInteraction) {
 				app.setSelfInteraction(true);
 			}

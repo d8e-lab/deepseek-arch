@@ -215,6 +215,27 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 
 供应商级配置（providers.toml）：`base_url`、`api_key`、`timeout_ms`（默认 120000）、`max_retries`（默认 2）。
 
+### 展示参数（config.toml `[display]`，可选）
+
+三档内置预设：`detail`（完整实时输出）/ `normal`（think ≤4 行、结果 ≤6 行，默认）/ `short`（极简）。各档具体数值可在配置中覆盖：
+
+```toml
+[display]
+mode = "normal"          # 默认展示模式：short / normal / detail（--short 等 CLI 参数优先）
+
+# 各档位参数覆盖（可选；未覆盖字段沿用内置预设）
+# 可配置键：think_live_lines / show_live_tool_output / tool_result_max_lines / hide_non_file_tool_result
+# [display.overrides.short]
+# think_live_lines = 2            # 实时 think 可见行数（超出折叠，Ctrl+O 查看完整）
+# [display.overrides.normal]
+# tool_result_max_lines = 8       # 工具结果最多显示行数（0 = 不显示内容）
+```
+
+### 配置重置与 API key
+
+- `init` / `init --force` 与首次运行只重建 `config.toml`；**`providers.toml`（含 API key）已存在时绝不会被覆盖**，仅缺失时补建默认模板。误删 `config.toml` 后重启也安全。
+- 完全重置：`rm -rf ~/.deepseek-arch`（会连 sessions 一起删除，请先备份）。
+
 ---
 
 ## 开发

@@ -44,6 +44,87 @@ describe('ConfigManager', () => {
       expect(config!.providers.deepseek.base_url).toBe('https://api.deepseek.com');
     });
 
+    it('config.toml 缺失但 providers.toml 已存在：不覆盖（保留 API key）', async () => {
+      // 只预置 providers.toml（模拟用户删除 config.toml 想重置、保留 API key 的场景）
+      const { writeFileSync, mkdirSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      mkdirSync(testDir, { recursive: true });
+      writeFileSync(
+        join(testDir, 'providers.toml'),
+        'deepseek = { base_url = "https://api.deepseek.com", api_key = "sk-keep-123" }\n',
+      );
+
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+
+      // providers 内容原样保留
+      expect(mgr.get('providers.deepseek.api_key')).toBe('sk-keep-123');
+      // config.toml 已重建（默认模板含 display 段）
+      expect(mgr.get('defaults.yolo')).toBe(true);
+      expect(mgr.get('display.mode')).toBe('normal');
+    });
+
+    it('init --force 保留已有 providers.toml（API key 不清空）', async () => {
+      const { writeFileSync, mkdirSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      mkdirSync(testDir, { recursive: true });
+      writeFileSync(
+        join(testDir, 'providers.toml'),
+        'deepseek = { base_url = "https://api.deepseek.com", api_key = "sk-keep-456" }\n',
+      );
+
+      const mgr = ConfigManager.getInstance(testDir);
+      const report = await mgr.init(true);
+
+      expect(mgr.get('providers.deepseek.api_key')).toBe('sk-keep-456');
+      // config.toml 已重建
+      expect(mgr.get('defaults.model')).toBe('deepseek-v4-pro');
+      expect(report.createdFiles.filter((f) => f.includes('providers')).length).toBe(0);
+    });
+
+    it('读取 [display] 段（默认模式 + 各档位 overrides）', async () => {
+      const { writeFileSync, mkdirSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      mkdirSync(testDir, { recursive: true });
+      // 预置带 display 段与完整 defaults 的 config.toml
+      writeFileSync(
+        join(testDir, 'config.toml'),
+        [
+          '[paths]',
+          'providers = "./providers.toml"',
+          'pricing = "./pricing.toml"',
+          'system_prompt = "./system-prompt.toml"',
+          'sessions = "./sessions"',
+          '[defaults]',
+          'provider = "deepseek"',
+          'model = "deepseek-v4-pro"',
+          'system_prompt = "default"',
+          'yolo = true',
+          'async = false',
+          'auto_compact = true',
+          'auto_compact_threshold = 0.7',
+          'context_window = "1M"',
+          '[display]',
+          'mode = "short"',
+          '[display.overrides.short]',
+          'think_live_lines = 2',
+          'tool_result_max_lines = 3',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(
+        join(testDir, 'providers.toml'),
+        'deepseek = { base_url = "https://api.deepseek.com", api_key = "sk" }\n',
+      );
+
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+
+      expect(mgr.get('display.mode')).toBe('short');
+      expect(mgr.get('display.overrides.short.think_live_lines')).toBe(2);
+      expect(mgr.get('display.overrides.short.tool_result_max_lines')).toBe(3);
+    });
+
     it('load() 是幂等的', async () => {
       const mgr = ConfigManager.getInstance(testDir);
       await mgr.load();

@@ -132,9 +132,10 @@ export class ConversationView {
 	 * 渲染全部对话轮次为行数组
 	 * 调用方负责根据终端高度决定显示哪些行（从底部截取）
 	 * @param opts.fullThink true 时 think 完整显示（Ctrl+O 全屏视图用），默认截断 4 行
-	 * @param opts.mode 展示模式：short 时非文件修改工具的结果内容隐藏（仅成功/失败标记），normal/detail 不区分
+	 * @param opts.mode 展示模式：缺省 hideNonFileToolResult 时按 short 内置值（隐藏非文件工具结果）
+	 * @param opts.hideNonFileToolResult 显式覆盖：true 隐藏非文件修改工具的结果内容（仅成功/失败标记）
 	 */
-	render(turns: TurnRecord[], termWidth: number, opts?: { fullThink?: boolean; mode?: DisplayMode }): string[] {
+	render(turns: TurnRecord[], termWidth: number, opts?: { fullThink?: boolean; mode?: DisplayMode; hideNonFileToolResult?: boolean }): string[] {
 		const lines: string[] = [];
 
 		for (let ti = 0; ti < turns.length; ti++) {
@@ -214,10 +215,11 @@ export class ConversationView {
 						}
 					}
 
-					// short 模式：非文件修改工具不展示结果内容，仅保留成功/失败标记
-					const hideResult = opts?.mode === 'short'
-						&& DISPLAY_PRESETS.short.hideNonFileToolResult
-						&& !isFileModTool(tcr.name);
+					// short 模式（或显式覆盖）：非文件修改工具不展示结果内容，仅保留成功/失败标记
+					const hideResult = !isFileModTool(tcr.name) && (
+						opts?.hideNonFileToolResult
+						?? (opts?.mode === 'short' ? DISPLAY_PRESETS.short.hideNonFileToolResult : false)
+					);
 					if (hideResult) {
 						if (tcr.error) {
 							lines.push(renderToolError(tcr.error));
@@ -275,7 +277,7 @@ export class ConversationView {
 	 * 渲染对话历史为纯文本（剥离 ANSI 颜色码）
 	 * 供 tui_capture / tui_render_preview 工具使用，让模型看到结构化渲染结果
 	 */
-	renderToText(turns: TurnRecord[], termWidth: number, opts?: { fullThink?: boolean; mode?: DisplayMode }): string[] {
+	renderToText(turns: TurnRecord[], termWidth: number, opts?: { fullThink?: boolean; mode?: DisplayMode; hideNonFileToolResult?: boolean }): string[] {
 		return this.render(turns, termWidth, opts).map(line => stripAnsi(line));
 	}
 }

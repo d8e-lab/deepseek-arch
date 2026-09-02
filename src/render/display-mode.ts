@@ -56,3 +56,51 @@ export function isFileModTool(name?: string): boolean {
 export function isDisplayMode(v: unknown): v is DisplayMode {
 	return v === 'short' || v === 'normal' || v === 'detail';
 }
+
+/** 将内置预设与配置覆盖合并（未覆盖字段沿用内置值） */
+export function mergeDisplayPreset(base: DisplayPreset, override?: Partial<DisplayPreset>): DisplayPreset {
+	if (!override) return base;
+	return {
+		thinkLiveLines: override.thinkLiveLines ?? base.thinkLiveLines,
+		showLiveToolOutput: override.showLiveToolOutput ?? base.showLiveToolOutput,
+		toolResultMaxLines: override.toolResultMaxLines ?? base.toolResultMaxLines,
+		hideNonFileToolResult: override.hideNonFileToolResult ?? base.hideNonFileToolResult,
+	};
+}
+
+/**
+ * 解析 config.toml [display.overrides.<mode>] 的 snake_case 原始值为 DisplayPreset 字段。
+ * 非法/缺失值忽略（沿用内置预设）。
+ */
+export function parseDisplayOverride(raw?: Record<string, unknown>): Partial<DisplayPreset> {
+	const out: Partial<DisplayPreset> = {};
+	if (!raw) return out;
+	const think = raw['think_live_lines'];
+	if (typeof think === 'number' && Number.isFinite(think)) {
+		out.thinkLiveLines = Math.max(1, Math.floor(think));
+	}
+	const result = raw['tool_result_max_lines'];
+	if (typeof result === 'number' && Number.isFinite(result)) {
+		out.toolResultMaxLines = Math.max(0, Math.floor(result));
+	}
+	if (typeof raw['show_live_tool_output'] === 'boolean') {
+		out.showLiveToolOutput = raw['show_live_tool_output'];
+	}
+	if (typeof raw['hide_non_file_tool_result'] === 'boolean') {
+		out.hideNonFileToolResult = raw['hide_non_file_tool_result'];
+	}
+	return out;
+}
+
+/**
+ * 由展示模式名 + config [display] 段原始值合成生效预设：
+ * 内置三档预设 ← 该档的 config overrides 逐字段覆盖。
+ * displayCfg 形如 { mode?, overrides?: { short?: {...}, normal?: {...}, detail?: {...} } }（snake_case）。
+ */
+export function buildDisplayPreset(mode: DisplayMode, displayCfg?: unknown): DisplayPreset {
+	const raw = (displayCfg ?? {}) as {
+		overrides?: Partial<Record<DisplayMode, Record<string, unknown>>>;
+	};
+	const overrideRaw = raw.overrides?.[mode];
+	return mergeDisplayPreset(DISPLAY_PRESETS[mode], parseDisplayOverride(overrideRaw));
+}

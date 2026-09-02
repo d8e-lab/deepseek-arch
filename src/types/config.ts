@@ -70,10 +70,32 @@ export interface ConfigDefaults {
 	context_window?: number | string;
 }
 
+/** 单档展示参数覆盖（display.overrides.<mode>，snake_case 与 TOML 键一致） */
+export interface DisplayOverrideConfig {
+	/** 实时 think 可见行数（超出折叠，Ctrl+O 查看完整） */
+	think_live_lines?: number;
+	/** 是否逐行展示工具实时输出 */
+	show_live_tool_output?: boolean;
+	/** 工具结果最多显示行数（0 = 不显示内容） */
+	tool_result_max_lines?: number;
+	/** 是否隐藏非文件修改工具的结果内容（只显示调用与成败标记） */
+	hide_non_file_tool_result?: boolean;
+}
+
+/** [display] 段：展示模式与各档位参数覆盖 */
+export interface DisplayConfig {
+	/** 默认展示模式：short / normal / detail（CLI flag 优先；缺省 normal） */
+	mode?: string;
+	/** 各档位参数覆盖（可选；未覆盖字段沿用内置预设） */
+	overrides?: Partial<Record<'short' | 'normal' | 'detail', DisplayOverrideConfig>>;
+}
+
 /** 主配置（config.toml） */
 export interface AppConfig {
 	paths: ConfigPaths;
 	defaults: ConfigDefaults;
+	/** [display] 段（可选） */
+	display?: DisplayConfig;
 }
 
 /** 完整有效配置（合并所有引用文件后） */
@@ -83,4 +105,6 @@ export interface ResolvedConfig {
 	providers: ProvidersConfig;
 	pricing: PricingConfig;
 	systemPrompts: SystemPromptConfig;
+	/** [display] 段（可选；缺失时用内置默认档 normal） */
+	display?: DisplayConfig;
 }

@@ -21,7 +21,11 @@ import { GRAY_BG_START, stripAnsi } from '../../../src/render/ansi.js';
 const CLEAR_TO_END = '\x1b[0J';
 
 /** 构造最小可用的 TuiApp（mock sessionMgr，不启动真实会话） */
-function makeApp(sessionMgr?: Partial<SessionManager>, displayMode?: import('../../../src/render/display-mode.js').DisplayMode): TuiApp {
+function makeApp(
+	sessionMgr?: Partial<SessionManager>,
+	displayMode?: import('../../../src/render/display-mode.js').DisplayMode,
+	displayPreset?: import('../../../src/render/display-mode.js').DisplayPreset,
+): TuiApp {
 	const mgr = {
 		getSubagentAsync: () => false,
 		...sessionMgr,
@@ -33,7 +37,7 @@ function makeApp(sessionMgr?: Partial<SessionManager>, displayMode?: import('../
 		apiKey: 'k',
 		version: '1.3.8',
 	};
-	return new TuiApp(mgr, config, undefined, undefined, undefined, undefined, displayMode);
+	return new TuiApp(mgr, config, undefined, undefined, undefined, undefined, displayMode, displayPreset);
 }
 
 /** mock 输出事件序列的 sessionMgr（维护 turns 供 viewer 渲染） */
@@ -307,6 +311,39 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		for (let i = 1; i <= 6; i++) expect(out).toContain(`res${i}`);
 		expect(out).not.toContain('res7');
 		expect(out).not.toContain('res8');
+		expect(out).toContain('...');
+	});
+
+	it('config 覆盖生效：think 折叠行数与结果行数用自定义预设（非内置档）', async () => {
+		// 模拟 config [display.overrides.normal] think_live_lines=2, tool_result_max_lines=1
+		const preset: import('../../../src/render/display-mode.js').DisplayPreset = {
+			thinkLiveLines: 2,
+			showLiveToolOutput: true,
+			toolResultMaxLines: 1,
+			hideNonFileToolResult: false,
+		};
+		const events: StreamEvent[] = [
+			{ type: 'reasoning_delta', text: '思考第1行\n' },
+			{ type: 'reasoning_delta', text: '思考第2行\n' },
+			{ type: 'reasoning_delta', text: '思考第3行\n' },
+			{ type: 'tool_call_start', toolCallId: 'c1', toolName: 'shell', toolArgs: { command: 'ls' } },
+			{ type: 'tool_output', toolCallId: 'c1', toolName: 'shell', outputLine: '实时行', outputStream: 'stdout' },
+			{ type: 'tool_result', toolCallId: 'c1', toolName: 'shell', toolResult: 'res1\nres2\nres3', error: undefined },
+			{ type: 'done', usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+		];
+		const app = makeApp(mockStreamSession(events), 'normal', preset);
+		await (app as unknown as { sendMessageStream: (c: string) => Promise<void> }).sendMessageStream('test');
+		const out = writes.join('');
+		// think 只显示前 2 行，第 3 行折叠
+		expect(out).toContain('思考第1行');
+		expect(out).toContain('思考第2行');
+		expect(out).not.toContain('思考第3行');
+		expect(out).toContain('已折叠');
+		// 实时输出保留（showLiveToolOutput=true）
+		expect(out).toContain('实时行');
+		// 结果只显示 1 行 + 省略
+		expect(out).toContain('res1');
+		expect(out).not.toContain('res2');
 		expect(out).toContain('...');
 	});
 
