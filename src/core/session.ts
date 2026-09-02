@@ -70,6 +70,31 @@ export type { SubagentSession } from './subagent-session.js';
 import { SubagentSession as SubagentSessionImpl } from './subagent-session.js';
 import type { SubagentRecord } from '../types/subagent.js';
 
+/** 会话标题最大字符数（用户第一句话） */
+export const SESSION_TITLE_MAX_CHARS = 20;
+
+/**
+ * 从用户首条消息派生会话标题：
+ * 1. 剥离 TUI 注入的 [shell_start]...[shell_end] 上下文块（仅模型可见）
+ * 2. 取第一条非空行并压缩连续空白
+ * 3. 截断到 SESSION_TITLE_MAX_CHARS 字符（按 Unicode 码点，不加省略号）
+ * 返回空串表示无可用标题。
+ */
+export function deriveSessionTitle(content: string, maxChars = SESSION_TITLE_MAX_CHARS): string {
+	let text = content;
+	const shellEnd = text.indexOf('[shell_end]');
+	if (shellEnd >= 0) {
+		text = text.slice(shellEnd + '[shell_end]'.length);
+	}
+	const firstLine = text
+		.split('\n')
+		.map((l) => l.trim())
+		.find((l) => l.length > 0) ?? '';
+	const normalized = firstLine.replace(/\s+/g, ' ');
+	const chars = Array.from(normalized);
+	return chars.length <= maxChars ? normalized : chars.slice(0, maxChars).join('');
+}
+
 export class SessionManager {
 	private storage: Storage;
 	private provider: ModelProvider;
@@ -533,6 +558,14 @@ export class SessionManager {
 	): Promise<TurnRecord | null> {
 		if (!this.session) {
 			throw new Error('未创建会话——请先调用 startNewSession() 或 resumeSession()');
+		}
+
+		// 新会话（无标题且无轮次）：以第一条用户消息作为会话标题（≤20 字）
+		if (!this.session.meta.title && this.session.meta.turnCount === 0) {
+			const derivedTitle = deriveSessionTitle(userContent);
+			if (derivedTitle) {
+				await this.setTitle(derivedTitle);
+			}
 		}
 
 		const baseMessages = this.buildMessages(userContent);

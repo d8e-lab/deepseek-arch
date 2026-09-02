@@ -254,6 +254,31 @@ describe('SessionManager', () => {
       expect(doneEvents[0].usage?.total_tokens).toBe(12);
     });
 
+    it('新会话第一条消息自动成为标题（≤20 字），第二条不覆盖', async () => {
+      const streamClient = mockStreamClient([
+        chunk({ choices: [{ index: 0, delta: { content: '好' }, finish_reason: null }] }),
+        usageChunk({ prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 }),
+      ]);
+      const mgr = new SessionManager(storage, streamClient);
+      mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+      // 无标题新会话
+      await mgr.startNewSession();
+      expect(mgr.getSession()?.meta.title).toBe('');
+
+      await mgr.sendMessageStream('帮我重构 session 模块，这是很长的第一句话超过二十个字的描述', () => {});
+      expect(mgr.getSession()?.meta.title).toBe('帮我重构 session 模块，这是很长');
+
+      // 第二条消息不覆盖标题
+      await mgr.sendMessageStream('继续', () => {});
+      expect(mgr.getSession()?.meta.title).toBe('帮我重构 session 模块，这是很长');
+
+      // 持久化到 meta.json（resume 后仍在）
+      const mgr2 = new SessionManager(storage, mockClient());
+      const resumed = await mgr2.resumeSession(mgr.getSessionId()!);
+      expect(resumed.meta.title).toBe('帮我重构 session 模块，这是很长');
+    });
+
     it('纯文本中断不保存（无工具调用）', async () => {
       const controller = new AbortController();
 
