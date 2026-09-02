@@ -21,7 +21,7 @@ import { GRAY_BG_START, stripAnsi } from '../../../src/render/ansi.js';
 const CLEAR_TO_END = '\x1b[0J';
 
 /** 构造最小可用的 TuiApp（mock sessionMgr，不启动真实会话） */
-function makeApp(sessionMgr?: Partial<SessionManager>): TuiApp {
+function makeApp(sessionMgr?: Partial<SessionManager>, displayMode?: import('../../../src/render/display-mode.js').DisplayMode): TuiApp {
 	const mgr = {
 		getSubagentAsync: () => false,
 		...sessionMgr,
@@ -33,7 +33,7 @@ function makeApp(sessionMgr?: Partial<SessionManager>): TuiApp {
 		apiKey: 'k',
 		version: '1.3.8',
 	};
-	return new TuiApp(mgr, config);
+	return new TuiApp(mgr, config, undefined, undefined, undefined, undefined, displayMode);
 }
 
 /** mock 输出事件序列的 sessionMgr（维护 turns 供 viewer 渲染） */
@@ -247,6 +247,67 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		// 退出视图
 		anyApp.closeViewer();
 		expect(anyApp.overlay.active).toBe(false);
+	});
+
+	it('short 模式：工具输出内容隐藏，只显示调用行 + 成功标记（文件修改除外）', async () => {
+		const events: StreamEvent[] = [
+			{ type: 'tool_call_start', toolCallId: 'c1', toolName: 'shell', toolArgs: { command: 'ls' } },
+			{ type: 'tool_output', toolCallId: 'c1', toolName: 'shell', outputLine: 'secret-line', outputStream: 'stdout' },
+			{ type: 'tool_result', toolCallId: 'c1', toolName: 'shell', toolResult: 'secret-line\nmore', error: undefined },
+			{ type: 'done', usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+		];
+		const app = makeApp(mockStreamSession(events), 'short');
+		await (app as unknown as { sendMessageStream: (c: string) => Promise<void> }).sendMessageStream('test');
+		const out = writes.join('');
+		// 调用行展示
+		expect(out).toContain('● run shell');
+		// 实时输出与结果内容都不展示
+		expect(out).not.toContain('secret-line');
+		// 成功标记
+		expect(out).toContain('✓');
+	});
+
+	it('short 模式：文件修改工具保留 diff 预览与结果', async () => {
+		const events: StreamEvent[] = [
+			{ type: 'tool_call_start', toolCallId: 'c1', toolName: 'edit_file', toolArgs: { path: 'a.ts' } },
+			{ type: 'tool_preview', toolCallId: 'c1', toolName: 'edit_file', toolPreview: '-old\n+new' },
+			{ type: 'tool_result', toolCallId: 'c1', toolName: 'edit_file', toolResult: 'ok: updated a.ts', error: undefined },
+			{ type: 'done', usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+		];
+		const app = makeApp(mockStreamSession(events), 'short');
+		await (app as unknown as { sendMessageStream: (c: string) => Promise<void> }).sendMessageStream('test');
+		const out = writes.join('');
+		expect(out).toContain('+new');
+		expect(out).toContain('ok: updated a.ts');
+		expect(out).not.toContain('✓'); // 结果直接展示，不再给成功标记
+	});
+
+	it('normal 模式：think 折叠阈值为 4 行，实时工具输出保留、结果最多 6 行', async () => {
+		const events: StreamEvent[] = [
+			{ type: 'reasoning_delta', text: '思考第1行\n' },
+			{ type: 'reasoning_delta', text: '思考第2行\n' },
+			{ type: 'reasoning_delta', text: '思考第3行\n' },
+			{ type: 'reasoning_delta', text: '思考第4行\n' },
+			{ type: 'reasoning_delta', text: '思考第5行\n' },
+			{ type: 'tool_call_start', toolCallId: 'c1', toolName: 'shell', toolArgs: { command: 'ls' } },
+			{ type: 'tool_output', toolCallId: 'c1', toolName: 'shell', outputLine: '实时输出行', outputStream: 'stdout' },
+			{ type: 'tool_result', toolCallId: 'c1', toolName: 'shell', toolResult: 'res1\nres2\nres3\nres4\nres5\nres6\nres7\nres8', error: undefined },
+			{ type: 'done', usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+		];
+		const app = makeApp(mockStreamSession(events), 'normal');
+		await (app as unknown as { sendMessageStream: (c: string) => Promise<void> }).sendMessageStream('test');
+		const out = writes.join('');
+		// think 前 4 行可见，第 5 行折叠
+		for (let i = 1; i <= 4; i++) expect(out).toContain(`思考第${i}行`);
+		expect(out).not.toContain('思考第5行');
+		expect(out).toContain('已折叠');
+		// 实时工具输出保留
+		expect(out).toContain('实时输出行');
+		// 结果只显示前 6 行 + 折叠省略
+		for (let i = 1; i <= 6; i++) expect(out).toContain(`res${i}`);
+		expect(out).not.toContain('res7');
+		expect(out).not.toContain('res8');
+		expect(out).toContain('...');
 	});
 
 	it('agent loop：assistant 无换行 content + tool_calls 时，content 在 ● run 之前输出（不堆积到 loop 结束）', async () => {

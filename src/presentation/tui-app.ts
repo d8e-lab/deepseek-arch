@@ -13,6 +13,8 @@ import type { StreamEvent } from '../types/index.js';
 import type { Tool } from '../tools/types.js';
 import { ConfigManager } from '../core/config.js';
 import { ConversationView, truncateThink } from '../render/conversation.js';
+import { DISPLAY_PRESETS, isFileModTool } from '../render/display-mode.js';
+import type { DisplayMode, DisplayPreset } from '../render/display-mode.js';
 import { SubagentRecordView } from '../render/subagent-record-view.js';
 import type { SubagentRecord } from '../types/index.js';
 import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../utils/turn-utils.js';
@@ -102,8 +104,12 @@ export class TuiApp {
 	private thinkAnimTimer: ReturnType<typeof setInterval> | null = null;
 	/** 省略号动画步进 */
 	private thinkAnimStep = 0;
-	/** think 最多实时显示行数（超出折叠） */
-	private readonly MAX_VISIBLE_THINK = 5;
+	/** 展示模式预设（short/normal/detail，见 render/display-mode.ts） */
+	private readonly preset: DisplayPreset;
+	/** 当前展示模式名 */
+	private readonly displayMode: DisplayMode;
+	/** think 最多实时显示行数（超出折叠，随展示模式变化；Ctrl+O 查看完整） */
+	private readonly thinkVisibleLines: number;
 	/** 全屏覆盖层（Ctrl+O 对话浏览 / Ctrl+T Subagents 总览）——公共生命周期收敛至 OverlayPane */
 	private overlay: OverlayPane;
 	/** subagents 视图：当前选中 subagent 索引 */
@@ -135,7 +141,15 @@ export class TuiApp {
 	/** 搜索输入缓冲 */
 	private viewerSearchInput = '';
 
-	constructor(sessionMgr: SessionManager, config: TuiConfig, tools?: Tool[], configMgr?: ConfigManager, yolo?: boolean, mock?: boolean) {
+	constructor(
+		sessionMgr: SessionManager,
+		config: TuiConfig,
+		tools?: Tool[],
+		configMgr?: ConfigManager,
+		yolo?: boolean,
+		mock?: boolean,
+		displayMode: DisplayMode = 'detail',
+	) {
 		this.out = new ScreenBuffer();
 		this.sessionMgr = sessionMgr;
 		this.config = config;
@@ -143,6 +157,9 @@ export class TuiApp {
 		this.tools = tools ?? [];
 		this.yolo = yolo ?? false;
 		this.mockMode = mock ?? false;
+		this.displayMode = displayMode;
+		this.preset = DISPLAY_PRESETS[displayMode];
+		this.thinkVisibleLines = this.preset.thinkLiveLines;
 		this.reviewModel = config.reviewModel;
 		this.asyncMode = sessionMgr.getSubagentAsync();
 		this.conversation = new ConversationView();
@@ -254,7 +271,7 @@ export class TuiApp {
 
 	private printConversation(turns: import('../types/index.js').TurnRecord[]): void {
 		const cols = getTermSize().cols;
-		const lines = this.conversation.render(turns, cols);
+		const lines = this.conversation.render(turns, cols, { mode: this.displayMode });
 		for (const line of lines) {
 			this.out.write(line + '\r\n');
 		}
@@ -1445,7 +1462,7 @@ export class TuiApp {
 			clearInterval(this.thinkAnimTimer);
 			this.thinkAnimTimer = null;
 		}
-		const foldedCount = Math.max(0, this.fullThink.length - this.MAX_VISIBLE_THINK);
+		const foldedCount = Math.max(0, this.fullThink.length - this.thinkVisibleLines);
 		const up = this.bottom.getUpRowsForThink();
 		this.out.write(`\x1b[${up}A`);
 		this.out.write('\r');
@@ -2021,13 +2038,13 @@ export class TuiApp {
 					for (const line of lines) {
 						// 累积完整 think 行（Ctrl+O 查看完整思考用）
 						this.fullThink.push(line);
-						// 实时显示前 MAX_VISIBLE_THINK 行，超出后折叠（节省显示空间）
-						if (this.fullThink.length <= this.MAX_VISIBLE_THINK) {
+						// 实时显示前 thinkVisibleLines 行，超出后折叠（节省显示空间）
+						if (this.fullThink.length <= this.thinkVisibleLines) {
 							this.writeOutputLine(dim(line));
 						}
 					}
 					// 超过可见行数：进入折叠状态（动态省略号动画）
-					if (this.fullThink.length > this.MAX_VISIBLE_THINK) {
+					if (this.fullThink.length > this.thinkVisibleLines) {
 						this.enterThinkCollapse();
 					}
 				}
@@ -2137,7 +2154,8 @@ export class TuiApp {
 							break;
 						}
 						case 'tool_output': {
-							// 实时 shell 输出：逐行渲染
+							// 实时 shell 输出：逐行渲染（short 模式不展示工具输出内容）
+							if (!this.preset.showLiveToolOutput) break;
 							const line = event.outputLine ?? '';
 							const stream = event.outputStream ?? 'stdout';
 							this.writeOutputLine(
@@ -2147,29 +2165,39 @@ export class TuiApp {
 							);
 							break;
 						}
-						case 'tool_result':
+						case 'tool_result': {
 							flush(true);
 
 							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
 							if (event.toolDenied) {
 								this.writeOutputLine(red('[Denied]'));
-							} else {
-								const outLines: string[] = [];
-								// 显示错误信息（如果有）
-								if (event.error) {
-									outLines.push(red(' ✖ ') + event.error.split('\n')[0]);
-								}
-								// 显示工具执行结果内容
-								const lines = (event.toolResult ?? '').split('\n').slice(0, 12);
-								for (const line of lines) {
+								break;
+							}
+							const outLines: string[] = [];
+							// short 模式：非文件修改工具不展示结果内容，仅显示成功/失败标记
+							const hideResult = this.preset.hideNonFileToolResult
+								&& !isFileModTool(event.toolName);
+							if (event.error) {
+								outLines.push(red(' ✖ ') + event.error.split('\n')[0]);
+							} else if (hideResult) {
+								outLines.push(green(' ✓'));
+								this.writeOutputLines(outLines);
+								break;
+							}
+							// 显示工具执行结果内容（文件修改工具在 short 下同样展示）
+							if (!hideResult) {
+								const maxLines = this.preset.toolResultMaxLines;
+								const resultLines = (event.toolResult ?? '').split('\n');
+								for (const line of resultLines.slice(0, maxLines)) {
 									outLines.push(cyan(' │ ') + dim(line));
 								}
-								if ((event.toolResult ?? '').split('\n').length > 12) {
+								if (resultLines.length > maxLines) {
 									outLines.push(cyan(' │ ') + dim('...'));
 								}
-								this.writeOutputLines(outLines);
 							}
+							this.writeOutputLines(outLines);
 							break;
+						}
 						case 'review_verdict': {
 							flush(true);
 
