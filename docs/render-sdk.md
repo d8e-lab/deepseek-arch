@@ -1,6 +1,6 @@
 # Render SDK（渲染 SDK）
 
-> 状态：v1.4.0 引入（重构自 `src/cli/tui/`，见 [render-sdk-refactor.md](./render-sdk-refactor.md)）
+> 状态：v1.4.0 引入（重构自 `src/cli/tui/`，见 [render-sdk-refactor.md](./render-sdk-refactor.md)）；方案 A（v1.5.2 后）新增共享抽象 list / scroll / csi / markdown-text
 
 ## 是什么
 
@@ -51,6 +51,42 @@ import { ConversationView, wrapText, InputEditor, Selector, dim } from 'deepseek
 const sel = new Selector(options, terminalIO, 'Choose:');
 const result = await sel.select(getHandler, setHandler);
 ```
+
+### 可滚动选择列表（`list.ts`）
+
+> 方案 A 新增：收敛「条目数组 + 选中索引 + 可见窗口 → 高亮行数组」逻辑（此前在 BottomArea 补全建议与 Selector 中重复实现），供 SuggestionPane / Selector 等复用。
+
+| 导出 | 类型 | 说明 |
+|---|---|---|
+| `computeListWindow(total, selected, maxVisible)` | fn | 计算滚动窗口，返回 `{ start, end, beforeMore, afterMore }`——保证选中项始终在窗口内，并给出窗口上下被折叠的条目数 |
+| `renderListLine(text, isSelected, width)` | fn | 渲染单行列表项：`▸` 选中前缀 + cyan 高亮 / dim 未选中，`padToWidth` 填充到目标宽度 |
+| `renderSelectList(labels, selectedIndex, { maxVisible?, width })` | fn | 渲染完整可滚动列表为行数组（含 `... N more` 折叠提示）；调用方负责绘制与行数记账 |
+
+### 滚动状态（`scroll.ts`）
+
+> 方案 A 新增：收敛全屏/长列表视图的滚动记账（offset + followTail，此前在 Ctrl+O viewer 与 Ctrl+T subagents 视图重复实现 2 份）。
+
+| 导出 | 类型 | 说明 |
+|---|---|---|
+| `ScrollState` | class | 可滚动区域状态：`offset`（当前视口起始行）/ `followTail`（是否跟随末尾）；总行数与可见行数经 `{ getTotal, getVisible }` 注入。方法：`reconcile(forceTail?)` 内容更新后校正（贴底或 clamp）、`by(dir)` 逐行滚动、`page(dir)` 翻页、`to(line)` 跳到指定行 |
+| `ScrollStateOptions` | interface | `{ getTotal(): number; getVisible(): number }` |
+
+### CSI 序列解析（`csi.ts`）
+
+> 方案 A 新增：把按键数据流中 ESC 序列扫描（此前在 TuiApp.processChars / 全屏视图输入 / Selector 重复实现 3 份）收口为纯函数。
+
+| 导出 | 类型 | 说明 |
+|---|---|---|
+| `parseCsiSequence(data, escIndex)` | fn | 从原始按键数据 `escIndex`（须指向 `\x1b`）处解析一个完整 CSI 序列（`ESC[` + 中间字节 + final 字节），返回 `{ seq, next }`——`seq` 为 final 序列（如 `'A'` / `'5~'`），`next` 为后续扫描位置；若 ESC 后不是 `[`（独立 ESC 退出键）返回 null |
+| `CsiParseResult` | interface | `{ seq: string; next: number }` |
+
+### Markdown 段落渲染（`markdown-text.ts`）
+
+> 方案 A 新增：收敛「完整文本 → markdown 表格渲染 → 折行 → 可选缩进」逻辑（此前在 ConversationView 与 SubagentRecordView 重复实现 3 份）。
+
+| 导出 | 类型 | 说明 |
+|---|---|---|
+| `renderMarkdownText(text, wrapWidth, prefix?)` | fn | 把一段完整 markdown 文本渲染为行数组（表格 box-drawing + ANSI-aware 折行 + 每行可选前缀）；适合一次性渲染完整内容块（历史对话 / 子代理记录），流式逐段喂入场景仍直接用 `MarkdownTableRenderer` |
 
 ### ANSI 工具（`ansi.ts`）
 
