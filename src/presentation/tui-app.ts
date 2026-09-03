@@ -54,6 +54,7 @@ import type { SelectOption } from '../render/selector.js';
 import { MarkdownTableRenderer } from '../render/markdown.js';
 import { isInteractiveCommand } from '../tools/utils.js';
 import { ConversationViewer } from './views/conversation-viewer.js';
+import { SubagentsViewer } from './views/subagents-viewer.js';
 import type { ViewInputResult } from './views/types.js';
 
 /** 可选模型列表（运行时从配置动态生成，见 TuiApp 构造函数；此为兜底） */
@@ -120,28 +121,10 @@ export class TuiApp {
 	private outputEndsWithSeparator = false;
 	/** 全屏覆盖层（Ctrl+O 对话浏览 / Ctrl+T Subagents 总览）——公共生命周期收敛至 OverlayPane */
 	private overlay: OverlayPane;
-	/** subagents 视图：当前选中 subagent 索引 */
-	private viewerSubagentIndex = 0;
-	/** subagents 视图：底部输入缓冲（发送给选中 subagent） */
-	private subagentViewInput = '';
-	/** subagents 视图：实时刷新定时器 */
-	private subagentViewTimer: ReturnType<typeof setInterval> | null = null;
-	/** subagents 视图：发送中标志（阻止并发 send） */
-	private subagentViewBusy = false;
-	/** subagents 视图：最近一次发送错误（显示在底部） */
-	private subagentViewError: string | null = null;
-	/** subagents 视图：vim 式输入模式（false=命令模式：n/p/数字导航；true=insert：字符进输入缓冲） */
-	private subagentViewInsertMode = false;
-	/** subagents 视图：轨迹滚动偏移（相对选中 subagent 完整记录行数组） */
-	private subagentViewScrollOffset = 0;
-	/** subagents 视图：是否跟随最新输出（贴底；上滚后关闭，切 subagent/滚到底恢复） */
-	private subagentViewFollowTail = true;
-	/** subagents 视图：上次渲染的轨迹总行数（滚动 clamp 用） */
-	private subagentViewTotal = 0;
-	/** subagents 视图：上次渲染的选中索引（切换 subagent 时回到最新） */
-	private subagentViewRenderedIndex = -1;
 	/** Ctrl+O 对话浏览视图（方案 A 抽取：原 10 字段 + 12 方法收敛为组件） */
 	private conversationViewer: ConversationViewer;
+	/** Ctrl+T Subagents 总览视图（方案 A 抽取：原 10 字段 + 9 方法收敛为组件） */
+	private subagentsViewer: SubagentsViewer;
 
 	constructor(
 		sessionMgr: SessionManager,
@@ -178,6 +161,13 @@ export class TuiApp {
 			conversation: this.conversation,
 			getSize: () => getTermSize(),
 		});
+		this.subagentsViewer = new SubagentsViewer({
+			out: this.out,
+			listSubagents: () => this.sessionMgr.listSubagents(),
+			sendToSubagent: (name, text) => this.sessionMgr.sendToSubagent(name, text).then(() => undefined),
+			isStreamActive: () => this.abortController !== null,
+			getSize: () => getTermSize(),
+		});
 		this.overlay = new OverlayPane(this.out, {
 			getHandler: () => this.stdinHandler,
 			setHandler: (h) => { this.stdinHandler = h; },
@@ -190,7 +180,7 @@ export class TuiApp {
 				}
 			},
 			render: () => this.renderActiveOverlay(),
-			cleanup: () => this.cleanupActiveOverlay(),
+			cleanup: () => this.subagentsViewer.cleanup(),
 			replay: (info) => this.replayOverlayOutput(info),
 			rebuildBottom: () => {
 				// 重建输入区
@@ -1558,17 +1548,9 @@ export class TuiApp {
 	/** 渲染当前激活的覆盖层（OverlayPane.render 钩子） */
 	private renderActiveOverlay(): void {
 		if (this.overlay.currentMode === 'subagents') {
-			this.renderSubagentsView();
+			this.subagentsViewer.render();
 		} else {
 			this.conversationViewer.render();
-		}
-	}
-
-	/** 覆盖层关闭清理（OverlayPane.cleanup 钩子）：子视图刷新定时器等 */
-	private cleanupActiveOverlay(): void {
-		if (this.subagentViewTimer) {
-			clearInterval(this.subagentViewTimer);
-			this.subagentViewTimer = null;
 		}
 	}
 
@@ -1577,326 +1559,25 @@ export class TuiApp {
 	/** 打开 Subagents 总览视图（任意状态可用；流式期间 master 后台静默缓冲） */
 	private openSubagentsView(): void {
 		if (this.overlay.active) return;
-		this.viewerSubagentIndex = 0;
-		this.subagentViewInput = '';
-		this.subagentViewBusy = false;
-		this.subagentViewError = null;
-		this.subagentViewInsertMode = false;
-		this.subagentViewScrollOffset = 0;
-		this.subagentViewFollowTail = true;
-		this.subagentViewTotal = 0;
-		this.subagentViewRenderedIndex = -1;
+		this.subagentsViewer.reset();
 		// 记录打开时状态（退出时据此补渲染 master 输出）
 		const session = this.sessionMgr.getSession();
 		this.overlay.setOpenTurnCount(session?.turns.length ?? 0);
-		this.overlay.open('subagents', (data: string) => this.handleSubagentsViewInput(data), this.state !== AppState.IDLE);
+		this.overlay.open(
+			'subagents',
+			(data: string) => {
+				if (this.subagentsViewer.handleInput(data) === 'close') this.closeSubagentsView();
+			},
+			this.state !== AppState.IDLE,
+		);
 		// 渲染由 OverlayPane.render 钩子（renderActiveOverlay）完成；
-		// 实时刷新由 syncSubagentViewTimer 按需启停（有 running 或主流程在跑才刷新）
-		this.syncSubagentViewTimer();
+		// 实时刷新由组件内 syncTimer 按需启停（有 running 或主流程在跑才刷新）
 	}
 
 	/** 退出 Subagents 视图：公共生命周期由 OverlayPane 统一处理（timer 清理在 cleanup 钩子） */
 	private closeSubagentsView(): void {
 		if (this.overlay.currentMode !== 'subagents') return;
 		this.overlay.close();
-	}
-
-	/** 渲染 Subagents 总览视图（顶部标题 + 选中输出占主区，subagent 列表沉底 + 输入） */
-	private renderSubagentsView(): void {
-		// 同步刷新定时器（全部结束后停止，避免 completed 列表仍在每 500ms 刷新/耗秒跳动）
-		this.syncSubagentViewTimer();
-		const { rows, cols } = getTermSize();
-		const subs = this.sessionMgr.listSubagents();
-
-		this.out.write('\x1b[2J\x1b[H');
-
-		if (subs.length === 0) {
-			this.out.write(yellow('═══ Subagents ═══') + '\r\n');
-			this.out.write(dim('(当前会话没有 subagent。master agent 可通过 subagent_spawn 创建。)') + '\r\n');
-			this.out.write('\r\n');
-			this.out.write(dim('  [q] 返回 master') + '\r\n');
-			return;
-		}
-
-		// 校正选中索引（subagent 可能被取消/移除）
-		if (this.viewerSubagentIndex >= subs.length) this.viewerSubagentIndex = 0;
-		const current = subs[this.viewerSubagentIndex];
-		const record = current.toRecord();
-
-		// ── 顶部标题（仅一行，其余空间留给选中 subagent 输出）──
-		const curIcon = current.status === 'running' ? '⏳'
-			: current.status === 'completed' ? '✓' : '✗';
-		this.out.write(yellow(`═══ Subagents (${subs.length}) — 选中: ${current.name} ${curIcon} ═══`) + '\r\n');
-
-		// 底部列表高度（预留标题 1 + 输出 ≥3 + 分隔线 1 + 提示/输入 2 行）
-		const maxListRows = Math.max(1, Math.min(subs.length, rows - 8));
-
-		// ── 选中 subagent 轨迹（完整渲染；默认贴底显示最新，可 ↑↓/PgUp/PgDn 滚动）──
-		const view = new SubagentRecordView();
-		const outLines = view.render(record, cols);
-		this.subagentViewTotal = outLines.length;
-		const visible = this.subagentOutputRows();
-		const maxOffset = Math.max(0, this.subagentViewTotal - visible);
-		// 跟随末尾或切换了 subagent：回到最新；否则维持用户滚动位置（仅 clamp）
-		if (this.subagentViewFollowTail || this.subagentViewRenderedIndex !== this.viewerSubagentIndex) {
-			this.subagentViewScrollOffset = maxOffset;
-			this.subagentViewFollowTail = true;
-		}
-		this.subagentViewScrollOffset = Math.min(Math.max(0, this.subagentViewScrollOffset), maxOffset);
-		if (this.subagentViewScrollOffset >= maxOffset) this.subagentViewFollowTail = true;
-		this.subagentViewRenderedIndex = this.viewerSubagentIndex;
-		const start = this.subagentViewScrollOffset;
-		for (let r = 0; r < visible; r++) {
-			const idx = start + r;
-			this.out.write('\r\x1b[2K');
-			if (idx < outLines.length) {
-				this.out.write(outLines[idx].slice(0, cols - 1));
-			}
-			if (r < visible - 1) this.out.write('\r\n');
-		}
-
-		// ── 底部：分隔线 + subagent 列表（状态栏，选中高亮）──
-		this.out.write('\r\n');
-		this.out.write(dim('─'.repeat(Math.max(20, cols - 2))) + '\r\n');
-		const listLines = subs.map((s, i) => {
-			const icon = s.status === 'running' ? '●'
-				: s.status === 'completed' ? green('✓')
-				: red('✗');
-			// 已结束的 subagent：耗时固定到 endMs（不再随 now 增长）
-			const endTs = s.endMs ?? Date.now();
-			const elapsed = ((endTs - s.startMs) / 1000).toFixed(1);
-			const marker = i === this.viewerSubagentIndex ? green('▸') : ' ';
-			const name = i === this.viewerSubagentIndex ? cyan(s.name) : s.name;
-			return `  ${marker} ${icon} ${name} ${dim(`(${s.status}, ${elapsed}s)`)}`;
-		});
-		const shown = listLines.slice(0, maxListRows);
-		shown.forEach((l, i) => {
-			this.out.write('\r\x1b[2K');
-			this.out.write(l);
-			if (i < shown.length - 1) this.out.write('\r\n');
-		});
-		if (listLines.length > shown.length) {
-			this.out.write('\r\n\x1b[2K');
-			this.out.write(dim(`  … 还有 ${listLines.length - shown.length} 个 subagent`));
-		}
-
-		// ── 最底部：快捷键提示 + 输入区 ──
-		this.out.write('\r\n\x1b[2K');
-		if (this.subagentViewInsertMode) {
-			this.out.write(dim(`  [Enter] 发送  [ESC] 退出输入`) + '\r\n');
-		} else {
-			// 命令模式提示：切换 + 轨迹滚动 + 输入/返回（保留 '[n] next' 兼容旧提示）
-			let hint = `  [n] next  [p] prev  [1-${Math.min(subs.length, 9)}] 跳转`;
-			if (this.subagentViewTotal > visible) {
-				hint += `  [↑↓/PgUp/PgDn] 滚动`;
-				const endIdx = Math.min(start + visible, this.subagentViewTotal);
-				hint += `  ${start + 1}-${endIdx}/${this.subagentViewTotal}`;
-			}
-			hint += `  [i] 输入  [q] 返回`;
-			this.out.write(dim(hint.slice(0, Math.max(1, cols - 1))));
-		}
-		this.out.write('\r\n');
-		this.out.write('\x1b[2K');
-		if (this.subagentViewBusy) {
-			this.out.write(dim(`  ⏳ 正在发送给 ${current.name}... (ESC 中断)`));
-		} else if (this.subagentViewInsertMode) {
-			const prefix = `  > ${this.subagentViewInput}`;
-			this.out.write(green(prefix) + dim('  [Enter] 发送  [ESC] 退出'));
-			if (this.subagentViewError) {
-				this.out.write(red(`  ⚠ ${this.subagentViewError}`));
-			}
-		} else {
-			const prefix = `  > ${this.subagentViewInput}`;
-			this.out.write(dim(prefix) + dim('  按 [i] 进入输入模式'));
-			if (this.subagentViewError) {
-				this.out.write(red(`  ⚠ ${this.subagentViewError}`));
-			}
-		}
-	}
-
-	/** Subagents 视图输入处理：vim 式双模式
-	 *  - 命令模式（默认）：n/p/数字 切换、i 进入 insert、q/ESC 返回 master
-	 *  - insert 模式（按 i 进入）：字符进输入缓冲（n/p 等不再被捕捉），
-	 *    Enter 发送、ESC 退出到命令模式 */
-	private handleSubagentsViewInput(data: string): void {
-		const subs = this.sessionMgr.listSubagents();
-		for (let i = 0; i < data.length; i++) {
-			const ch = data[i];
-
-			// ESC 序列：↑↓ 单行滚动、PgUp/PgDn 翻页（命令模式与输入模式均可用）
-			if (ch === '\x1b') {
-				if (data[i + 1] === '[') {
-					i += 2;
-					let seq = '';
-					while (i < data.length) {
-						const sc = data.charCodeAt(i);
-						if (sc >= 0x40 && sc <= 0x7e) { seq += data[i]; i++; break; }
-						seq += data[i];
-						i++;
-					}
-					i--;
-					if (this.subagentViewBusy) continue; // 发送中忽略
-					if (seq === 'A') this.subagentScrollBy(-1);
-					else if (seq === 'B') this.subagentScrollBy(1);
-					else if (seq === '5~') this.subagentScrollPage(-1);
-					else if (seq === '6~') this.subagentScrollPage(1);
-					continue;
-				}
-				// 单独 ESC：insert → 退出到命令模式；命令模式 → 关闭视图
-				if (this.subagentViewBusy) {
-					this.closeSubagentsView();
-				} else if (this.subagentViewInsertMode) {
-					this.subagentViewInsertMode = false;
-					this.renderSubagentsView();
-				} else {
-					this.closeSubagentsView();
-				}
-				return;
-			}
-
-			// 发送中：忽略其他输入（ESC 已处理）
-			if (this.subagentViewBusy) continue;
-
-			if (this.subagentViewInsertMode) {
-				// ── insert 模式：所有字符进输入缓冲，n/p 等不解释为命令 ──
-				if (ch === '\x0d' || ch === '\x0a') {
-					// Enter 发送给当前选中 subagent（发送后回命令模式，vim 式）
-					const text = this.subagentViewInput.trim();
-					this.subagentViewInput = '';
-					this.subagentViewInsertMode = false;
-					if (text) {
-						void this.sendToSubagentFromView(text);
-					} else {
-						this.renderSubagentsView();
-					}
-					continue;
-				}
-				if (ch === '\x7f' || ch === '\x08') {
-					// Backspace
-					this.subagentViewInput = this.subagentViewInput.slice(0, -1);
-					this.renderSubagentsView();
-					continue;
-				}
-				// 可打印字符（含中文等单码元字符）追加到输入缓冲
-				if (ch >= ' ') {
-					this.subagentViewInput += ch;
-					this.renderSubagentsView();
-					continue;
-				}
-				continue;
-			}
-
-			// ── 命令模式：导航键 + i 进入 insert ──
-			if (ch === 'q' || ch === 'Q') { this.closeSubagentsView(); return; }
-			if (ch === 'i' || ch === 'I') {
-				this.subagentViewInsertMode = true;
-				this.subagentViewError = null;
-				this.renderSubagentsView();
-				continue;
-			}
-			if (ch === 'n') {
-				if (subs.length > 0) {
-					this.viewerSubagentIndex = (this.viewerSubagentIndex + 1) % subs.length;
-					this.subagentViewError = null;
-					this.subagentViewFollowTail = true; // 切换 subagent：从最新输出看起
-					this.renderSubagentsView();
-				}
-				continue;
-			}
-			if (ch === 'p') {
-				if (subs.length > 0) {
-					this.viewerSubagentIndex = (this.viewerSubagentIndex - 1 + subs.length) % subs.length;
-					this.subagentViewError = null;
-					this.subagentViewFollowTail = true;
-					this.renderSubagentsView();
-				}
-				continue;
-			}
-			if (ch >= '1' && ch <= '9') {
-				const idx = Number(ch) - 1;
-				if (idx < subs.length) {
-					this.viewerSubagentIndex = idx;
-					this.subagentViewError = null;
-					this.subagentViewFollowTail = true;
-					this.renderSubagentsView();
-				}
-				continue;
-			}
-			// 命令模式：其他字符忽略（不进入输入缓冲）
-		}
-	}
-
-	/** 输出窗口可见行数（与底部标题/列表/提示/输入行高联动） */
-	private subagentOutputRows(): number {
-		const { rows } = getTermSize();
-		const subs = this.sessionMgr.listSubagents();
-		const maxListRows = Math.max(1, Math.min(subs.length, rows - 8));
-		return Math.max(1, rows - 1 - (1 + maxListRows + 2));
-	}
-
-	/**
-	 * 同步视图刷新定时器（500ms）：
-	 * - 存在 running subagent，或主流程仍非 IDLE（后台可能 spawn 新 subagent）→ 保持刷新；
-	 * - 全部 subagent 已结束（completed/failed/cancelled）且主流程 IDLE → 停止刷新，
-	 *   视图画面保留最后状态，耗时不再跳动（cleanup 钩子在视图关闭时兜底清除）。
-	 */
-	private syncSubagentViewTimer(): void {
-		if (!this.overlay.active || this.overlay.currentMode !== 'subagents') return;
-		const subs = this.sessionMgr.listSubagents();
-		const hasRunning = subs.some((s) => s.status === 'running');
-		// 主流程仍持有流（abortController 非空）：后台可能继续输出/spawn 新 subagent
-		const maySpawnMore = this.abortController !== null;
-		if (hasRunning || maySpawnMore) {
-			if (!this.subagentViewTimer) {
-				this.subagentViewTimer = setInterval(() => {
-					if (this.overlay.active && this.overlay.currentMode === 'subagents') {
-						this.renderSubagentsView();
-					}
-				}, 500);
-			}
-		} else if (this.subagentViewTimer) {
-			clearInterval(this.subagentViewTimer);
-			this.subagentViewTimer = null;
-		}
-	}
-
-	/** 滚动选中 subagent 轨迹（±delta 行）；贴底时恢复跟随最新 */
-	private subagentScrollBy(delta: number): void {
-		const subs = this.sessionMgr.listSubagents();
-		if (subs.length === 0) return;
-		const visible = this.subagentOutputRows();
-		const maxOffset = Math.max(0, this.subagentViewTotal - visible);
-		this.subagentViewFollowTail = false;
-		this.subagentViewScrollOffset = Math.max(0, Math.min(this.subagentViewScrollOffset + delta, maxOffset));
-		if (this.subagentViewScrollOffset >= maxOffset) this.subagentViewFollowTail = true;
-		this.renderSubagentsView();
-	}
-
-	/** 翻页滚动轨迹（PgUp/PgDn） */
-	private subagentScrollPage(dir: 1 | -1): void {
-		const subs = this.sessionMgr.listSubagents();
-		if (subs.length === 0) return;
-		const visible = this.subagentOutputRows();
-		this.subagentScrollBy(dir * Math.max(1, visible - 1));
-	}
-
-	/** 视图内：向选中 subagent 发送消息（同步等待续跑，期间视图显示发送中） */
-	private async sendToSubagentFromView(text: string): Promise<void> {
-		const subs = this.sessionMgr.listSubagents();
-		const current = subs[this.viewerSubagentIndex];
-		if (!current) { this.renderSubagentsView(); return; }
-		this.subagentViewBusy = true;
-		this.subagentViewError = null;
-		this.renderSubagentsView();
-		try {
-			await this.sessionMgr.sendToSubagent(current.name, text);
-			// 结果已追加到 record.entries/result，重渲染显示最新输出
-		} catch (err) {
-			this.subagentViewError = err instanceof Error ? err.message : String(err);
-		} finally {
-			this.subagentViewBusy = false;
-			this.renderSubagentsView();
-		}
 	}
 
 	// ─── 流式发送 ──────────────────────────────────
