@@ -53,6 +53,8 @@ import { Selector } from '../render/selector.js';
 import type { SelectOption } from '../render/selector.js';
 import { MarkdownTableRenderer } from '../render/markdown.js';
 import { isInteractiveCommand } from '../tools/utils.js';
+import { ConversationViewer } from './views/conversation-viewer.js';
+import type { ViewInputResult } from './views/types.js';
 
 /** 可选模型列表（运行时从配置动态生成，见 TuiApp 构造函数；此为兜底） */
 const FALLBACK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
@@ -138,22 +140,8 @@ export class TuiApp {
 	private subagentViewTotal = 0;
 	/** subagents 视图：上次渲染的选中索引（切换 subagent 时回到最新） */
 	private subagentViewRenderedIndex = -1;
-	/** 视图滚动偏移（行） */
-	private viewerScrollOffset = 0;
-	/** 视图预渲染行 */
-	private viewerLines: string[] = [];
-	/** 每轮起始行号（左右键跳转用） */
-	private viewerTurnStartLines: number[] = [];
-	/** 搜索关键词 */
-	private viewerSearchQuery = '';
-	/** 搜索匹配行号 */
-	private viewerSearchMatches: number[] = [];
-	/** 当前搜索匹配索引 */
-	private viewerSearchIndex = -1;
-	/** 是否处于搜索输入模式 */
-	private viewerSearchActive = false;
-	/** 搜索输入缓冲 */
-	private viewerSearchInput = '';
+	/** Ctrl+O 对话浏览视图（方案 A 抽取：原 10 字段 + 12 方法收敛为组件） */
+	private conversationViewer: ConversationViewer;
 
 	constructor(
 		sessionMgr: SessionManager,
@@ -183,6 +171,12 @@ export class TuiApp {
 			out: this.out,
 			input: this.input,
 			getCols: () => getTermSize().cols,
+		});
+		this.conversationViewer = new ConversationViewer({
+			out: this.out,
+			getTurns: () => this.sessionMgr.getSession()?.turns ?? [],
+			conversation: this.conversation,
+			getSize: () => getTermSize(),
 		});
 		this.overlay = new OverlayPane(this.out, {
 			getHandler: () => this.stdinHandler,
@@ -1512,7 +1506,13 @@ export class TuiApp {
 		if (this.overlay.active) return;
 		const session = this.sessionMgr.getSession();
 		this.overlay.setOpenTurnCount(session?.turns.length ?? 0);
-		this.overlay.open('conversation', (data: string) => this.handleViewerInput(data), this.state !== AppState.IDLE);
+		this.overlay.open(
+			'conversation',
+			(data: string) => {
+				if (this.conversationViewer.handleInput(data) === 'close') this.closeViewer();
+			},
+			this.state !== AppState.IDLE,
+		);
 		// 渲染由 OverlayPane.render 钩子（renderActiveOverlay）完成
 	}
 
@@ -1560,9 +1560,7 @@ export class TuiApp {
 		if (this.overlay.currentMode === 'subagents') {
 			this.renderSubagentsView();
 		} else {
-			this.buildViewerLines();
-			this.viewerScrollOffset = 0;
-			this.renderViewer();
+			this.conversationViewer.render();
 		}
 	}
 
@@ -1572,115 +1570,6 @@ export class TuiApp {
 			clearInterval(this.subagentViewTimer);
 			this.subagentViewTimer = null;
 		}
-	}
-
-	/** 构建视图行（每轮复用 ConversationView 渲染 + 轮次起始行记录） */
-	private buildViewerLines(): void {
-		this.viewerLines = [];
-		this.viewerTurnStartLines = [];
-		const session = this.sessionMgr.getSession();
-		const turns = session?.turns ?? [];
-		const { cols } = getTermSize();
-
-		turns.forEach((turn, i) => {
-			this.viewerTurnStartLines.push(this.viewerLines.length);
-			// 轮次标题（保留左右键跳转标记）
-			this.viewerLines.push(dim(`── 第 ${i + 1} 轮 ────────────────────────`));
-			// 复用 ConversationView 渲染单轮（与主会话对话格式一致，think 完整显示）
-			this.viewerLines.push(...this.conversation.render([turn], cols, { fullThink: true }));
-		});
-		if (this.viewerLines.length === 0) {
-			this.viewerLines.push(dim('(暂无对话)'));
-		}
-	}
-
-	/** 渲染视图当前视口（顶部提示 + 内容窗口 + 底部状态） */
-	private renderViewer(): void {
-		const { rows, cols } = getTermSize();
-		const visible = Math.max(1, rows - 2);
-		this.out.write('\x1b[2J\x1b[H');
-		this.out.write(dim(` 对话浏览  ←→ 轮次  |  ↑↓ 滚动  |  PgUp/PgDn 翻页  |  / 搜索  |  q 退出`) + '\r\n');
-		for (let r = 0; r < visible; r++) {
-			const idx = this.viewerScrollOffset + r;
-			this.out.write('\r\x1b[2K');
-			if (idx < this.viewerLines.length) {
-				let line = this.viewerLines[idx];
-				// 搜索匹配行高亮（反转色）
-				if (this.viewerSearchQuery && this.viewerSearchMatches.includes(idx)) {
-					line = `\x1b[7m${stripAnsi(line)}\x1b[0m`;
-				}
-				this.out.write(line.slice(0, cols - 1));
-			}
-			if (r < visible - 1) this.out.write('\r\n');
-		}
-		// 底部状态行
-		this.out.write('\r\n\x1b[2K');
-		const total = this.viewerLines.length;
-		const pct = total > 0 ? Math.round(((this.viewerScrollOffset + visible) / total) * 100) : 0;
-		let status = dim(` ${Math.min(this.viewerScrollOffset + 1, total)}/${total} 行 (${pct}%)`);
-		if (this.viewerSearchQuery) {
-			const matchInfo = this.viewerSearchMatches.length > 0
-				? ` 匹配 ${this.viewerSearchIndex + 1}/${this.viewerSearchMatches.length}: "${this.viewerSearchQuery}" (n/N 下一个)`
-				: `  无匹配: "${this.viewerSearchQuery}"`;
-			status += dim(matchInfo);
-		} else if (this.viewerSearchActive) {
-			status += dim(`  搜索: ${this.viewerSearchInput}▌`);
-		}
-		this.out.write(status);
-	}
-
-	/** 视图输入处理（逐字符：方向键/翻页/搜索/退出） */
-	private handleViewerInput(data: string): void {
-		// 已在搜索输入模式：剩余字符全部交给搜索处理
-		if (this.viewerSearchActive) {
-			this.handleViewerSearchInput(data);
-			return;
-		}
-		for (let i = 0; i < data.length; i++) {
-			const ch = data[i];
-			// ESC 序列（方向键/PgUp/PgDn）
-			if (ch === '\x1b') {
-				if (data[i + 1] === '[') {
-					i += 2;
-					let seq = '';
-					while (i < data.length) {
-						const sc = data.charCodeAt(i);
-						if (sc >= 0x40 && sc <= 0x7e) { seq += data[i]; i++; break; }
-						seq += data[i];
-						i++;
-					}
-					i--;
-					this.handleViewerEscapeSeq(seq);
-				} else {
-					this.closeViewer(); // 单独 ESC 退出
-					return;
-				}
-				continue;
-			}
-			if (ch === 'q' || ch === 'Q') { this.closeViewer(); return; }
-			if (ch === '/') {
-				this.viewerSearchActive = true;
-				this.viewerSearchInput = '';
-				this.renderViewer();
-				// 同批到达的剩余字符（如 '/reply\r'）交给搜索输入处理
-				if (i + 1 < data.length) {
-					this.handleViewerSearchInput(data.slice(i + 1));
-				}
-				return;
-			}
-			if (ch === 'n') this.viewerJumpSearch(1);
-			if (ch === 'N') this.viewerJumpSearch(-1);
-		}
-	}
-
-	/** 视图 ESC 序列处理 */
-	private handleViewerEscapeSeq(seq: string): void {
-		if (seq === 'A') this.viewerScroll(-1);
-		else if (seq === 'B') this.viewerScroll(1);
-		else if (seq === 'C') this.viewerJumpTurn(1);
-		else if (seq === 'D') this.viewerJumpTurn(-1);
-		else if (seq === '5~') this.viewerPageScroll(-1);
-		else if (seq === '6~') this.viewerPageScroll(1);
 	}
 
 	// ─── Ctrl+T Subagents 总览视图（全屏，实时刷新 + 视图内交互）────
@@ -2008,96 +1897,6 @@ export class TuiApp {
 			this.subagentViewBusy = false;
 			this.renderSubagentsView();
 		}
-	}
-
-	/** 视图搜索输入模式（逐字符） */
-	private handleViewerSearchInput(data: string): void {
-		for (let i = 0; i < data.length; i++) {
-			const ch = data[i];
-			if (ch === '\x0d') {
-				// Enter 执行搜索
-				if (this.viewerSearchInput) this.viewerDoSearch(this.viewerSearchInput);
-				this.viewerSearchActive = false;
-				this.renderViewer();
-				continue;
-			}
-			if (ch === '\x1b') {
-				// Esc 取消搜索
-				this.viewerSearchInput = '';
-				this.viewerSearchActive = false;
-				this.renderViewer();
-				return;
-			}
-			if (ch === '\x7f' || ch === '\x08') {
-				this.viewerSearchInput = this.viewerSearchInput.slice(0, -1);
-				this.renderViewer();
-				continue;
-			}
-			// 普通字符追加（忽略控制字符）
-			if (ch >= ' ') {
-				this.viewerSearchInput += ch;
-				this.renderViewer();
-			}
-		}
-	}
-
-	/** 执行搜索：在视图行（纯文本）中查找匹配行 */
-	private viewerDoSearch(query: string): void {
-		this.viewerSearchQuery = query;
-		this.viewerSearchMatches = [];
-		this.viewerLines.forEach((line, i) => {
-			if (stripAnsi(line).toLowerCase().includes(query.toLowerCase())) {
-				this.viewerSearchMatches.push(i);
-			}
-		});
-		this.viewerSearchIndex = -1;
-		this.viewerJumpSearch(1);
-	}
-
-	/** 跳转到下一个/上一个搜索匹配（循环） */
-	private viewerJumpSearch(dir: 1 | -1): void {
-		if (this.viewerSearchMatches.length === 0) return;
-		this.viewerSearchIndex = (this.viewerSearchIndex + dir + this.viewerSearchMatches.length) % this.viewerSearchMatches.length;
-		const target = this.viewerSearchMatches[this.viewerSearchIndex];
-		this.viewerScrollTo(target);
-	}
-
-	/** 滚动视口到指定行 */
-	private viewerScrollTo(line: number): void {
-		const { rows } = getTermSize();
-		const visible = Math.max(1, rows - 2);
-		this.viewerScrollOffset = Math.max(0, Math.min(line, this.viewerLines.length - 1));
-		// 若目标行不在视口内，滚动到目标行
-		if (line < this.viewerScrollOffset || line >= this.viewerScrollOffset + visible) {
-			this.viewerScrollOffset = Math.max(0, line);
-		}
-		this.renderViewer();
-	}
-
-	/** 逐行滚动 */
-	private viewerScroll(dir: 1 | -1): void {
-		this.viewerScrollOffset = Math.max(0, Math.min(this.viewerScrollOffset + dir, this.viewerLines.length - 1));
-		this.renderViewer();
-	}
-
-	/** 翻页 */
-	private viewerPageScroll(dir: 1 | -1): void {
-		const { rows } = getTermSize();
-		const visible = Math.max(1, rows - 2);
-		this.viewerScrollOffset = Math.max(0, Math.min(this.viewerScrollOffset + dir * (visible - 1), this.viewerLines.length - 1));
-		this.renderViewer();
-	}
-
-	/** 左右键切换轮次（跳转到该轮顶部） */
-	private viewerJumpTurn(dir: 1 | -1): void {
-		if (this.viewerTurnStartLines.length === 0) return;
-		// 找到当前所在轮索引
-		let cur = this.viewerTurnStartLines.length - 1;
-		for (let i = 0; i < this.viewerTurnStartLines.length; i++) {
-			if (this.viewerScrollOffset < this.viewerTurnStartLines[i]) { cur = i - 1; break; }
-		}
-		const target = Math.max(0, Math.min(cur + dir, this.viewerTurnStartLines.length - 1));
-		this.viewerScrollTo(this.viewerTurnStartLines[target]);
 	}
 
 	// ─── 流式发送 ──────────────────────────────────

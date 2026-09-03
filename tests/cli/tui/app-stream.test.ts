@@ -227,7 +227,7 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		const anyApp = app as unknown as {
 			sendMessageStream: (c: string) => Promise<void>;
 			openViewer: () => void;
-			viewerLines: string[];
+			conversationViewer: { lines: string[] };
 			overlay: { active: boolean };
 			closeViewer: () => void;
 		};
@@ -243,10 +243,10 @@ describe('Bug 1: 流式输出期间输入区固定在底部', () => {
 		// 有折叠提示
 		expect(out).toContain('已折叠');
 
-		// Ctrl+O 全屏视图：viewerLines 含完整 think（第 6/7 行可见）
+		// Ctrl+O 全屏视图：组件 lines 含完整 think（第 6/7 行可见）
 		anyApp.openViewer();
 		expect(anyApp.overlay.active).toBe(true);
-		const viewerText = stripAnsi(anyApp.viewerLines.join('\n'));
+		const viewerText = stripAnsi(anyApp.conversationViewer.lines.join('\n'));
 		expect(viewerText).toContain('思考第6行');
 		expect(viewerText).toContain('思考第7行');
 		// 退出视图
