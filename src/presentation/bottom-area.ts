@@ -12,10 +12,11 @@
  */
 
 import { InputEditor } from '../render/input-editor.js';
-import { wrapText } from '../render/conversation.js';
-import { dim, cyan, GRAY_BG_START, GRAY_BG_END, PINK_BG_START, PINK_BG_END, padToWidth } from '../render/ansi.js';
+import { dim, GRAY_BG_START, GRAY_BG_END, PINK_BG_START, PINK_BG_END, padToWidth } from '../render/ansi.js';
 import type { ScreenBuffer } from './screen-buffer.js';
 import { clearLine, hideCursor, showCursor } from './terminal.js';
+import { CommandResultPane } from './views/command-result-pane.js';
+import { SuggestionPane } from './views/suggestion-pane.js';
 
 /** 输入框最大可见行数 */
 const MAX_INPUT_ROWS = 5;
@@ -32,9 +33,11 @@ export class BottomArea {
 	private out: ScreenBuffer;
 	private input: InputEditor;
 	private getCols: () => number;
+	/** 命令结果窗格（方案 A 抽取：原 cmdLines 数据 + 渲染逻辑） */
+	private cmdPane: CommandResultPane;
+	/** 建议窗格（方案 A 抽取：原 renderSuggestions，复用 render/list） */
+	private suggestionPane: SuggestionPane;
 
-	/** 命令结果区内容（完整保留，不截断） */
-	private cmdLines: string[] = [];
 	/** 上次渲染的输入可见行数（用于缩小时清理残留行） */
 	private lastVisibleInputRows = 1;
 	/** 上次渲染后的光标所在输入行号（0-based，用于下次回到起点） */
@@ -50,6 +53,8 @@ export class BottomArea {
 		this.out = opts.out;
 		this.input = opts.input;
 		this.getCols = opts.getCols;
+		this.cmdPane = new CommandResultPane();
+		this.suggestionPane = new SuggestionPane();
 	}
 
 	// ─── 状态查询（TuiApp 用）───────────────────────
@@ -66,12 +71,12 @@ export class BottomArea {
 
 	/** 命令结果区行数 */
 	getCommandLineCount(): number {
-		return this.cmdLines.length;
+		return this.cmdPane.getLineCount();
 	}
 
 	/** think 折叠行上移基准：光标行偏移 + 1 + 命令结果区行数 */
 	getUpRowsForThink(): number {
-		return this.lastCursorDisplayRow + 1 + this.cmdLines.length;
+		return this.lastCursorDisplayRow + 1 + this.cmdPane.getLineCount();
 	}
 
 	/** 设置 shell 模式（输入框背景色） */
@@ -79,17 +84,17 @@ export class BottomArea {
 		this.shellMode = b;
 	}
 
-	// ─── 命令结果区 ────────────────────────────────
+	// ─── 命令结果区（委托 CommandResultPane）──────
 
 	/** 命令输出捕获：追加到命令结果区（完整保留） */
 	pushCommandLine(line: string): void {
-		this.cmdLines.push(line);
+		this.cmdPane.push(line);
 	}
 
 	/** 清空命令结果区（发送普通消息后调用；redraw=false 时输入区已清除，避免错位重绘） */
 	clearCommandResult(redraw = true): void {
-		if (this.cmdLines.length === 0) return;
-		this.cmdLines = [];
+		if (this.cmdPane.getLineCount() === 0) return;
+		this.cmdPane.clear();
 		if (redraw) this.renderIdle();
 	}
 
@@ -220,23 +225,12 @@ export class BottomArea {
 			const suggestIdx = this.input.getSuggestionIndex();
 			const suggestions = this.input.getSuggestions();
 			// 旧建议列表已被上移后的 CLEAR_TO_END 清除，无需残留清理（\r\n 在屏底会触发滚动）
-			this.suggestionLinesCount = this.renderSuggestions(suggestions, suggestIdx, availWidth);
+			this.suggestionLinesCount = this.suggestionPane.render(this.out, suggestions, suggestIdx, availWidth);
 			belowRows = this.suggestionLinesCount;
 		} else {
-			// 命令结果区：从输入区下一行开始画。每行按可用宽度折行（ANSI-aware），
-			// 避免超宽行触发终端自动 wrap 破坏物理行数/光标定位；完整显示不截断。
-			let physicalRows = 0;
-			for (const line of this.cmdLines) {
-				const wrapped = wrapText(line, Math.max(1, availWidth - 2)); // '│ ' 前缀占 2 列
-				for (const wl of wrapped) {
-					this.out.write('\r\n');
-					clearLine();
-					this.out.write(dim('│ ') + wl);
-					physicalRows++;
-				}
-			}
+			// 命令结果区：委托 CommandResultPane（折行 + '│ ' 前缀 + 物理行数）
 			this.suggestionLinesCount = 0;
-			belowRows = physicalRows;
+			belowRows = this.cmdPane.render(this.out, availWidth);
 		}
 
 		// 定位光标：
@@ -253,55 +247,5 @@ export class BottomArea {
 		// 记录底部区域总高度（输入区 + 下方区域），供区域是否在屏判断
 		this.lastBottomRows = linesToDraw + belowRows;
 		showCursor();
-	}
-
-	/**
-	 * 渲染命令补全建议列表
-	 * @returns 绘制的行数
-	 */
-	private renderSuggestions(suggestions: string[], selectedIdx: number, availWidth: number): number {
-		if (suggestions.length === 0) return 0;
-
-		const maxDisplay = Math.min(suggestions.length, 8); // 最多显示 8 条
-		const lines: string[] = [];
-
-		// 滚动窗口：保证 selectedIdx 始终在可见窗口内（↓ 下移时窗口下滑，逐条展开后续项）
-		let start = 0;
-		if (selectedIdx >= maxDisplay) {
-			start = selectedIdx - maxDisplay + 1;
-		}
-		const end = Math.min(start + maxDisplay, suggestions.length);
-
-		// 窗口前有被折叠的项
-		if (start > 0) {
-			lines.push(dim(`  ... ${start} more`));
-		}
-
-		for (let i = start; i < end; i++) {
-			const isSelected = i === selectedIdx;
-			const prefix = isSelected ? '▸ ' : '  ';
-			const text = prefix + suggestions[i];
-			const padded = padToWidth(text, availWidth);
-			lines.push(isSelected ? cyan(padded) : dim(padded));
-		}
-		// 窗口后还有未显示的项
-		const remainingAfter = suggestions.length - end;
-		if (remainingAfter > 0) {
-			lines.push(dim(`  ... and ${remainingAfter} more`));
-		}
-
-		// 从输入行的下一行开始绘制（避免 \r+clearLine 覆盖输入行）
-		this.out.write('\r\n');
-
-		// 绘制每一行
-		for (let i = 0; i < lines.length; i++) {
-			const isLast = i === lines.length - 1;
-			this.out.write('\r');
-			clearLine();
-			this.out.write(lines[i]);
-			if (!isLast) this.out.write('\r\n');
-		}
-
-		return lines.length;
 	}
 }
