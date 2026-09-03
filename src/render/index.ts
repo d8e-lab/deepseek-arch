@@ -5,6 +5,13 @@
  * 用法：`import { ConversationView, wrapText } from 'deepseek-arch/render';`
  */
 export { ConversationView, wrapText, truncateThink, renderToolCallLine, renderToolResultLines, renderToolError } from './conversation.js';
+export { computeListWindow, renderListLine, renderSelectList } from './list.js';
+export type { ListWindow } from './list.js';
+export { ScrollState } from './scroll.js';
+export type { ScrollStateOptions } from './scroll.js';
+export { parseCsiSequence } from './csi.js';
+export type { CsiParseResult } from './csi.js';
+export { renderMarkdownText } from './markdown-text.js';
 export { DISPLAY_PRESETS, isFileModTool, isDisplayMode, mergeDisplayPreset, parseDisplayOverride, buildDisplayPreset } from './display-mode.js';
 export type { DisplayMode, DisplayPreset } from './display-mode.js';
 export { MarkdownTableRenderer } from './markdown.js';
