@@ -5,7 +5,7 @@
  * 子命令：
  *   chat                  启动新对话（或 --resume 恢复）
  *   resume [id]           列出或恢复已有会话
- *   clear                 清除旧会话（保留最近 10 条）
+ *   clear [--below N]     清除会话（默认保留最近 10 条；--below N 删除轮次<N 的会话）
  */
 
 import { createInterface } from 'node:readline';
@@ -237,8 +237,9 @@ program
 
 program
 	.command('clear')
-	.description('Delete all sessions except the 10 most recent')
-	.action(async () => {
+	.description('Delete old sessions (default: keep the 10 most recent; --below <N>: delete all sessions with fewer than N turns)')
+	.option('--below <n>', 'delete all sessions with fewer than N turns (overrides keep-10 default)')
+	.action(async (options: { below?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
@@ -247,6 +248,29 @@ program
 
 			if (sessions.length === 0) {
 				console.log('No sessions to clear.');
+				process.exit(0);
+			}
+
+			// --below <N>：按轮次阈值删除（忽略"保留最近 10 条"保护，用于清理空会话/废会话）
+			if (options.below !== undefined) {
+				const below = Number(options.below);
+				if (!Number.isInteger(below) || below <= 0) {
+					console.error('--below 需要一个正整数（例如: clear --below 3 删除少于 3 轮的会话）');
+					process.exit(1);
+				}
+				const toDelete = sessions.filter((s) => s.turnCount < below);
+				if (toDelete.length === 0) {
+					console.log(`No sessions with fewer than ${below} turn(s).`);
+					process.exit(0);
+				}
+
+				let deleted = 0;
+				for (const s of toDelete) {
+					const ok = await storage.deleteSession(s.id);
+					if (ok) deleted++;
+				}
+
+				console.log(`Cleared ${deleted} session(s) with fewer than ${below} turn(s), kept ${sessions.length - deleted} session(s).`);
 				process.exit(0);
 			}
 
@@ -497,6 +521,11 @@ function generateBashCompletion(): void {
 		"\t\t\t\tCOMPREPLY=($(compgen -W \"--browser --cdp --yolo --async --debug --self-interaction --mock --monitor\" -- \"" + D + "cur\"))",
 		"\t\t\tfi",
 		"\t\t\t;;",
+		"\t\tclear)",
+		"\t\t\tif [[ \"" + D + "cur\" == -* ]]; then",
+		"\t\t\t\tCOMPREPLY=($(compgen -W \"--below\" -- \"" + D + "cur\"))",
+		"\t\t\tfi",
+		"\t\t\t;;",
 		"\t\tcompletion)",
 		"\t\t\tCOMPREPLY=($(compgen -W \"bash zsh\" -- \"" + D + "cur\"))",
 		"\t\t\t;;",
@@ -518,7 +547,7 @@ function generateZshCompletion(): void {
 		"\tsubcommands=(",
 		"\t\t'chat:Start a new conversation or resume an existing one'",
 		"\t\t'resume:List all sessions or resume a specific one'",
-		"\t\t'clear:Delete all sessions except the 10 most recent'",
+		"\t\t'clear:Delete old sessions (default: keep the 10 most recent; --below N: delete sessions with fewer than N turns)'",
 		"\t\t'completion:Generate shell completion script'",
 		"\t)",
 		'',
@@ -556,6 +585,9 @@ function generateZshCompletion(): void {
 		"\t\t\t\t\t\t'--self-interaction[Enable TUI session PTY tools]' \\",
 		"\t\t\t\t\t\t'--mock[Use MockProvider]' \\",
 		"\t\t\t\t\t\t'--monitor=[Mirror API requests]:url'",
+		"\t\t\t\t\t;;",
+		"\t\t\t\tclear)",
+		"\t\t\t\t\t_arguments '--below=[Delete sessions with fewer than N turns]:N:'",
 		"\t\t\t\t\t;;",
 		"\t\t\t\tcompletion)",
 		"\t\t\t\t\t_arguments '1:shell type:(bash zsh)'",
