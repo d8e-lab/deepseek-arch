@@ -15,6 +15,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { resolve, relative } from 'node:path';
 import type { Tool, ToolResult } from './types.js';
 import { isInteractiveCommand } from './utils.js';
@@ -26,19 +27,44 @@ const CMD_TIMEOUT_MS = 10 * 60 * 1000;
 
 const IS_WINDOWS = process.platform === 'win32';
 
-/** 获取平台对应的 shell 解释器 */
-function getShellBin(): { bin: string; arg: string } {
-	if (IS_WINDOWS) {
-		return { bin: 'powershell.exe', arg: '-Command' };
+/**
+ * Windows PowerShell 编码前缀：
+ *  - `[Console]::OutputEncoding=UTF8`：PS 5.1 写重定向 stdout/stderr 管道时按 UTF-8 编码；
+ *  - `$OutputEncoding=UTF8`：PS 将字符串管道给子进程（输入侧）时按 UTF-8；
+ *  - `chcp 65001`：修正 cmd 内建命令 / CRT 工具的输出代码页（无控制台时失败被吞掉，无害）。
+ * 配合 Node 端统一按 UTF-8 解码，避免 Windows 默认 OEM 代码页（GBK/CP437）造成的乱码。
+ */
+export const PS_ENCODING_PREAMBLE =
+	'$OutputEncoding=[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; chcp 65001 2>$null | Out-Null; ';
+
+/**
+ * 构造 spawn 用的可执行文件与参数。
+ * Windows 下注入编码前缀并禁用 profile（避免用户 profile 注入额外输出干扰解析）。
+ * @param command 原始命令
+ * @param platform 平台（可注入以便测试 win32 分支），默认取当前进程平台
+ */
+export function buildInvocation(
+	command: string,
+	platform: NodeJS.Platform = process.platform,
+): { bin: string; args: string[] } {
+	if (platform === 'win32') {
+		return {
+			bin: 'powershell.exe',
+			args: ['-NoProfile', '-NonInteractive', '-Command', PS_ENCODING_PREAMBLE + command],
+		};
 	}
-	return { bin: '/bin/bash', arg: '-c' };
+	return { bin: '/bin/bash', args: ['-c', command] };
 }
 
-/** 截断字节串：保留最后 N 字节，前缀 "... (truncated)" */
+/** 截断字节串：保留最后 N 字节（对齐 UTF-8 字符边界），前缀 "... (truncated)" */
 function truncateOutput(raw: string, maxBytes: number): string {
 	const buf = Buffer.from(raw, 'utf-8');
 	if (buf.length <= maxBytes) return raw;
-	const suffix = buf.subarray(buf.length - maxBytes);
+	// 截断点可能落在多字节字符中间：跳过 continuation 字节（10xxxxxx），
+	// 从完整字符边界开始保留，避免截断边界处解码出 U+FFFD。
+	let start = buf.length - maxBytes;
+	while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
+	const suffix = buf.subarray(start);
 	return `... (truncated)\n${Buffer.from(suffix).toString('utf-8')}`;
 }
 
@@ -113,11 +139,11 @@ export const shellTool: Tool = {
 			throw err;
 		}
 
-		const { bin, arg } = getShellBin();
+		const { bin, args } = buildInvocation(command);
 
 		return new Promise((resolveResult, reject) => {
 			let settled = false;
-			const child = spawn(bin, [arg, command], {
+			const child = spawn(bin, args, {
 				cwd: workDir,
 				timeout: CMD_TIMEOUT_MS,
 				stdio: ['pipe', 'pipe', 'pipe'],
@@ -191,12 +217,25 @@ export const shellTool: Tool = {
 			const stdoutTmr = { ref: null as ReturnType<typeof setTimeout> | null };
 			const stderrTmr = { ref: null as ReturnType<typeof setTimeout> | null };
 
+			// 流式 UTF-8 解码：逐 chunk 直接 toString 会把落在 chunk 边界的多字节字符切成 U+FFFD，
+			// StringDecoder 内部保留跨块状态，保证多字节字符完整解码。
+			const stdoutDecoder = new StringDecoder('utf8');
+			const stderrDecoder = new StringDecoder('utf8');
+
+			/** 冲刷 decoder 尾串（end() 只能调用一次，须在 settled 置位后的收尾路径执行） */
+			const flushDecoders = (): void => {
+				const tailOut = stdoutDecoder.end();
+				if (tailOut) { stdoutFull.buf += tailOut; stdoutPend.val += tailOut; }
+				const tailErr = stderrDecoder.end();
+				if (tailErr) { stderrFull.buf += tailErr; stderrPend.val += tailErr; }
+			};
+
 			child.stdout?.on('data', (chunk: Buffer) => {
-				processChunk('stdout', chunk.toString('utf-8'), stdoutFull, stdoutPend, stdoutTmr);
+				processChunk('stdout', stdoutDecoder.write(chunk), stdoutFull, stdoutPend, stdoutTmr);
 			});
 
 			child.stderr?.on('data', (chunk: Buffer) => {
-				processChunk('stderr', chunk.toString('utf-8'), stderrFull, stderrPend, stderrTmr);
+				processChunk('stderr', stderrDecoder.write(chunk), stderrFull, stderrPend, stderrTmr);
 			});
 
 			child.on('close', (exitCode: number | null, termSignal: string | null) => {
@@ -206,6 +245,10 @@ export const shellTool: Tool = {
 				// 清除定时器，发出剩余暂存行（\r 合并为最后一段）
 				if (stdoutTmr.ref) { clearTimeout(stdoutTmr.ref); stdoutTmr.ref = null; }
 				if (stderrTmr.ref) { clearTimeout(stderrTmr.ref); stderrTmr.ref = null; }
+
+				// 冲刷 decoder 尾串（跨块残留在缓冲区中的字符），随后统一 flush
+				flushDecoders();
+
 				const flushPending = (stream: 'stdout' | 'stderr', p: string): void => {
 					if (!p) return;
 					if (p.includes('\r')) {
@@ -242,6 +285,9 @@ export const shellTool: Tool = {
 
 				if (stdoutTmr.ref) { clearTimeout(stdoutTmr.ref); stdoutTmr.ref = null; }
 				if (stderrTmr.ref) { clearTimeout(stderrTmr.ref); stderrTmr.ref = null; }
+
+				// spawn 失败时通常无流数据，end() 返回空串；此处保证 end() 恰好执行一次
+				flushDecoders();
 
 				const result: ToolResult = {
 					content: [
