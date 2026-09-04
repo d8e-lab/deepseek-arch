@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Storage } from '../../src/core/storage.js';
@@ -97,6 +97,36 @@ describe('SessionManager', () => {
 
     it('未创建会话时 getSessionId 返回 null', () => {
       expect(manager.getSessionId()).toBeNull();
+    });
+  });
+
+  describe('discardEmptySession', () => {
+    it('0 轮空会话：删除磁盘目录并清空活跃会话', async () => {
+      const meta = await manager.startNewSession();
+      const dir = storage.sessionDir(meta.id);
+      await expect(access(dir)).resolves.toBeUndefined();
+
+      const ok = await manager.discardEmptySession();
+
+      expect(ok).toBe(true);
+      expect(manager.getSession()).toBeNull();
+      await expect(access(dir)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('已有轮次的会话不删除', async () => {
+      const meta = await manager.startNewSession('保留会话');
+      await manager.sendMessage('你好');
+
+      expect(manager.getSession()!.meta.turnCount).toBe(1);
+      const ok = await manager.discardEmptySession();
+
+      expect(ok).toBe(false);
+      expect(manager.getSession()).not.toBeNull();
+      await expect(access(storage.sessionDir(meta.id))).resolves.toBeUndefined();
+    });
+
+    it('无活跃会话时返回 false', async () => {
+      expect(await manager.discardEmptySession()).toBe(false);
     });
   });
 
