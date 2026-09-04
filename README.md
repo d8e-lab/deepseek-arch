@@ -117,7 +117,7 @@ Options:
 Commands:
   chat [options]            开始新对话（全屏 TUI）
   resume [id]               列出所有会话或恢复指定会话
-  clear                     删除除最近 10 条外的所有会话
+  clear [--below N]        删除会话（默认保留最近 10 条；--below N 删除轮次少于 N 的会话）
   init [options]            初始化/迁移配置文件（生成模板 + 补全缺失键；--force 备份重新生成）
   api-monitor [options]     启动 API 请求监听服务器（配合 --monitor）
   completion [shell]        生成 bash/zsh 补全脚本
