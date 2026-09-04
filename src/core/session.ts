@@ -201,6 +201,19 @@ export class SessionManager {
 		return this.session?.meta.id ?? null;
 	}
 
+	/**
+	 * 退出清理：0 轮空会话不落盘。
+	 * 会话未产生任何对话轮次（如进入即退出）时删除磁盘目录并清空活跃会话；
+	 * 已有轮次或无可删会话时返回 false，不做任何操作。
+	 */
+	async discardEmptySession(): Promise<boolean> {
+		if (!this.session) return false;
+		if (this.session.meta.turnCount > 0 || this.session.turns.length > 0) return false;
+		const ok = await this.storage.deleteSession(this.session.meta.id);
+		if (ok) this.session = null;
+		return ok;
+	}
+
 	/** 切换默认模型 */
 	setModel(model: string): void {
 		this.provider.setModel?.(model);

@@ -84,6 +84,8 @@ export class TuiApp {
 	private state: AppState = AppState.IDLE;
 	private abortController: AbortController | null = null;
 	private running = false;
+	/** 退出时是否丢弃了 0 轮空会话（未产生任何对话轮次 → 不落盘） */
+	private emptySessionDiscarded = false;
 	/** shell 命令模式 */
 	private shellMode = false;
 	/** 自我交互模式（可启动子 TUI 实例） */
@@ -235,6 +237,13 @@ export class TuiApp {
 		}
 
 		this.cleanupRawMode();
+
+		// 0 轮空会话不落盘：未产生任何对话轮次（进入即退出）时删除磁盘目录
+		const activeMeta = this.sessionMgr.getSession()?.meta;
+		if (activeMeta && activeMeta.turnCount === 0) {
+			this.emptySessionDiscarded = await this.sessionMgr.discardEmptySession();
+		}
+
 		this.printExitInfo();
 	}
 
@@ -285,6 +294,10 @@ export class TuiApp {
 	}
 
 	private printExitInfo(): void {
+		if (this.emptySessionDiscarded) {
+			this.out.write(dim('(空会话未保存：未产生任何对话轮次)\r\n'));
+			return;
+		}
 		const sessionId = this.sessionMgr.getSessionId();
 		if (sessionId) {
 			this.out.write(`Session saved: ${sessionId}\r\n`);
