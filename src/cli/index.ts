@@ -244,6 +244,15 @@ program
 			await ConfigManager.getInstance().load();
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
 			const storage = new Storage(sessionsDir);
+
+			// --below <N>：按轮次阈值删除（忽略"保留最近 10 条"保护，用于清理空会话/废会话）
+			// 参数先行校验（与有无会话无关）
+			const below = options.below !== undefined ? Number(options.below) : undefined;
+			if (below !== undefined && (!Number.isInteger(below) || below <= 0)) {
+				console.error('--below 需要一个正整数（例如: clear --below 3 删除少于 3 轮的会话）');
+				process.exit(1);
+			}
+
 			const sessions = await storage.listSessions();
 
 			if (sessions.length === 0) {
@@ -251,13 +260,7 @@ program
 				process.exit(0);
 			}
 
-			// --below <N>：按轮次阈值删除（忽略"保留最近 10 条"保护，用于清理空会话/废会话）
-			if (options.below !== undefined) {
-				const below = Number(options.below);
-				if (!Number.isInteger(below) || below <= 0) {
-					console.error('--below 需要一个正整数（例如: clear --below 3 删除少于 3 轮的会话）');
-					process.exit(1);
-				}
+			if (below !== undefined) {
 				const toDelete = sessions.filter((s) => s.turnCount < below);
 				if (toDelete.length === 0) {
 					console.log(`No sessions with fewer than ${below} turn(s).`);

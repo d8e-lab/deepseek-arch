@@ -7,8 +7,9 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execSync } from 'node:child_process';
-import { resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const CLI_PATH = resolve(import.meta.dirname!, '..', '..', 'dist', 'cli', 'index.js');
 /** 从 package.json 读取当前版本（与 PACKAGE_VERSION 单一来源对齐） */
@@ -121,6 +122,86 @@ describe('CLI (e2e)', () => {
     });
   });
 
+  describe('clear 子命令', () => {
+    it('clear --help 显示 --below 选项', () => {
+      const { stdout } = run(['clear', '--help']);
+      expect(stdout).toContain('--below');
+    });
+
+    it('clear --below 3 删除轮次少于 3 的会话，保留 >=3 轮会话', () => {
+      const home = mkdtempSync(join(tmpdir(), 'deepseek-arch-cli-clear-below-'));
+      const sessionsDir = join(home, '.deepseek-arch', 'sessions');
+      try {
+        seedSession(sessionsDir, 's0', 0);
+        seedSession(sessionsDir, 's1', 1);
+        seedSession(sessionsDir, 's2', 2);
+        seedSession(sessionsDir, 's3', 3);
+        seedSession(sessionsDir, 's5', 5);
+
+        const { stdout, status } = runWithEnv(['clear', '--below', '3'], { HOME: home });
+        expect(status).toBe(0);
+        expect(stdout).toContain('Cleared 3 session(s) with fewer than 3 turn(s)');
+        expect(existsSync(join(sessionsDir, 's0'))).toBe(false);
+        expect(existsSync(join(sessionsDir, 's1'))).toBe(false);
+        expect(existsSync(join(sessionsDir, 's2'))).toBe(false);
+        expect(existsSync(join(sessionsDir, 's3'))).toBe(true);
+        expect(existsSync(join(sessionsDir, 's5'))).toBe(true);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('clear --below 3 无匹配会话时提示并不删除', () => {
+      const home = mkdtempSync(join(tmpdir(), 'deepseek-arch-cli-clear-nomatch-'));
+      const sessionsDir = join(home, '.deepseek-arch', 'sessions');
+      try {
+        seedSession(sessionsDir, 's4', 4);
+
+        const { stdout, status } = runWithEnv(['clear', '--below', '3'], { HOME: home });
+        expect(status).toBe(0);
+        expect(stdout).toContain('No sessions with fewer than 3 turn(s)');
+        expect(existsSync(join(sessionsDir, 's4'))).toBe(true);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('clear --below 非正整数时报错', () => {
+      const home = mkdtempSync(join(tmpdir(), 'deepseek-arch-cli-clear-invalid-'));
+      try {
+        const { stderr, status } = runWithEnv(['clear', '--below', 'abc'], { HOME: home });
+        expect(status).toBe(1);
+        expect(stderr).toContain('--below 需要一个正整数');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('clear 默认行为回归：删除除最近 10 条外的会话', () => {
+      const home = mkdtempSync(join(tmpdir(), 'deepseek-arch-cli-clear-default-'));
+      const sessionsDir = join(home, '.deepseek-arch', 'sessions');
+      try {
+        // 12 个会话，updated_at 随序号递增（越大越新）
+        for (let i = 1; i <= 12; i++) {
+          const id = `s${String(i).padStart(2, '0')}`;
+          seedSession(sessionsDir, id, i, new Date(Date.UTC(2026, 0, i)).toISOString());
+        }
+
+        const { stdout, status } = runWithEnv(['clear'], { HOME: home });
+        expect(status).toBe(0);
+        expect(stdout).toContain('Cleared 2 old session(s)');
+
+        // 删除最旧 2 条（s01/s02），保留最新 10 条
+        expect(existsSync(join(sessionsDir, 's01'))).toBe(false);
+        expect(existsSync(join(sessionsDir, 's02'))).toBe(false);
+        expect(existsSync(join(sessionsDir, 's03'))).toBe(true);
+        expect(existsSync(join(sessionsDir, 's12'))).toBe(true);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('init 子命令', () => {
     it('init --help 显示 --force 选项', () => {
       const { stdout } = run(['init', '--help']);
@@ -147,6 +228,22 @@ describe('CLI (e2e)', () => {
     });
   });
 });
+
+/** 在临时会话目录下写入一个会话 fixture（meta.json + turn_0.json） */
+function seedSession(sessionsDir: string, id: string, turnCount: number, updatedAt?: string): void {
+  mkdirSync(join(sessionsDir, id), { recursive: true });
+  const meta = {
+    id,
+    title: `会话 ${id}`,
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: updatedAt ?? '2026-01-01T00:00:00.000Z',
+    turnCount,
+    totalCost: 0,
+    currentGen: 0,
+  };
+  writeFileSync(join(sessionsDir, id, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
+  writeFileSync(join(sessionsDir, id, 'turn_0.json'), '[]\n');
+}
 
 /** 带环境变量运行的辅助（init 测试用临时 HOME 隔离） */
 function runWithEnv(args: string[], env: Record<string, string>): { stdout: string; stderr: string; status: number | null } {
