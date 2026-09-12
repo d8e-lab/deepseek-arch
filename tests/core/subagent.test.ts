@@ -772,18 +772,63 @@ describe('SubagentSession 会话化', () => {
 		await p;
 	});
 
-	it('cancelled 后 send 拒绝（上下文已中止）', async () => {
-		const client = makeScriptClient([{ hang: true }]);
+	it('cancelled 后 send 可续跑（cancelled 非终态，需求 3）', async () => {
+		const client = makeScriptClient([
+			{ hang: true }, // 首轮挂起，等待取消
+			{ content: '取消后继续完成' },
+		]);
 		const { SubagentSession } = await import('../../src/core/subagent-session.js');
 		const session = new SubagentSession({
 			name: 'sub1', task: '任务', systemPrompt: 'subagent prompt',
 			provider: client, tools: [], onUsage: () => {},
 		});
 		const p = session.drive();
-		session.cancel();
+		setTimeout(() => session.cancel(), 10);
 		await p;
 		expect(session.status).toBe('cancelled');
-		await expect(session.send('不行')).rejects.toThrow(/cancelled/);
+
+		// 取消不是终态：追加指令 → 新建 run controller 续跑
+		const r2 = await session.send('继续');
+		expect(r2).toBe('取消后继续完成');
+		expect(session.status).toBe('completed');
+		expect(session.runs).toHaveLength(2);
+		expect(session.runs[1].source).toBe('master');
+	});
+
+	it('runs 模型：逐轮记录 user 侧输入与来源，对话投影不含思维链与工具', async () => {
+		const client = makeScriptClient([
+			{
+				reasoning: '内部思考',
+				content: '第一轮结论',
+				toolCalls: [{ id: 'c1', function: { name: 'fake_tool', arguments: '{}' } }],
+			},
+			{ content: '工具之后结论' },
+			{ content: '第二轮结论' },
+		]);
+		const { SubagentSession } = await import('../../src/core/subagent-session.js');
+		const session = new SubagentSession({
+			name: 'sub1', task: '任务A', systemPrompt: 'subagent prompt',
+			provider: client, tools: [fakeTool], onUsage: () => {},
+		});
+		await session.drive();
+		await session.send('用户追问', 'user');
+
+		expect(session.runs).toHaveLength(2);
+		expect(session.runs[0]).toMatchObject({ userText: '任务A', source: 'task', status: 'completed' });
+		expect(session.runs[1]).toMatchObject({ userText: '用户追问', source: 'user', status: 'completed' });
+		// 首轮消息区间覆盖 user + assistant(含 tool_calls) + tool + 最终 assistant
+		expect(session.runMessages(session.runs[0])[0]).toEqual({ role: 'user', content: '任务A' });
+
+		const dialogue = session.renderDialogue();
+		expect(dialogue).toContain('[run 1] task: 任务A');
+		expect(dialogue).toContain('[run 2] user: 用户追问');
+		expect(dialogue).toContain('subagent: 第一轮结论');
+		expect(dialogue).toContain('subagent: 工具之后结论');
+		expect(dialogue).toContain('subagent: 第二轮结论');
+		// 对话投影：不含思维链、不含工具名/工具结果
+		expect(dialogue).not.toContain('内部思考');
+		expect(dialogue).not.toContain('fake_tool');
+		expect(dialogue).not.toContain('fake result');
 	});
 
 	it('toRecord/fromRecord 往返：状态与消息上下文完整保留', async () => {
