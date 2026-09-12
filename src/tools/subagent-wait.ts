@@ -11,13 +11,14 @@ import type { Tool, ToolResult } from './types.js';
 export const waitTool: Tool = {
 	name: 'wait',
 	description:
-		'Wait for one or more subagents to complete and retrieve their results. ' +
+		'Wait for one or more subagents to complete and read their output. ' +
 		'Pass a single name to wait for one subagent; an array of names to wait for all of them; ' +
-		'or omit subagent_name to wait for every pending subagent. ' +
+		'or omit subagent_name to wait for every subagent that is still running or whose latest output you have not read yet. ' +
 		'If a subagent is still running, this blocks until it finishes. ' +
-		'If it has already completed but the result hasn\'t been retrieved yet, returns immediately. ' +
-		'Use list_subagents to check which subagents are running/completed before calling wait. ' +
-		'Each subagent result can only be retrieved once.',
+		'Output can be read repeatedly — there is no "already retrieved" restriction, so you can re-read a subagent\'s ' +
+		'output any time (e.g. after a context compaction). ' +
+		'If the subagent has had several exchanges with the user, the full user ↔ subagent conversation is returned ' +
+		'(text only: no thinking, no tool traces). Use list_subagents to check status first.',
 	parameters: {
 		type: 'object',
 		properties: {

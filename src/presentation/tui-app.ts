@@ -166,7 +166,8 @@ export class TuiApp {
 		this.subagentsViewer = new SubagentsViewer({
 			out: this.out,
 			listSubagents: () => this.sessionMgr.listSubagents(),
-			sendToSubagent: (name, text) => this.sessionMgr.sendToSubagent(name, text).then(() => undefined),
+			// source='user'：用户直发 → 完成后向 master 投递通知（需求 2）
+			sendToSubagent: (name, text) => this.sessionMgr.sendToSubagent(name, text, 'user').then(() => undefined),
 			isStreamActive: () => this.abortController !== null,
 			getSize: () => getTermSize(),
 		});

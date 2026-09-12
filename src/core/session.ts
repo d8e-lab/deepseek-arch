@@ -95,6 +95,18 @@ export function deriveSessionTitle(content: string, maxChars = SESSION_TITLE_MAX
 	return chars.length <= maxChars ? normalized : chars.slice(0, maxChars).join('');
 }
 
+/** 用户直发子代理后的待投递通知（内容在投递时由「对话投影」生成，见 drainNotices） */
+interface SubagentNotice {
+	/** 子代理名 */
+	name: string;
+	/** 结束状态 */
+	status: string;
+	/** 本次运行耗时 ms */
+	elapsedMs: number;
+	/** 入队时间 ms */
+	at: number;
+}
+
 export class SessionManager {
 	private storage: Storage;
 	private provider: ModelProvider;
@@ -104,8 +116,19 @@ export class SessionManager {
 	private _subagentAsync: boolean = false;
 	/** 实例级：子代理会话集合（方案 B：SubagentSession 全状态化，跨 sendMessageStream 存活） */
 	private subagents = new Map<string, SubagentSessionImpl>();
-	/** 实例级：已通过 wait 取走结果的子代理名集合 */
-	private retrievedSubagents = new Set<string>();
+	/**
+	 * 实例级：已「消费」的子代理名集合。
+	 * 消费 = master 已把该子代理的最新产出纳入自己的上下文（wait 取回 / 同步拿到结果），
+	 * 因此不必再在状态块里重复播报（这正是「反复通知」的根因）。
+	 * 注意：名称只表达「当前最新产出是否已读」，与「每个结果只能取一次」无关——
+	 * wait 始终可重复读取。
+	 */
+	private consumedSubagents = new Set<string>();
+	/**
+	 * 待投递的「用户↔子代理」通知队列（需求 2）。
+	 * 用户在 TUI 里直接给子代理发消息 → 运行结束后入队，投递一次即出队。
+	 */
+	private pendingNotices: SubagentNotice[] = [];
 	/** 子代理 token 累积（O-1：并入主会话 usage 入账） */
 	private subagentUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 	/** 生成参数默认值（temperature/max_tokens/top_p/thinking/reasoning_effort），
@@ -405,17 +428,71 @@ export class SessionManager {
 
 	/**
 	 * 向子代理发送消息（追加指令并续跑）。
-	 * 用户（TUI）与 master agent（subagent_send 工具）共用入口。
-	 * 守卫：running 中拒绝（并发保护）、cancelled 拒绝（上下文已中止）。
+	 * 用户（TUI，source='user'）与 master agent（subagent_send 工具，source='master'）共用入口。
+	 * 守卫：running 中拒绝（并发保护）；cancelled / failed 均可续跑（cancelled 非终态）。
+	 *
+	 * 消费语义（需求 1/2）：
+	 *  - master 直发：结果同步返回 → 立即标已消费（不再重复通知）
+	 *  - 用户直发：master 不知情 → 入队一条通知（含 user 指令与 subagent 内容的对话投影），
+	 *    投递一次即出队；同时标已消费以免状态块重复播报同一件事
 	 */
-	async sendToSubagent(name: string, instruction: string): Promise<string> {
+	async sendToSubagent(
+		name: string,
+		instruction: string,
+		source: 'user' | 'master' = 'master',
+	): Promise<string> {
 		const session = this.subagents.get(name);
 		if (!session) {
 			throw new Error(`Subagent "${name}" not found. Use list_subagents to check.`);
 		}
-		const result = await session.send(instruction);
+		const startMs = Date.now();
+		const result = await session.send(instruction, source);
 		await this.persistSubagent(name);
+		this.consumedSubagents.add(name);
+		if (source === 'user') {
+			this.enqueueNotice(name, session.status, Date.now() - startMs);
+		}
 		return result;
+	}
+
+	/** 入队一条「用户↔子代理」通知（投递一次后出队） */
+	private enqueueNotice(name: string, status: string, elapsedMs: number): void {
+		this.pendingNotices.push({ name, status, elapsedMs, at: Date.now() });
+	}
+
+	/**
+	 * 取出全部待投递通知并格式化为模型可读文本（无待投递时返回 null）。
+	 *
+	 * 两个投递点共用本方法（先取者得，保证只投递一次、不会每轮重复拼接）：
+	 *  - Hook A：agent loop 中挂到本轮下一个 tool result 尾部（master 正在干活时最快送达）
+	 *  - Hook B：开轮时兜底注入 agentMessages（本轮没有工具调用也能送达）
+	 */
+	private drainNotices(): string | null {
+		if (this.pendingNotices.length === 0) return null;
+		const notices = this.pendingNotices.splice(0, this.pendingNotices.length);
+		const blocks = notices.map((n) => {
+			const sub = this.subagents.get(n.name);
+			const secs = n.elapsedMs / 1000;
+			const elapsed = secs < 60
+				? `${secs.toFixed(1)}s`
+				: `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s`;
+			const dialogue = sub ? sub.renderDialogue() : '(subagent context unavailable)';
+			return [
+				`subagent "${n.name}" (${n.status}, ${elapsed}) — the user sent it instructions directly in the subagent view.`,
+				'Conversation between the user and that subagent (no thinking, no tool traces):',
+				dialogue,
+			].join('\n');
+		});
+		return [
+			'<subagent-notification>',
+			'[Subagent Notification — user ↔ subagent]',
+			'The following happened outside your own tool calls. Take it into account in your plan;',
+			'use wait("<name>") to read (or re-read) a subagent\'s output at any time,',
+			'and subagent_trace("<name>") to inspect the tools it ran.',
+			'',
+			blocks.join('\n\n'),
+			'</subagent-notification>',
+		].join('\n');
 	}
 
 	/**
@@ -620,17 +697,19 @@ export class SessionManager {
 				if (sub.status === 'running') {
 					lines.push(`- "${name}"  (running, ${elapsedStr})`);
 					hasContent = true;
-				} else if (sub.status === 'completed' && !this.retrievedSubagents.has(name)) {
+				} else if (sub.status === 'completed' && !this.consumedSubagents.has(name)) {
 					lines.push(`- "${name}"  (completed, ${elapsedStr}) — use wait("${name}")`);
 					hasContent = true;
-				} else if (sub.status === 'failed' && !this.retrievedSubagents.has(name)) {
+				} else if (sub.status === 'failed' && !this.consumedSubagents.has(name)) {
 					const errMsg = `: ${sub.outputText().slice(0, 60)}`;
 					lines.push(`- "${name}"  (failed, ${elapsedStr})${errMsg} — use wait("${name}")`);
 					hasContent = true;
-				} else if (sub.status === 'cancelled' && !this.retrievedSubagents.has(name)) {
-					lines.push(`- "${name}"  (cancelled, ${elapsedStr})`);
+				} else if (sub.status === 'cancelled' && !this.consumedSubagents.has(name)) {
+					// cancelled 非终态：可 wait 读取，也可 subagent_send 续跑
+					lines.push(`- "${name}"  (cancelled, ${elapsedStr}) — wait("${name}") to read, subagent_send to resume`);
 					hasContent = true;
 				}
+				// 已消费（已读）的终态子代理不再出现在状态块，避免每轮重复播报
 			}
 
 			return hasContent ? { role: 'user', content: lines.join('\n') } : null;
@@ -735,22 +814,16 @@ export class SessionManager {
 						);
 						return true;
 					}
-					if (sub.status === 'cancelled') {
-						pushResult(
-							`Subagent "${name}" was cancelled — cannot send a follow-up to a cancelled subagent.`,
-							'cancelled',
-						);
-						return true;
-					}
+					// cancelled / failed 均可续跑：cancelled 不是终态（需求 3）
 
 					// 追加指令并同步等待续跑（追问性质，master 需要新结果才能继续）
-					const startMs = Date.now();
+					const startMs2 = Date.now();
 					try {
-						const result = await this.sendToSubagent(name, instruction);
+						const result = await this.sendToSubagent(name, instruction, 'master');
 						pushResult(
 							`Follow-up result for "${name}":\n\n${result}`,
 							undefined,
-							Date.now() - startMs,
+							Date.now() - startMs2,
 						);
 					} catch (err) {
 						pushResult(
@@ -783,10 +856,11 @@ export class SessionManager {
 					const raw = args.subagent_name;
 					let names: string[];
 					if (raw === undefined || raw === null || raw === '') {
-						// 无参数：等待所有尚未取回的 subagent
-						names = [...this.subagents.keys()].filter(
-							(n) => !this.retrievedSubagents.has(n),
-						);
+						// 无参数：等待所有「运行中或尚未消费」的子代理（已读的不再打扰）
+						names = [...this.subagents.keys()].filter((n) => {
+							const s = this.subagents.get(n);
+							return s?.isRunning || !this.consumedSubagents.has(n);
+						});
 						if (names.length === 0) {
 							pushResult('No pending subagents to wait for. Use list_subagents to check.');
 							return true;
@@ -815,29 +889,25 @@ export class SessionManager {
 						);
 						return true;
 					}
-					const already = names.filter((n) => this.retrievedSubagents.has(n));
-					if (already.length > 0) {
-						pushResult(
-							`Subagent(s) result already retrieved: ${already.join(', ')}. Each result can only be retrieved once.`,
-							'already_retrieved',
-						);
-						return true;
-					}
-
+					// 可重复读取：不再有「每个结果只能取一次」限制——消费只影响通知，不影响读取
 					// 等待所有指定 subagent 完成（并行等待，全部结束后才继续）
 					const startMs = Date.now();
-					const results = await Promise.all(
-						names.map((n) => this.subagents.get(n)!.promise!),
-					);
+					await Promise.all(names.map((n) => this.subagents.get(n)!.promise!));
 					const elapsed = Date.now() - startMs;
-					for (const n of names) this.retrievedSubagents.add(n);
+					for (const n of names) this.consumedSubagents.add(n);
 
 					const anyFailed = names.some((n) => {
 						const s = this.subagents.get(n);
 						return s?.status === 'failed' || s?.status === 'cancelled';
 					});
 					const body = names
-						.map((n, i) => `=== ${n} ===\n${results[i]}`)
+						.map((n) => {
+							const s = this.subagents.get(n)!;
+							// 单轮：直接给最终 content（最常见，省 token）
+							// 多轮：给 user↔subagent 对话投影（master 需要看到完整会话历史）
+							const text = s.runs.length > 1 ? s.renderDialogue() : s.outputText();
+							return `=== ${n} ===\n${text}`;
+						})
 						.join('\n\n');
 					pushResult(
 						`Subagent result(s):\n\n${body}`,
@@ -857,16 +927,17 @@ export class SessionManager {
 					for (const [n, sub] of this.subagents) {
 						const elapsed = Math.round((now - sub.startMs) / 1000);
 						const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
-						const retrievedStr = this.retrievedSubagents.has(n) ? ' [retrieved]' : '';
+						// [new] = master 尚未看过其最新产出；[read] = 已消费（wait 仍可重复读取）
+						const mark = this.consumedSubagents.has(n) ? ' [read]' : ' [new]';
 
 						if (sub.status === 'running') {
 							lines.push(`- "${n}"  running (${elapsedStr})`);
 						} else if (sub.status === 'completed') {
-							lines.push(`- "${n}"  completed (${elapsedStr}) — use wait("${n}")${retrievedStr}`);
+							lines.push(`- "${n}"  completed (${elapsedStr})${mark} — wait("${n}")`);
 						} else if (sub.status === 'cancelled') {
-							lines.push(`- "${n}"  cancelled (${elapsedStr})${retrievedStr}`);
+							lines.push(`- "${n}"  cancelled (${elapsedStr})${mark} — subagent_send to resume, subagent_trace to inspect`);
 						} else {
-							lines.push(`- "${n}"  failed (${elapsedStr}) — use wait("${n}")${retrievedStr}`);
+							lines.push(`- "${n}"  failed (${elapsedStr})${mark} — wait("${n}")`);
 						}
 					}
 					pushResult(lines.join('\n'));
@@ -881,6 +952,13 @@ export class SessionManager {
 		try {
 			// ── Agent Loop ──────────────────────────
 			let userDenied = false;
+
+			// Hook B：开轮时兜底投递「用户↔子代理」通知（本轮若不再有工具调用，Hook A 不会触发）。
+			// 注入为 user 消息并随 turn.messages 落盘 → 只出现一次，不会每轮重复拼接。
+			const noticeAtTurnStart = this.drainNotices();
+			if (noticeAtTurnStart) {
+				agentMessages.push({ role: 'user', content: noticeAtTurnStart });
+			}
 
 			for (let round = 0; !userDenied; round++) {
 				// M-2：异步模式状态块拼到 roundMessages 末尾（不写 agentMessages——kv-cache 前缀稳定）
@@ -1184,6 +1262,13 @@ export class SessionManager {
 				if (skillReminderText) {
 					toolMessage += skillReminderText;
 				}
+				// Hook A：把待投递的「用户↔子代理」通知挂到本轮下一个 tool result 尾部。
+				// 与 skillReminderText 同一手法：不额外插入 user 消息，保持 assistant/tool 交替；
+				// 内容随该 tool 消息进 agentMessages → 只出现一次。
+				const noticeText = this.drainNotices();
+				if (noticeText) {
+					toolMessage += `\n\n${noticeText}`;
+				}
 
 					const durationMs = Date.now() - startMs;
 
@@ -1237,6 +1322,8 @@ export class SessionManager {
 					await Promise.all(allDeferredSpawns.map((d) => d.sub.promise!));
 					for (const d of allDeferredSpawns) {
 						const sub = d.sub;
+						// 非 async 模式：结果已同步回填给 master → 标记已消费（不再重复通知）
+						this.consumedSubagents.add(d.name);
 						// 非 async 模式：子代理结果同步回填给 master（内容由 messages 派生，
 						// fail/cancelled 时是状态消息——见 SubagentSession.outputText）
 						const output = sub.outputText();

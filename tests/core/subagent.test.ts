@@ -82,6 +82,24 @@ function makeScriptClient(
 	return { chatStream: gen } as unknown as ModelProvider;
 }
 
+/**
+ * 记录每次 chatStream 收到的 messages 的分流 provider。
+ * 用于断言「注入到 master 上下文里的文本」（状态块 / 子代理通知）。
+ */
+function makeRecordingSplitClient(
+	mainSteps: Step[],
+	onSub: (messages: Message[]) => Step | 'hang',
+	messageLog: Message[][],
+): ModelProvider {
+	const inner = makeSplitClient(mainSteps, onSub);
+	return {
+		chatStream(messages: Message[], opts?: unknown) {
+			messageLog.push(messages.map((m) => ({ ...m })));
+			return (inner.chatStream as (m: Message[], o?: unknown) => AsyncGenerator<StreamChunk>)(messages, opts);
+		},
+	} as unknown as ModelProvider;
+}
+
 /** 主/子代理分流 provider：主代理走 mainSteps，子代理由 onSub 决定行为 */
 function makeSplitClient(
 	mainSteps: Step[],
@@ -179,6 +197,13 @@ function waitCallAll(): { id: string; function: { name: string; arguments: strin
 	return {
 		id: 'call-wait-all',
 		function: { name: 'wait', arguments: '{}' },
+	};
+}
+
+function listCall(): { id: string; function: { name: string; arguments: string } } {
+	return {
+		id: 'call-list',
+		function: { name: 'list_subagents', arguments: '{}' },
 	};
 }
 
@@ -644,7 +669,7 @@ describe('SessionManager subagent 集成', () => {
 		expect(ev!.toolResult).toContain('nope');
 	});
 
-	it('wait(已取走的子代理)：返回 already_retrieved 错误', async () => {
+	it('wait 可重复读取（幂等）：第二次 wait 不再报 already_retrieved（需求 1）', async () => {
 		const client = makeSplitClient(
 			[
 				{ content: '', toolCalls: [spawnCall('sub1', 'task')] },
@@ -656,7 +681,7 @@ describe('SessionManager subagent 集成', () => {
 		);
 		mgr = new SessionManager(storage, client);
 		mgr.setSubagentAsync(true);
-		await mgr.startNewSession('wait already_retrieved 测试');
+		await mgr.startNewSession('wait 幂等测试');
 		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
 
 		const events: import('../../src/types/index.js').StreamEvent[] = [];
@@ -664,8 +689,98 @@ describe('SessionManager subagent 集成', () => {
 
 		const waitEvents = events.filter((e) => e.type === 'tool_result' && e.toolName === 'wait');
 		expect(waitEvents).toHaveLength(2);
-		expect(waitEvents[0].error).toBeUndefined(); // 第一次取走成功
-		expect(waitEvents[1].error).toBe('already_retrieved');
+		// 两次都成功且内容一致：结果可重复读取（compact 后重读报告的场景也需要）
+		expect(waitEvents[0].error).toBeUndefined();
+		expect(waitEvents[1].error).toBeUndefined();
+		expect(waitEvents[1].toolResult).toContain('sub1 result');
+	});
+
+	it('消费语义：未消费进状态块 + [new]；wait 之后不再进状态块 + [read]（需求 1）', async () => {
+		const messageLog: Message[][] = [];
+		const client = makeRecordingSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task')] },
+				{ content: 'end1' },
+				{ content: '', toolCalls: [listCall()] },
+				{ content: 'end2' },
+				{ content: '', toolCalls: [waitCall('sub1')] },
+				{ content: 'end3' },
+				{ content: '', toolCalls: [listCall()] },
+				{ content: 'end4' },
+			],
+			() => ({ content: 'sub1 result' }),
+			messageLog,
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('消费语义测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		const statusTextOf = (calls: Message[][]): string => calls
+			.flat()
+			.filter((m) => typeof m.content === 'string' && m.content.startsWith('[Subagent Status'))
+			.map((m) => m.content)
+			.join('\n');
+
+		// ① spawn 轮
+		const events1: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('spawn', (e) => events1.push(e));
+		await sleep(30);
+		expect(mgr.getSubagent('sub1')?.status).toBe('completed');
+
+		// ② 未消费：状态块提示 completed + list_subagents 显示 [new]
+		messageLog.length = 0;
+		const events2: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('list', (e) => events2.push(e));
+		expect(statusTextOf(messageLog)).toMatch(/"sub1"\s+\(completed/);
+		expect(events2.find((e) => e.type === 'tool_result' && e.toolName === 'list_subagents')?.toolResult)
+			.toContain('[new]');
+
+		// ③ wait 消费（读一次就够，之后不再播报）
+		await mgr.sendMessageStream('wait', () => {});
+
+		// ④ 已消费：状态块不再出现该行（这正是「反复通知」的根因）+ list 显示 [read]
+		messageLog.length = 0;
+		const events4: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('list', (e) => events4.push(e));
+		expect(statusTextOf(messageLog)).not.toMatch(/"sub1"\s+\(completed/);
+		expect(events4.find((e) => e.type === 'tool_result' && e.toolName === 'list_subagents')?.toolResult)
+			.toContain('[read]');
+	});
+
+	it('用户直发 subagent → 通知注入 master 上下文（含 user 指令与 subagent 内容，需求 2）', async () => {
+		const messageLog: Message[][] = [];
+		const client = makeRecordingSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task')] },
+				{ content: '第一轮结束' },
+			],
+			() => ({ content: 'sub1 result' }),
+			messageLog,
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('用户直发通知测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		await mgr.sendMessageStream('spawn', () => {});
+		await sleep(50);
+		expect(mgr.getSubagent('sub1')?.status).toBe('completed');
+
+		// 用户从 Ctrl+T 视图直发（source='user'）
+		await mgr.sendToSubagent('sub1', '用户追加的要求', 'user');
+
+		// 下一轮：通知随开轮注入 master 上下文（Hook B 兜底投递）
+		messageLog.length = 0;
+		await mgr.sendMessageStream('继续', () => {});
+
+		const text = messageLog
+			.flat()
+			.map((m) => (typeof m.content === 'string' ? m.content : ''))
+			.join('\n');
+		expect(text).toContain('<subagent-notification>');
+		expect(text).toContain('用户追加的要求'); // user 侧内容
+		expect(text).toContain('sub1 result'); // subagent 侧内容
 	});
 
 	it('wait(空数组)：返回 invalid_params 错误', async () => {

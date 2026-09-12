@@ -16,10 +16,11 @@ import type { Tool, ToolResult } from './types.js';
 export const subagentSendTool: Tool = {
 	name: 'subagent_send',
 	description:
-		'Send a follow-up instruction to a completed or failed subagent and get its new result. ' +
+		'Send a follow-up instruction to an existing subagent (completed, failed, or cancelled) and get its new output. ' +
 		'The subagent resumes with its full previous context (messages preserved) and continues ' +
 		'working on the new instruction — do NOT spawn a new subagent for follow-ups. ' +
-		'Use when a subagent result needs refinement, extension, or fixes. ' +
+		'Cancelled is NOT a terminal state: a cancelled subagent can be resumed this way ' +
+		'(use subagent_trace to inspect what it did before it was cancelled). ' +
 		'This call waits synchronously for the subagent to finish the follow-up.',
 	parameters: {
 		type: 'object',

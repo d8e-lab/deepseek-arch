@@ -33,8 +33,9 @@ export const subagentSpawnTool: Tool = {
 			subagent_name: {
 				type: 'string',
 				description:
-					'Unique name for this subagent. Used to reference it in wait/list_subagents. ' +
-					'Must be unique among all currently running or unretrieved subagents.',
+					'Unique name for this subagent. Used to reference it in wait/list_subagents/subagent_send. ' +
+					'Must be unique among all subagents of this session (including finished ones) — ' +
+					'to continue an existing subagent, use subagent_send instead of spawning a duplicate.',
 			},
 			task: {
 				type: 'string',
