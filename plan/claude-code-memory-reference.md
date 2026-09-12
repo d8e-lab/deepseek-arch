@@ -168,6 +168,44 @@ export function DANGEROUS_uncachedSystemPromptSection(name, compute, _reason) { 
 | 何时去查记忆 | `WHEN_TO_ACCESS_SECTION`（含"用户说忽略某记忆时，不要既引用又覆盖"的反模式） | `memdir/memoryTypes.ts:216-254` |
 | 会话记忆层 | 另有一套 `SessionMemory`（会话内抽取/脚本钩子、`shouldExtractMemory`、`createMemoryFileCanUseTool`、`sessionMemoryCompact`），用于长会话连续性 | `services/SessionMemory/sessionMemory.ts:134, 357, 460`；`services/compact/sessionMemoryCompact.ts` |
 
+### 5.1 增量判断（两层，都在代码里，不在提示词里）
+
+```ts
+// services/extractMemories/extractMemories.ts:340-360
+const newMessageCount = countModelVisibleMessagesSince(messages, lastMemoryMessageUuid)  // ← ① 游标：只数"上次归纳之后"的新消息
+
+if (hasMemoryWritesSince(messages, lastMemoryMessageUuid)) {                            // ← ② 主/后台互斥
+  // 主 agent 在这段窗口内已经写过记忆文件 → 跳过 fork 抽取，并把游标推进到最新
+  lastMemoryMessageUuid = messages.at(-1)?.uuid
+  return
+}
+```
+
+```ts
+// services/extractMemories/extractMemories.ts:113-148
+/** 若游标之后的 assistant 消息里出现指向记忆目录的 Write/Edit tool_use，返回 true */
+function hasMemoryWritesSince(messages, sinceUuid): boolean { ... isAutoMemPath(filePath) ... }
+```
+
+要点：
+- **游标式增量**：`lastMemoryMessageUuid` 记录「已归纳到哪条消息」，每次只分析游标之后的 `newMessageCount` 条 → **同一段对话只会被归纳一次**。
+- **主/后台互斥**：主 agent 自己有记忆写入指令（它也能写记忆），如果这段时间它已经写过，就**跳过**后台抽取并推进游标 —— 源码注释原文：「making the main agent and the background agent mutually exclusive per turn」。
+- 提示词里也强调「只许用最近这 ~N 条消息，不要再去 grep 源码验证」（`services/extractMemories/prompts.ts:44-47`），并用 turn budget 提示「第 1 轮并行读、第 2 轮并行写」避免交错（`:38-40`）。
+
+### 5.2 去重：**没有相似度算法**，全部交给 agent + 清单前置
+
+```ts
+// services/extractMemories/prompts.ts:29-35
+const manifest = existingMemories.length > 0
+  ? `\n\n## Existing memory files\n\n${existingMemories}\n\nCheck this list before writing — update an existing file rather than creating a duplicate.`
+  : ''
+```
+
+- 归纳 agent 的提示词里**前置一份"现有记忆清单"**（文件名 + description），并要求「写之前先查这份清单：能更新已有文件就不要新建」。
+- 代码侧**没有任何 Jaccard / 相似度阈值 / 打分合并**——重复检测完全由模型在语义层完成。
+- 清单来自 `scanMemoryFiles()`（`memdir/memoryScan.ts`，≤200 个 md 按 mtime 倒序，只读前 30 行取 frontmatter），与召回共享同一份扫描逻辑。
+- 与之配套的兜底不是"更聪明的算法"，而是**分类词表 + 正文结构约束**（`type ∈ user/feedback/project/reference`；feedback/project 类正文固定写成 `规则/事实` + `**Why:**` + `**How to apply:**`，`memdir/memoryTypes.ts:261-272`）——让"能不能合并"在写的时候就变得容易判断。
+
 ---
 
 ## 6. 陈旧治理：把"年龄"讲给模型听

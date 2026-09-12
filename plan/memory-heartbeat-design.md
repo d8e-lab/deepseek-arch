@@ -1426,7 +1426,6 @@ f. tuiDefer ≤ tui_max_defer（超出 → 记审计 kind=remind_due, surface=tu
 > 若用户认为"消息层任何注入"都应禁止，则退化为「只在重装点更新」——此时需要明确接受：会话内新写入的记忆对本会话完全不可见（只能靠 `memory_search` 主动拉）。**待确认。**
 
 ### R13 参考报告与对照结论
-
 新增 `plan/claude-code-memory-reference.md`：Claude Code 记忆机制的只读调研报告（含 `文件:行号` 证据、目录/文件形态、两条注入通道、缓存断点与"危险刷新 API"、抽取 agent 触发与提示词要点、陈旧治理、用户接口、与我们的对照表）。
 
 从该调研**改主意**的两处：
@@ -1440,3 +1439,90 @@ f. tuiDefer ≤ tui_max_defer（超出 → 记审计 kind=remind_due, surface=tu
 - **"危险刷新"显式化**：若将来需要"每轮必须新鲜"的注入点，提供类似 `DANGEROUS_uncachedSystemPromptSection` 的显式 API 并强制写理由，
   避免后来者悄悄每轮刷新把缓存打穿；
 - **陈旧提示**：概览行带人话时间（`today` / `3 days ago`）+ "记忆是时间点观察，断言前核对现状"（已列 R4，落实即可）。
+
+### R14 【用户决定】增量判断：游标 + 主/后台互斥（作废 §7.8 第 1 条）
+
+参照 Claude Code（`services/extractMemories/extractMemories.ts:113-148, 340-360`，报告 §5.1）：
+
+- **游标式增量**：新增 `lastExtractedTurnId`（以 turn 为单位记录「已归纳到哪一轮」），每轮只归纳**游标之后**的轮次
+  → 同一段对话只被归纳一次，**从源头消除大部分重复条目**；
+- **主/后台互斥**：若该窗口内 master 自己调用过 `memory_write`（我们在 session 层直接看 `toolRecords` 即可，比 Claude Code 的"嗅探文件写入路径"更简单）→ **跳过**本轮后台归纳并把游标推进到当前轮；
+- 游标持久化：存 memory 目录 `state.json`（跨进程可恢复；resume 后从游标继续）；
+- 与 R1 的配合：触发点仍是"用户发消息后并发"，但**输入范围由游标决定**；
+- §7.8 第 1 条「只喂最近 3 轮」作废，改为「只喂游标之后的轮次（仍设上限 `agent_max_input_turns` 作保护）」。
+
+### R15 【用户决定】去重简化：清单前置 + agent 判断（作废 §5 的相似度阈值机制）
+
+参照 Claude Code：**代码里没有相似度算法**，去重靠「提示词前置现有记忆清单 + 让 agent 语义判断」（报告 §5.2，`services/extractMemories/prompts.ts:29-35`）。
+
+- 归纳 agent 的输入**前置一份「现有记忆清单」**（`MEMORY.md` 的行，或 `memory_search` 结果），并明确要求：
+  「先查清单/先 `memory_search`：能更新已有条目就不要新建」；
+- 代码侧仅保留三条**确定性**规则：① `op=update` 指定 id → 改写该主题文件；② 同 `subject` 矛盾 → `op=supersede` 显式取代并留演化记录；
+  ③ 归一化文本**完全相等** → 机械合并（一行等值比较，不设阈值）；
+- **删除**：§5.2 的 Jaccard/相似度阈值（0.72 / 0.45）、§5.3 的冲突打分判定、相应单测与调参项（`sim` 分布分析等）；
+- 兜底（低频、非每轮）：会话创建或 `/memory fold` 时做一次「同 subject + 完全相等文本」的机械合并 + 审计；**不做模糊聚类**；
+- §5 全节降级为「历史设计」，实施依据 = 本条。
+
+### R16 【用户决定】文件内格式与目录结构对齐 Claude Code
+
+```
+{workspace}/.deepseek-arch/memory/
+  MEMORY.md                      # 索引（改名对齐；一行一条 ≤150 字符；无 frontmatter；正文绝不写这里）
+  <slug>.md                      # 主题文件（一个主题一个文件）
+  logs/yyyy/mm/yyyy-mm-dd.md     # 追加式日志（层级对齐 claude 的 logs/）
+  state.json                     # 游标等状态（R14）
+  audit.jsonl                    # 机器可读审计（我们独有）
+  legacy/                        # 用户手写旧笔记，原样保留（我们独有）
+```
+
+主题文件格式（对齐 `claude-code/memdir/memoryTypes.ts:261-272`，外加我们的字段）：
+
+```markdown
+---
+name: 回复格式偏好
+description: 回复先给结论再给理由，不要长篇铺垫      # 供召回判断相关性，必须具体
+type: feedback                                    # user | feedback | project | reference
+subject: reply.format                             # 我们的受控 subject（合并键）
+tags: [reply, format, style]
+scope: project
+confidence: 3
+signal: A
+paths: ["src/**"]
+remindAt: 2026-09-15T09:00:00.000Z
+created: 2026-09-12T09:10:00Z
+updated: 2026-09-13T02:00:00Z
+---
+
+回复先给结论，再给理由；避免长篇铺垫。
+**Why:** 用户明确说过「别铺垫」。
+**How to apply:** 面向用户的总结，第一句就是结论。
+```
+
+- 索引行格式：`- [回复格式偏好](reply-format.md) — 回复先给结论再给理由 (confidence 3, updated 3 days ago)`；
+- 采纳其受控词表与「不该记什么」清单（`memdir/memoryTypes.ts:14-33, 183-200`）、漂移告警（`:201-215`）。
+
+### R17 召回决策：两个方案的对比与选择
+
+| 维度 | A 让便宜模型挑（claude-code） | B 确定性打分（本设计） |
+|:--|:--|:--|
+| 机制 | 扫目录 → 每条约一行清单（type + 文件名 + 时间 + description）→ 便宜模型从清单里选 ≤5 个 → 读全文 | 任务文本/路径/标签 vs 条目字段 → 加权打分（rel 0.45 + conf 0.25 + recency 0.15 + LRU 0.15）→ top-K |
+| 额外成本 | 每次召回 1 次小模型调用（≈256 output tokens） | **0**（纯本地计算） |
+| 确定性 | 同一输入可能选出不同集合 | **完全确定**（同样输入 → 同样注入） |
+| 可解释 | 弱（只能看日志/理由文本） | **强**（每条有分数，audit 可回答"为什么没注入它"） |
+| 召回质量 | 强（懂近义/跨语言/意图） | 弱在字面（"别铺垫" vs "结论先行" 可能匹配不上） |
+| 失败模式 | API 挂/超时 → 空选；清单过长时选择质量下降 | 条目缺 tags/paths → 命中率低（冷启动弱） |
+| 注入稳定性（对缓存的影响） | 差（集合易变 → 概览/注入抖动） | 好（集合稳定） |
+
+**决定**：
+- **会话创建 / `/memory refresh` 选概览**：默认走 **B**；提供配置开关 `memory.select_mode = "score" | "llm"`，需要质量优先时可切 **A**（一次性，稳定性无所谓）；
+- **会话内动态召回**：**只用 B**（保证注入稳定 + 零额外调用），分数写进 audit；
+- **对治 B 的短板**：不引入模糊算法，而是**用 schema 强制归纳 agent 产出 `subject`/`description`/`tags`**（R16），让字面匹配有足够抓手；
+- 未来若 B 的召回质量不足：在 B 的 top-N 粗筛结果上再让 A 精排（两段式），而不是全量交给 LLM。
+
+### R18 【待确认】注入块是否落盘：缓存最优 vs transcript 干净
+
+- 现状（R12）：合并进当前 user 消息但**不落盘** → 该轮请求里 user 消息的字节 ≠ 落盘内容 → **下一轮请求会在该位置断开前缀**（重算上一轮内容一次）；
+- Claude Code 的选择：召回附件**落盘为真实 transcript 消息**（并可在 UI 渲染成附件/折叠组）→ 历史字节稳定 → 前缀不断；
+- 若要与其一致（缓存最优）：把注入块**写进 `turn.messages`**，UI 单独渲染成一行提示 —— **本仓库已有先例**：子代理通知就是"落盘 + 渲染为 `⇢ [Subagent] …` 一行"（`src/render/conversation.ts`）；
+- 代价：compact 序列化会带上它（Claude Code 靠"压缩后附件消失 → 去重集合自然重置"化解）；
+- **待用户拍板**：(a) 不落盘（transcript 干净，每轮一次小重算）／(b) 落盘（缓存最优，UI 用一行提示承载）。
