@@ -51,3 +51,6 @@ models/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Agent runtime state (plan/memory/logs 等；不参与版本控制)
+.deepseek-arch/
