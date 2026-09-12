@@ -54,3 +54,6 @@ __pycache__/
 
 # Agent runtime state (plan/memory/logs 等；不参与版本控制)
 .deepseek-arch/
+
+# 临时参考软链（指向 ../claude-code，读完即删）
+.claude-code-ref
