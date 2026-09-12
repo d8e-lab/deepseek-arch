@@ -207,6 +207,20 @@ function listCall(): { id: string; function: { name: string; arguments: string }
 	};
 }
 
+function traceCall(name: string): { id: string; function: { name: string; arguments: string } } {
+	return {
+		id: `call-trace-${name}`,
+		function: { name: 'subagent_trace', arguments: JSON.stringify({ subagent_name: name }) },
+	};
+}
+
+function cancelCall(name: string): { id: string; function: { name: string; arguments: string } } {
+	return {
+		id: `call-cancel-${name}`,
+		function: { name: 'subagent_cancel', arguments: JSON.stringify({ subagent_name: name }) },
+	};
+}
+
 function sendCall(name: string, instruction: string): { id: string; function: { name: string; arguments: string } } {
 	return {
 		id: `call-send-${name}`,
@@ -746,6 +760,53 @@ describe('SessionManager subagent 集成', () => {
 		expect(statusTextOf(messageLog)).not.toMatch(/"sub1"\s+\(completed/);
 		expect(events4.find((e) => e.type === 'tool_result' && e.toolName === 'list_subagents')?.toolResult)
 			.toContain('[read]');
+	});
+
+	it('subagent_trace：master 查看被取消子代理执行过的工具与参数（需求 3）', async () => {
+		let subCalls = 0;
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task')] },
+				{ content: 'end1' },
+				{ content: '', toolCalls: [cancelCall('sub1')] },
+				{ content: 'end2' },
+				{ content: '', toolCalls: [traceCall('sub1')] },
+				{ content: 'end3' },
+			],
+			() => {
+				subCalls++;
+				// 第一轮：调用一个不存在的工具（不真实执行），随后挂起等待被取消
+				if (subCalls === 1) {
+					return {
+						content: '先调用工具',
+						toolCalls: [{ id: 's1', function: { name: 'nonexistent_tool', arguments: '{"a":1}' } }],
+					};
+				}
+				return 'hang';
+			},
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('trace 测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		await mgr.sendMessageStream('spawn', () => {});
+		await sleep(50);
+
+		// 取消（cancelled 非终态，仍可查轨迹）
+		const events2: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('cancel', (e) => events2.push(e));
+		await sleep(50);
+		expect(mgr.getSubagent('sub1')?.status).toBe('cancelled');
+
+		// master 查轨迹：看得到工具名与参数，看不到思维链与工具结果
+		const events3: import('../../src/types/index.js').StreamEvent[] = [];
+		await mgr.sendMessageStream('trace', (e) => events3.push(e));
+		const traceEvent = events3.find((e) => e.type === 'tool_result' && e.toolName === 'subagent_trace');
+		expect(traceEvent?.error).toBeUndefined();
+		expect(traceEvent?.toolResult).toContain('tool: nonexistent_tool {"a":1}');
+		expect(traceEvent?.toolResult).toContain('text: 先调用工具');
+		expect(traceEvent?.toolResult).not.toContain('Unknown tool');
 	});
 
 	it('用户直发 subagent → 通知注入 master 上下文（含 user 指令与 subagent 内容，需求 2）', async () => {

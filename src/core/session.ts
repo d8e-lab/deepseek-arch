@@ -36,6 +36,7 @@ export type { StreamEvent };
 import type { Tool, ToolCallRecord } from '../tools/types.js';
 import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
+import { formatSubagentTrace } from '../tools/subagent-trace.js';
 import { activateSkillsForPaths, extractPathsFromToolCall } from './skill.js';
 import {
 	MAX_RESTORE_FILES,
@@ -914,6 +915,22 @@ export class SessionManager {
 						anyFailed ? 'subagent_failed' : undefined,
 						elapsed,
 					);
+					return true;
+				}
+
+				case 'subagent_trace': {
+					const name = (args.subagent_name as string) || '';
+					if (!name) {
+						pushResult('Error: "subagent_name" is required.', 'invalid_params');
+						return true;
+					}
+					const sub = this.subagents.get(name);
+					if (!sub) {
+						pushResult(`Subagent "${name}" not found. Use list_subagents to check.`, 'not_found');
+						return true;
+					}
+					const limit = typeof args.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 0;
+					pushResult(formatSubagentTrace(name, sub, limit));
 					return true;
 				}
 
