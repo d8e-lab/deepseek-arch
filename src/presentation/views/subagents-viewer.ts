@@ -59,6 +59,8 @@ export class SubagentsViewer implements ViewComponent {
 	private busy = false;
 	/** 最近一次发送错误（显示在底部） */
 	private error: string | null = null;
+	/** 底部提示（成功类，非错误）：如「本次交互已同步给 master」 */
+	private hint: string | null = null;
 	/** vim 式输入模式（false=命令模式；true=insert） */
 	private insertMode = false;
 	/** 轨迹滚动偏移（相对选中 subagent 完整记录行数组） */
@@ -189,11 +191,17 @@ export class SubagentsViewer implements ViewComponent {
 			if (this.error) {
 				this.out.write(red(`  ⚠ ${this.error}`));
 			}
+			if (this.hint) {
+				this.out.write(dim(`  · ${this.hint}`));
+			}
 		} else {
 			const prefix = `  > ${this.inputText}`;
 			this.out.write(dim(prefix) + dim('  按 [i] 进入输入模式'));
 			if (this.error) {
 				this.out.write(red(`  ⚠ ${this.error}`));
+			}
+			if (this.hint) {
+				this.out.write(dim(`  · ${this.hint}`));
 			}
 		}
 	}
@@ -382,10 +390,13 @@ export class SubagentsViewer implements ViewComponent {
 		if (!current) { this.render(); return; }
 		this.busy = true;
 		this.error = null;
+		this.hint = null;
 		this.render();
 		try {
 			await this.sendToSubagent(current.name, text);
-			// 输出已追加到会话对象的 entries（按 run 分组），重渲染显示最新输出
+			// 输出已追加到会话对象的 entries（按 run 分组），重渲染显示最新输出；
+			// 用户直发会通知 master（下次发言时同步），这里给出可见提示
+			this.hint = `已发送；master 将在下次发言时收到与 "${current.name}" 的交互通知`;
 		} catch (err) {
 			this.error = err instanceof Error ? err.message : String(err);
 		} finally {

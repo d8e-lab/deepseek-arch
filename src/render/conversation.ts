@@ -127,6 +127,17 @@ export function renderToolError(error: string): string {
 	return dim('  ') + red(errLabel);
 }
 
+/**
+ * 从注入的 <subagent-notification> 块里提取一行摘要（子代理名 + 状态/耗时）。
+ * 完整对话投影在 master 上下文里，界面只需提示「这次交互已同步」。
+ */
+function noticeSummary(content: string): string {
+	const m = /subagent "([^"]+)" \(([^)]*)\)/.exec(content);
+	return m
+		? `用户与 "${m[1]}" (${m[2]}) 的交互已同步给 master`
+		: '用户与子代理的交互已同步给 master';
+}
+
 export class ConversationView {
 	/**
 	 * 渲染全部对话轮次为行数组
@@ -173,6 +184,14 @@ export class ConversationView {
 			}
 
 			lines.push('');
+
+			// 注入的「用户↔子代理」通知：只渲染一行摘要（完整对话在 master 上下文里，
+			// 界面上全量渲染会在多轮交互时刷屏）
+			for (const msg of turn.messages ?? []) {
+				if (msg.role !== 'user' || typeof msg.content !== 'string') continue;
+				if (!msg.content.startsWith('<subagent-notification>')) continue;
+				lines.push(dim(`⇢ [Subagent] ${noticeSummary(msg.content)}`));
+			}
 
 			// Think 区域（灰色）
 			// 方案 C：content/reasoning 可能不在顶层（有 messages 时由 messages 推导）

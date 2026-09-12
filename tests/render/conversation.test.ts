@@ -54,6 +54,27 @@ describe('truncateThink', () => {
 });
 
 describe('ConversationView', () => {
+	it('注入的 <subagent-notification> 只渲染一行提示，且不冒充 [You]（需求 2）', () => {
+		const view = new ConversationView();
+		const turn = makeTurn('继续');
+		turn.messages!.push({
+			role: 'user',
+			content: [
+				'<subagent-notification>',
+				'[Subagent Notification — user ↔ subagent]',
+				'subagent "sub1" (completed, 1.2s) — the user sent it instructions directly in the subagent view.',
+				'[run 1] task: 调研',
+				'  subagent: 结论',
+				'</subagent-notification>',
+			].join('\n'),
+		});
+		const plain = view.render([turn], 80).map(stripAnsi).join('\n');
+
+		expect(plain).toContain('⇢ [Subagent] 用户与 "sub1" (completed, 1.2s) 的交互已同步给 master');
+		// 通知不应被当成用户输入渲染
+		expect(plain).not.toContain('[You] <subagent-notification>');
+	});
+
 	it('渲染用户消息（[You] 标签）', () => {
 		const view = new ConversationView();
 		const lines = view.render([makeTurn('hello')], 80);
