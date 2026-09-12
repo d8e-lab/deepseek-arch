@@ -37,6 +37,8 @@ export interface SubagentRun {
 	entries: SubagentRoundEntry[];
 	/** 该轮结束状态（进行中为 'running'） */
 	status: SubagentStatus;
+	/** 该轮失败原因（status='failed' 时；取代旧 result 字段承载错误信息） */
+	error?: string;
 	startedAt: number;
 	endedAt?: number;
 }
@@ -60,8 +62,6 @@ export class SubagentSession {
 	readonly name: string;
 	readonly task: string;
 	status: SubagentStatus = 'running';
-	/** 最终结果（由 messages 派生；见 lastContent） */
-	result?: string;
 	startMs: number;
 	endMs?: number;
 	/** 逐轮运行记录（首启 + 每次续跑） */
@@ -126,6 +126,25 @@ export class SubagentSession {
 			}
 		}
 		return undefined;
+	}
+
+	/** 最后一次运行记录 */
+	lastRun(): SubagentRun | undefined {
+		return this.runs.length > 0 ? this.runs[this.runs.length - 1] : undefined;
+	}
+
+	/**
+	 * 面向 master 的输出文本（drive/send 返回值、wait 的结果内容）。
+	 * completed → 最后一次运行的 content；cancelled / failed → 状态消息。
+	 * 取代旧的 result 字段：不再有「最终结果」这一独立概念（需求 4）。
+	 */
+	outputText(): string {
+		if (this.status === 'cancelled') return SUBAGENT_CANCELLED;
+		if (this.status === 'failed') {
+			const err = this.lastRun()?.error;
+			return err ? `Error: ${err}` : '(subagent failed)';
+		}
+		return this.lastContent() ?? '(subagent completed with no output)';
 	}
 
 	/**
@@ -199,17 +218,15 @@ export class SubagentSession {
 			// 状态由循环显式返回（不再靠 result 字符串前缀猜测）
 			run.status = status === 'cancelled' ? 'cancelled' : 'completed';
 			this.status = run.status;
-			this.result = this.lastContent()
-				?? (status === 'cancelled' ? SUBAGENT_CANCELLED : '(subagent completed with no output)');
 			this.endMs = Date.now();
 			run.endedAt = this.endMs;
-			return this.result;
+			return this.outputText();
 		} catch (err) {
 			run.status = 'failed';
 			run.msgEnd = this.msgs.length;
 			run.endedAt = Date.now();
+			run.error = err instanceof Error ? err.message : String(err);
 			this.status = 'failed';
-			this.result = `Error: ${err instanceof Error ? err.message : String(err)}`;
 			this.endMs = Date.now();
 			throw err;
 		} finally {
@@ -245,7 +262,6 @@ export class SubagentSession {
 			status: this.status,
 			startMs: this.startMs,
 			endMs: this.endMs,
-			result: this.result,
 			entries: this.entries,
 			messages: this.msgs,
 		};
@@ -269,7 +285,6 @@ export class SubagentSession {
 		session.status = record.status === 'running' ? 'completed' : record.status;
 		session.startMs = record.startMs;
 		session.endMs = record.endMs;
-		session.result = record.result;
 		if (record.messages && record.messages.length > 0) {
 			session.msgs = [...record.messages];
 		}

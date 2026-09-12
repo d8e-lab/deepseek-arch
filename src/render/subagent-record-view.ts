@@ -67,16 +67,6 @@ export class SubagentRecordView {
 		}
 		flushContentBuffer();
 
-		// ─── 最终结果 ──────────────────────────
-		if (record.result) {
-			lines.push(dim('── Final Result ──'));
-			for (const line of record.result.split('\n')) {
-				for (const wline of wrapText(line, Math.max(1, termWidth - 2))) {
-					lines.push('  ' + wline);
-				}
-			}
-		}
-
 		lines.push(dim('─'.repeat(sepWidth)));
 		return lines;
 	}

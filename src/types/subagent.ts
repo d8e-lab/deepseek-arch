@@ -35,8 +35,6 @@ export interface SubagentRecord {
 	startMs: number;
 	/** 结束时间 ms（完成后填入） */
 	endMs?: number;
-	/** 最终结果文本 */
-	result?: string;
 	/** 每轮输出条目（按时间序） */
 	entries: SubagentRoundEntry[];
 	/** 完整消息上下文（含 system/user/assistant/tool；方案 B 会话化后持久化，用于续跑恢复） */

@@ -385,7 +385,7 @@ export class SubagentsViewer implements ViewComponent {
 		this.render();
 		try {
 			await this.sendToSubagent(current.name, text);
-			// 结果已追加到 record.entries/result，重渲染显示最新输出
+			// 输出已追加到会话对象的 entries（按 run 分组），重渲染显示最新输出
 		} catch (err) {
 			this.error = err instanceof Error ? err.message : String(err);
 		} finally {

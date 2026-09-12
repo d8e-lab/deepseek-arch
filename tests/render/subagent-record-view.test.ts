@@ -14,7 +14,6 @@ function makeRecord(entries: SubagentRecord['entries'] = [], status: SubagentRec
 		startMs: 1000,
 		endMs: status === 'running' ? undefined : 2000,
 		entries,
-		result: status === 'completed' ? '最终结果' : undefined,
 	};
 }
 
@@ -140,10 +139,14 @@ describe('SubagentRecordView', () => {
 		expect(stdoutLines.some(l => l.includes('out'))).toBe(true);
 	});
 
-	it('渲染最终结果', () => {
-		const lines = view.renderToText(makeRecord(), 80);
-		expect(lines.join('\n')).toContain('── Final Result ──');
-		expect(lines.join('\n')).toContain('最终结果');
+	it('最终 content 只渲染一次（不再有独立 Final Result 段，需求 4）', () => {
+		const lines = view.renderToText(makeRecord([
+			{ type: 'content', content: '最终结果', timestamp: 1 },
+		]), 80);
+		const text = lines.join('\n');
+		expect(text).not.toContain('Final Result');
+		// 内容只出现一次：entries 的 content 即最后输出，不再额外渲染 result
+		expect(text.split('最终结果').length - 1).toBe(1);
 	});
 
 	it('render 返回带 ANSI 的行，renderToText 返回纯文本', () => {

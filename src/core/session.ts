@@ -624,7 +624,7 @@ export class SessionManager {
 					lines.push(`- "${name}"  (completed, ${elapsedStr}) — use wait("${name}")`);
 					hasContent = true;
 				} else if (sub.status === 'failed' && !this.retrievedSubagents.has(name)) {
-					const errMsg = sub.result ? `: ${sub.result.slice(0, 60)}` : '';
+					const errMsg = `: ${sub.outputText().slice(0, 60)}`;
 					lines.push(`- "${name}"  (failed, ${elapsedStr})${errMsg} — use wait("${name}")`);
 					hasContent = true;
 				} else if (sub.status === 'cancelled' && !this.retrievedSubagents.has(name)) {
@@ -705,7 +705,7 @@ export class SessionManager {
 									subagentName: name,
 									subagentStatus: s.status === 'completed' ? 'completed' : 'failed',
 									subagentElapsedMs: Date.now() - startMs,
-									error: s.status !== 'completed' ? s.result : undefined,
+									error: s.status !== 'completed' ? s.outputText() : undefined,
 								});
 							}
 						});
@@ -1237,14 +1237,17 @@ export class SessionManager {
 					await Promise.all(allDeferredSpawns.map((d) => d.sub.promise!));
 					for (const d of allDeferredSpawns) {
 						const sub = d.sub;
+						// 非 async 模式：子代理结果同步回填给 master（内容由 messages 派生，
+						// fail/cancelled 时是状态消息——见 SubagentSession.outputText）
+						const output = sub.outputText();
 						agentMessages.push({
 							role: 'tool',
-							content: `Subagent "${d.name}" completed.\n\n${sub.result}`,
+							content: `Subagent "${d.name}" completed.\n\n${output}`,
 							tool_call_id: d.tc.id,
 						});
 						toolRecords.push({
 							id: d.tc.id, name: 'subagent_spawn', arguments: d.args,
-							result: sub.result,
+							result: output,
 							error: sub.status === 'failed' || sub.status === 'cancelled' ? 'subagent_failed' : undefined,
 							duration_ms: Date.now() - sub.startMs,
 						});
@@ -1252,7 +1255,7 @@ export class SessionManager {
 							type: 'tool_result',
 							toolCallId: d.tc.id,
 							toolName: 'subagent_spawn',
-							toolResult: sub.result,
+							toolResult: output,
 							error: sub.status === 'failed' || sub.status === 'cancelled' ? 'subagent_failed' : undefined,
 						});
 					}

@@ -391,7 +391,9 @@ describe('SessionManager subagent 集成', () => {
 		const record = mgr.getSubagent('sub1');
 		expect(record).toBeDefined();
 		expect(record!.status).toBe('completed');
-		expect(record!.result).toBe('子代理结果');
+		// 无 result 字段：输出文本由 messages 派生（需求 4）
+		expect(record!.outputText()).toBe('子代理结果');
+		expect(record!.lastContent()).toBe('子代理结果');
 		expect(record!.entries.length).toBeGreaterThan(0);
 		// 事件发射
 		const spawned = events.find((e) => e.type === 'subagent_spawned');
@@ -460,8 +462,8 @@ describe('SessionManager subagent 集成', () => {
 		await sleep(50);
 		const sub = mgr.getSubagent('sub1');
 		expect(sub?.status).toBe('cancelled');
-		// cancelled 时面向 master 的返回值是状态消息（cancelled 非终态，之后可续跑）
-		expect(sub?.result).toBe(SUBAGENT_CANCELLED);
+		// cancelled 时面向 master 的输出是状态消息（cancelled 非终态，之后可续跑）
+		expect(sub?.outputText()).toBe(SUBAGENT_CANCELLED);
 	});
 
 	it('cancelSubagent("all") 取消全部运行中的子代理', async () => {
