@@ -18,6 +18,13 @@ export interface SubagentCallbacks {
 	onEntry?: (entry: SubagentRoundEntry) => void;
 	/** 每轮 API 调用返回 usage 时调用（子代理 token 入账，O-1） */
 	onUsage?: (usage: TokenUsage) => void;
+	/**
+	 * 每轮进度落盘点（P-1：与 master 每轮增量落盘同构）。
+	 * 触发时机：本轮 assistant(含 tool_calls) 入队后、工具执行完毕后、自然结束前。
+	 * 入参是循环内部**当前**的消息队列（含本轮新增内容）——调用方据此把进度写盘，
+	 * 因此「运行中/取消/崩溃」都能留下轨迹。
+	 */
+	onProgress?: (messages: Message[]) => void;
 }
 
 /**
@@ -164,6 +171,7 @@ export async function runSubagentLoop(
 					reasoning_content: reasoning || undefined,
 				});
 			}
+			callbacks?.onProgress?.(msgs);
 			return { status: 'completed', messages: msgs };
 		}
 
@@ -173,6 +181,9 @@ export async function runSubagentLoop(
 			reasoning_content: reasoning || undefined,
 			tool_calls: pendingToolCalls,
 		});
+		// P-1：本轮 assistant 入队即落盘（与 master 首次 saveTurn 同手法），
+		// 崩在工具执行中也能留下轨迹（悬空 tool_calls 由恢复侧 repairToolPairing 修补）
+		callbacks?.onProgress?.(msgs);
 
 		/** 本轮是否已因用户中断而取消（取消后不再执行剩余工具，只补配对结果） */
 		let cancelled = false;
@@ -235,7 +246,12 @@ export async function runSubagentLoop(
 		}
 
 		// 中断：本轮工具已全部配对完毕，干净退出（cancelled 非终态，可追加指令续跑）
-		if (cancelled) return { status: 'cancelled', messages: msgs };
+		if (cancelled) {
+			callbacks?.onProgress?.(msgs);
+			return { status: 'cancelled', messages: msgs };
+		}
+		// P-1：每轮工具执行完毕落盘一次
+		callbacks?.onProgress?.(msgs);
 	}
 }
 

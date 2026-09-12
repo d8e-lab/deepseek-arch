@@ -135,6 +135,8 @@ export class SessionManager {
 	/** 生成参数默认值（temperature/max_tokens/top_p/thinking/reasoning_effort），
 	 *  从配置 defaults 读取，发送消息与子代理调用时透传给 provider */
 	private chatDefaults: ChatOptions = {};
+	/** 子代理落盘串行链（同一子代理的写入按序执行，避免并发写坏文件） */
+	private subagentWriteChain = new Map<string, Promise<void>>();
 	/** 自动 compact 配置：上下文超阈值时自动压缩（默认开启，70% of 1M tokens） */
 	private autoCompact = {
 		enabled: true,
@@ -290,24 +292,30 @@ export class SessionManager {
 		return this.subagents.get(name)?.toRecord();
 	}
 
-	/** 从磁盘恢复子代理会话（方案 B：completed/failed 可继续 send 交互） */
+	/**
+	 * 从磁盘恢复子代理会话（completed/failed/cancelled 可继续 send 交互）。
+	 * 崩溃残留的 running 按 cancelled 恢复（非终态，可续跑）。
+	 * 恢复的历史子代理直接标为已消费——否则 resume 后状态块会立刻重复播报旧产出。
+	 */
 	private async restoreSubagents(sessionId: string): Promise<void> {
 		try {
 			const names = await this.storage.listSubagentRecords(sessionId);
 			for (const n of names) {
-				const record = await this.storage.loadSubagentRecord(sessionId, n);
-				if (!record) continue;
-				const session = SubagentSessionImpl.fromRecord(record, {
+				const state = await this.storage.loadSubagentState(sessionId, n);
+				if (!state) continue;
+				const session = SubagentSessionImpl.fromDiskState(state, {
 					provider: this.provider,
 					tools: getAllTools(),
 					chatDefaults: this.chatDefaults,
-					onUsage: (u) => {
+					onUsage: (u: TokenUsage) => {
 						this.subagentUsage.prompt_tokens += u.prompt_tokens;
 						this.subagentUsage.completion_tokens += u.completion_tokens;
 						this.subagentUsage.total_tokens += u.total_tokens;
 					},
+					onProgress: () => this.queuePersistSubagent(n),
 				});
 				this.subagents.set(n, session);
+				this.consumedSubagents.add(n);
 			}
 		} catch {
 			/* 恢复失败不阻塞 resume */
@@ -387,11 +395,11 @@ export class SessionManager {
 
 		try {
 			const result = await session.drive();
-			await this.persistSubagent(name);
+			await this.flushPersistSubagent(name);
 			return result;
 		} catch (err) {
 			// drive 内部已标 failed 并 rethrow；持久化失败态并返回错误字符串（兼容旧行为）
-			await this.persistSubagent(name).catch(() => {});
+			await this.flushPersistSubagent(name).catch(() => {});
 			return `Error: ${err instanceof Error ? err.message : String(err)}`;
 		}
 	}
@@ -414,16 +422,38 @@ export class SessionManager {
 				this.subagentUsage.completion_tokens += usage.completion_tokens;
 				this.subagentUsage.total_tokens += usage.total_tokens;
 			},
+			// P-1：每轮增量落盘（运行中/取消/崩溃都留下轨迹）
+			onProgress: () => this.queuePersistSubagent(name),
 		});
 	}
 
-	/** M-1：持久化子代理记录（含完整消息上下文，供 resume 后查看/续跑） */
+	/**
+	 * 每轮增量落盘（与 master 每轮 updateLastTurn 同构）。
+	 * 运行中也会被 `onProgress` 触发；写入串行化以避免并发写坏同一文件。
+	 */
+	private queuePersistSubagent(name: string): void {
+		const prev = this.subagentWriteChain.get(name) ?? Promise.resolve();
+		const next = prev.then(() => this.persistSubagent(name)).catch(() => { /* 落盘失败不阻塞运行 */ });
+		this.subagentWriteChain.set(name, next);
+	}
+
+	/**
+	 * 落盘并等待写入链完成（运行结束/续跑结束后调用）。
+	 * 必须走同一条链：否则完成态写入可能与仍在途的进度写入交错，落盘状态回退。
+	 */
+	private async flushPersistSubagent(name: string): Promise<void> {
+		this.queuePersistSubagent(name);
+		await this.subagentWriteChain.get(name);
+	}
+
+	/** 持久化子代理记录（meta.json + turn_0.json，整份重写；含完整消息上下文） */
 	private async persistSubagent(name: string): Promise<void> {
 		if (!this.session) return;
 		const session = this.subagents.get(name);
 		if (!session) return;
 		try {
-			await this.storage.saveSubagentRecord(this.session.meta.id, session.toRecord());
+			const { meta, runs } = session.toDiskState();
+			await this.storage.saveSubagentState(this.session.meta.id, name, meta, runs);
 		} catch { /* 持久化失败不阻塞 */ }
 	}
 
@@ -448,7 +478,7 @@ export class SessionManager {
 		}
 		const startMs = Date.now();
 		const result = await session.send(instruction, source);
-		await this.persistSubagent(name);
+		await this.flushPersistSubagent(name);
 		this.consumedSubagents.add(name);
 		if (source === 'user') {
 			this.enqueueNotice(name, session.status, Date.now() - startMs);

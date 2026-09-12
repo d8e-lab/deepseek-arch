@@ -13,7 +13,7 @@
  */
 
 import type { Message, TokenUsage } from '../types/index.js';
-import type { SubagentRecord, SubagentRoundEntry } from '../types/subagent.js';
+import type { SubagentRecord, SubagentRoundEntry, SubagentMeta, SubagentRunRecord } from '../types/subagent.js';
 import type { ModelProvider, ChatOptions } from './model-provider.js';
 import type { Tool } from '../tools/types.js';
 import { runSubagentLoop, SUBAGENT_CANCELLED } from './subagent.js';
@@ -56,6 +56,11 @@ export interface SubagentSessionOptions {
 	chatDefaults?: ChatOptions;
 	/** 每轮 API usage 回调（主会话 token 入账用） */
 	onUsage?: (usage: TokenUsage) => void;
+	/**
+	 * 进度落盘回调（P-1）：每轮关键点触发，由 SessionManager 注入实现。
+	 * 使运行中/取消/崩溃都留下轨迹（与 master 每轮增量落盘同构）。
+	 */
+	onProgress?: () => void;
 }
 
 export class SubagentSession {
@@ -75,6 +80,7 @@ export class SubagentSession {
 	private tools: Tool[];
 	private chatDefaults?: ChatOptions;
 	private onUsage?: (usage: TokenUsage) => void;
+	private onProgress?: () => void;
 	/** 最近一次 drive 的 promise（wait 用；完成后仍保留最后结果） */
 	promise: Promise<string> | null = null;
 
@@ -86,6 +92,7 @@ export class SubagentSession {
 		this.tools = opts.tools;
 		this.chatDefaults = opts.chatDefaults;
 		this.onUsage = opts.onUsage;
+		this.onProgress = opts.onProgress;
 		this.msgs = [
 			{ role: 'system', content: opts.systemPrompt },
 		];
@@ -210,6 +217,11 @@ export class SubagentSession {
 				{
 					onEntry: (entry) => run.entries.push(entry),
 					onUsage: (usage) => this.onUsage?.(usage),
+					onProgress: (msgs) => {
+						// 采纳循环内部的实时队列（内部副本引用），使进度落盘能看到本轮新增内容
+						this.msgs = msgs;
+						this.onProgress?.();
+					},
 				},
 				this.chatDefaults,
 			);
@@ -254,7 +266,36 @@ export class SubagentSession {
 		this.runController?.abort();
 	}
 
-	/** 转换为持久化记录（含完整消息上下文） */
+	/**
+	 * 落盘状态（与 master 同构：meta.json + 逐轮 turn_0.json）。
+	 * 每轮只存自己的 messages delta（不含 system——system 存 meta.systemPrompt）。
+	 */
+	toDiskState(): { meta: SubagentMeta; runs: SubagentRunRecord[] } {
+		return {
+			meta: {
+				name: this.name,
+				task: this.task,
+				status: this.status,
+				startMs: this.startMs,
+				endMs: this.endMs,
+				runCount: this.runs.length,
+				systemPrompt: (this.msgs[0]?.role === 'system' ? (this.msgs[0].content as string) : ''),
+			},
+			runs: this.runs.map((run, idx) => ({
+				runIndex: idx,
+				userText: run.userText,
+				source: run.source,
+				messages: this.runMessages(run).filter((m) => m.role !== 'system'),
+				entries: [...run.entries],
+				status: run.status,
+				error: run.error,
+				created_at: run.startedAt,
+				ended_at: run.endedAt,
+			})),
+		};
+	}
+
+	/** 转换为内存视图记录（TUI/渲染/列表用） */
 	toRecord(): SubagentRecord {
 		return {
 			name: this.name,
@@ -268,39 +309,73 @@ export class SubagentSession {
 	}
 
 	/**
-	 * 从持久化记录恢复会话（resume 场景）。
-	 * 仅恢复非运行中状态（运行中记录不会落盘）；恢复后可通过 send() 继续交互。
-	 * 老记录（无 messages 字段）恢复后 send() 会抛"no context"——上下文不可得，无法续跑。
+	 * 从落盘状态恢复会话（resume 场景）。
+	 *
+	 * 崩溃语义：盘上仍是 running（进程被杀）→ 该轮与整体状态都按 cancelled 恢复，
+	 * 因为 cancelled 非终态，恢复后可直接 send 续跑；消息序列由 repairToolPairing
+	 * 补齐悬空 tool_calls，保证是合法 API 序列。
 	 */
-	static fromRecord(record: SubagentRecord, opts: Omit<SubagentSessionOptions, 'name' | 'task' | 'systemPrompt'>): SubagentSession {
+	static fromDiskState(
+		state: { meta: SubagentMeta; runs: SubagentRunRecord[] },
+		opts: Omit<SubagentSessionOptions, 'name' | 'task' | 'systemPrompt'>,
+	): SubagentSession {
+		const { meta, runs } = state;
 		const session = new SubagentSession({
-			name: record.name,
-			task: record.task,
-			systemPrompt: record.messages?.[0]?.role === 'system'
-				? (record.messages[0].content as string)
-				: '',
+			name: meta.name,
+			task: meta.task,
+			systemPrompt: meta.systemPrompt ?? '',
 			...opts,
 		});
-		// 用持久化状态覆盖构造初始值（构造时 status=running、startMs=now）
-		session.status = record.status === 'running' ? 'completed' : record.status;
-		session.startMs = record.startMs;
-		session.endMs = record.endMs;
-		if (record.messages && record.messages.length > 0) {
-			session.msgs = [...record.messages];
+		session.status = meta.status === 'running' ? 'cancelled' : meta.status;
+		session.startMs = meta.startMs;
+		session.endMs = meta.endMs;
+		session.msgs = [{ role: 'system', content: meta.systemPrompt ?? '' }];
+		for (const r of runs) {
+			// 逐轮修复：tool_calls 与其结果同轮产生，所以悬空补齐必须落在同一轮内
+			// （这样每轮的 msgStart/msgEnd 精确，不会因为插入占位消息而串轮）
+			const delta = repairToolPairing(r.messages.filter((m) => m.role !== 'system'));
+			const msgStart = session.msgs.length;
+			session.msgs.push(...delta);
+			session.runs.push({
+				userText: r.userText,
+				source: r.source,
+				msgStart,
+				msgEnd: session.msgs.length,
+				entries: [...(r.entries ?? [])],
+				// 运行中被中断的轮次按 cancelled 恢复（可续跑）
+				status: r.status === 'running' ? 'cancelled' : r.status,
+				error: r.error,
+				startedAt: r.created_at,
+				endedAt: r.ended_at,
+			});
 		}
-		// 老格式无轮次边界：把整段上下文折叠为单轮（user 输入取 task）
-		session.runs.push({
-			userText: record.task,
-			source: 'task',
-			msgStart: Math.min(1, session.msgs.length),
-			msgEnd: session.msgs.length,
-			entries: [...(record.entries ?? [])],
-			status: session.status,
-			startedAt: record.startMs,
-			endedAt: record.endMs,
-		});
 		return session;
 	}
+}
+
+/** 中断占位结果：崩在「assistant 已入队、工具未回填」时补的配对说明 */
+const INTERRUPTED_TOOL_RESULT = 'Not executed: the run was interrupted (process exited before this tool returned).';
+
+/**
+ * 修复消息序列：为悬空 assistant.tool_calls 补配对 tool 消息。
+ *
+ * 运行中落盘可能停在「assistant(含 tool_calls) 已写盘、工具结果还没回来」的瞬间，
+ * 直接拿这份消息续跑会被 API 拒绝（tool_calls 必须成对）。补一条中断说明既保持
+ * 序列合法，也让模型知道当时发生了什么。
+ */
+export function repairToolPairing(msgs: Message[]): Message[] {
+	const paired = new Set(msgs.filter((m) => m.role === 'tool').map((m) => m.tool_call_id));
+	const out: Message[] = [];
+	for (const m of msgs) {
+		out.push(m);
+		if (m.role !== 'assistant' || !m.tool_calls) continue;
+		for (const tc of m.tool_calls) {
+			if (!paired.has(tc.id)) {
+				out.push({ role: 'tool', content: INTERRUPTED_TOOL_RESULT, tool_call_id: tc.id });
+			}
+		}
+	}
+	return out;
 }
 
 /** 截断单条 content（超限时尾部截断并标注） */

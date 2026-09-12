@@ -441,11 +441,58 @@ describe('SessionManager subagent 集成', () => {
 		const finished = events.find((e) => e.type === 'subagent_finished');
 		expect(finished).toBeDefined();
 		expect(finished!.subagentStatus).toBe('completed');
-		// 持久化到磁盘
+		// 持久化到磁盘（新布局：subagents/<name>/{meta.json,turn_0.json}）
 		const names = await storage.listSubagentRecords(mgr.getSessionId()!);
 		expect(names).toContain('sub1');
-		const loaded = await storage.loadSubagentRecord(mgr.getSessionId()!, 'sub1');
-		expect(loaded?.status).toBe('completed');
+		const loaded = await storage.loadSubagentState(mgr.getSessionId()!, 'sub1');
+		expect(loaded?.meta.status).toBe('completed');
+		expect(loaded?.runs).toHaveLength(1);
+		expect(loaded?.runs[0].messages.some((m) => m.role === 'assistant')).toBe(true);
+	});
+
+	it('运行中增量落盘：子代理未结束时盘上已有轨迹，取消后状态更新（需求 5）', async () => {
+		let subCalls = 0;
+		const client = makeSplitClient(
+			[
+				{ content: '', toolCalls: [spawnCall('sub1', 'task')] },
+				{ content: 'end1' },
+			],
+			() => {
+				subCalls++;
+				if (subCalls === 1) {
+					// 先走完一轮工具（触发进度落盘），再挂起等待取消
+					return {
+						content: '先调用工具',
+						toolCalls: [{ id: 's1', function: { name: 'nonexistent_tool', arguments: '{"a":1}' } }],
+					};
+				}
+				return 'hang';
+			},
+		);
+		mgr = new SessionManager(storage, client);
+		mgr.setSubagentAsync(true);
+		await mgr.startNewSession('运行中落盘测试');
+		mgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
+
+		await mgr.sendMessageStream('spawn', () => {});
+		await sleep(80);
+
+		// 子代理仍在运行，但盘上已有 meta + runs（每轮增量写，进程被杀也不丢轨迹）
+		const sid = mgr.getSessionId()!;
+		const state = await storage.loadSubagentState(sid, 'sub1');
+		expect(state).not.toBeNull();
+		expect(state!.meta.status).toBe('running');
+		expect(state!.runs).toHaveLength(1);
+		expect(state!.runs[0].status).toBe('running');
+		expect(state!.runs[0].messages.some((m) => m.role === 'tool')).toBe(true);
+		expect(mgr.getSubagent('sub1')?.status).toBe('running');
+
+		// 取消也会落盘（旧实现取消路径完全不写盘）
+		mgr.cancelSubagent('sub1');
+		await sleep(80);
+		const after = await storage.loadSubagentState(sid, 'sub1');
+		expect(after!.meta.status).toBe('cancelled');
+		expect(after!.runs[0].status).toBe('cancelled');
 	});
 
 	it('I-1：主 agent 中断不连坐子代理（子代理 signal 独立）', async () => {
@@ -1009,7 +1056,7 @@ describe('SubagentSession 会话化', () => {
 		expect(dialogue).not.toContain('fake result');
 	});
 
-	it('toRecord/fromRecord 往返：状态与消息上下文完整保留', async () => {
+	it('toDiskState/fromDiskState 往返：状态与消息上下文完整保留', async () => {
 		const client = makeScriptClient([{ content: '结果' }]);
 		const { SubagentSession } = await import('../../src/core/subagent-session.js');
 		const session = new SubagentSession({
@@ -1017,17 +1064,58 @@ describe('SubagentSession 会话化', () => {
 			provider: client, tools: [], onUsage: () => {},
 		});
 		await session.drive();
-		const record = session.toRecord();
-		expect(record.messages).toBeDefined();
-		expect(record.messages!.length).toBeGreaterThan(0);
-		expect(record.status).toBe('completed');
+		const state = session.toDiskState();
+		expect(state.meta.status).toBe('completed');
+		expect(state.runs).toHaveLength(1);
+		expect(state.meta.systemPrompt).toBe('subagent prompt');
 
-		// fromRecord 恢复：completed 状态、消息保留、可继续 send
-		const restored = SubagentSession.fromRecord(record, { provider: client, tools: [], onUsage: () => {} });
+		// 恢复：completed 状态、消息保留、可继续 send
+		const restored = SubagentSession.fromDiskState(state, { provider: client, tools: [], onUsage: () => {} });
 		expect(restored.status).toBe('completed');
 		expect(restored.messages.length).toBe(session.messages.length);
+		expect(restored.runs).toHaveLength(1);
 		const r2 = await restored.send('恢复后续跑');
 		expect(r2).toBe('结果'); // steps 重复最后一步
+		expect(restored.runs).toHaveLength(2);
+	});
+
+	it('崩溃恢复：盘上 running → 按 cancelled 恢复，且悬空 tool_calls 被补配对（需求 3/5）', async () => {
+		const { SubagentSession } = await import('../../src/core/subagent-session.js');
+		const client = makeScriptClient([{ content: '恢复后完成' }]);
+		const state = {
+			meta: {
+				name: 'sub1', task: '任务', status: 'running' as const,
+				startMs: 1000, runCount: 1, systemPrompt: 'subagent prompt',
+			},
+			runs: [{
+				runIndex: 0,
+				userText: '任务',
+				source: 'task' as const,
+				// 崩在「assistant(含 tool_calls) 已落盘、工具结果未回填」的瞬间
+				messages: [
+					{ role: 'user' as const, content: '任务' },
+					{
+						role: 'assistant' as const,
+						content: '调用工具',
+						tool_calls: [{ id: 'c1', type: 'function' as const, function: { name: 'fake_tool', arguments: '{}' } }],
+					},
+				],
+				entries: [{ type: 'tool_call' as const, content: 'fake_tool', toolName: 'fake_tool', toolArgs: {}, timestamp: 1 }],
+				status: 'running' as const,
+				created_at: 1000,
+			}],
+		};
+		const restored = SubagentSession.fromDiskState(state, { provider: client, tools: [], onUsage: () => {} });
+
+		expect(restored.status).toBe('cancelled'); // 非终态，可续跑
+		expect(restored.runs[0].status).toBe('cancelled');
+		// 悬空 tool_calls 已被补齐 → 序列合法
+		assertToolCallsPaired(restored.messages);
+		// 可续跑
+		const r = await restored.send('继续');
+		expect(r).toBe('恢复后完成');
+		expect(restored.status).toBe('completed');
+		assertToolCallsPaired(restored.messages);
 	});
 });
 
@@ -1069,9 +1157,11 @@ describe('sendToSubagent', () => {
 		const r = await sendMgr.sendToSubagent('sub1', '再深入一点');
 		expect(r).toBe('续跑结果');
 		expect(sendMgr.getSubagent('sub1')?.status).toBe('completed');
-		// 持久化含最新消息上下文
-		const loaded = await sendStorage.loadSubagentRecord(sendMgr.getSessionId()!, 'sub1');
-		expect(loaded?.messages?.filter((m) => m.role === 'user').map((m) => m.content))
+		// 持久化含最新消息上下文（新布局：每轮一个 run 记录）
+		const loaded = await sendStorage.loadSubagentState(sendMgr.getSessionId()!, 'sub1');
+		expect(loaded?.runs).toHaveLength(2);
+		expect(loaded?.runs[1].userText).toBe('再深入一点');
+		expect(loaded?.runs.flatMap((r) => r.messages).filter((m) => m.role === 'user').map((m) => m.content))
 			.toEqual(['task x', '再深入一点']);
 	});
 
@@ -1095,6 +1185,9 @@ describe('sendToSubagent', () => {
 		await sendMgr.startNewSession('resume send 测试');
 		sendMgr.setSystemPrompt({ role: 'system', content: '你是有用的助手。' });
 		await sendMgr.sendMessageStream('spawn', () => {});
+		// 等子代理跑完并落盘（模拟真实场景：重启发生在子代理结束之后）
+		await sendMgr.getSubagent('sub1')?.promise;
+		await new Promise((r) => setTimeout(r, 30));
 		const sessionId = sendMgr.getSessionId()!;
 
 		// 模拟重启：新 SessionManager + resumeSession

@@ -7,7 +7,7 @@
  *       ├── meta.json        # 会话元数据
  *       ├── turns.json       # 全部轮次（单文件数组，v2 格式）
  *       ├── system-prompt.txt# 会话 system prompt（kv-cache 命中用）
- *       └── subagents/       # 子代理执行记录（<name>.json + _index.json）
+ *       └── subagents/       # 子代理执行记录（每子代理一个目录：meta.json + turn_0.json）
  *
  * turns.json 为单文件全量读写（每轮对话一个 JSON 文件的旧格式已废弃，
  * loadTurns 保留读取兼容）。
@@ -25,7 +25,7 @@ import type {
 	TurnRecord,
 	TokenUsage,
 } from '../types/index.js';
-import type { SubagentRecord } from './subagent-store.js';
+import type { SubagentRecord, SubagentMeta, SubagentRunRecord } from './subagent-store.js';
 
 // ─── 文件模板 ────────────────────────────────────────
 
@@ -33,6 +33,12 @@ import type { SubagentRecord } from './subagent-store.js';
 const TURNS_FILE = 'turns.json';
 
 const META_FILE = 'meta.json';
+
+/** 子代理元数据文件名 */
+const SUBAGENT_META_FILE = 'meta.json';
+
+/** 子代理逐轮运行文件名（与 master 的分代文件同构；子代理无 compact，恒为 turn_0） */
+const SUBAGENT_RUNS_FILE = 'turn_0.json';
 
 // ─── Storage 类 ──────────────────────────────────────
 
@@ -482,53 +488,56 @@ export class Storage {
 	}
 
 	// ─── Subagents ──────────────────────────────────
+	//
+	// 与 master 会话同构：<sessionDir>/subagents/<name>/{meta.json, turn_0.json}
+	//  - meta.json：状态/时间/轮数/system prompt
+	//  - turn_0.json：逐轮运行数组（每轮只存自己的 messages delta）
+	// 每轮 read-modify-write 整份 runs（与 master 的 saveTurn/updateLastTurn 同手法），
+	// 因此运行中/取消/崩溃都能留下轨迹。不兼容旧的 <name>.json 单文件格式。
 
-	/** 子代理记录目录 */
-	private subagentDir(sessionId: string): string {
+	/** 所有子代理的根目录 */
+	private subagentsRoot(sessionId: string): string {
 		return join(this.sessionDir(sessionId), 'subagents');
 	}
 
-	/** 子代理索引文件路径 */
-	private subagentIndexPath(sessionId: string): string {
-		return join(this.subagentDir(sessionId), '_index.json');
+	/** 单个子代理目录 */
+	private subagentDir(sessionId: string, name: string): string {
+		return join(this.subagentsRoot(sessionId), name);
 	}
 
-	/** 单个子代理记录文件路径 */
-	private subagentRecordPath(sessionId: string, name: string): string {
-		return join(this.subagentDir(sessionId), `${name}.json`);
+	/**
+	 * 保存子代理状态（meta.json + turn_0.json）。
+	 * 运行中也会被调用（每轮一次），因此崩溃后轨迹与进度不丢。
+	 */
+	async saveSubagentState(
+		sessionId: string,
+		name: string,
+		meta: SubagentMeta,
+		runs: SubagentRunRecord[],
+	): Promise<void> {
+		const dir = this.subagentDir(sessionId, name);
+		await mkdir(dir, { recursive: true, mode: 0o700 });
+		await this.writeJSON(join(dir, SUBAGENT_META_FILE), meta);
+		await this.writeJSON(join(dir, SUBAGENT_RUNS_FILE), runs);
 	}
 
-	/** 保存子代理执行记录 */
-	async saveSubagentRecord(sessionId: string, record: SubagentRecord): Promise<void> {
-		const dir = this.subagentDir(sessionId);
-		try { await access(dir); } catch { await mkdir(dir, { mode: 0o700 }); }
-
-		await this.writeJSON(this.subagentRecordPath(sessionId, record.name), record);
-
-		// 更新索引
-		const indexPath = this.subagentIndexPath(sessionId);
-		let index: string[] = [];
-		try {
-			const raw = await readFile(indexPath, 'utf-8');
-			index = JSON.parse(raw) as string[];
-		} catch { /* 首次创建 */ }
-
-		if (!index.includes(record.name)) {
-			index.push(record.name);
-			await writeFile(indexPath, JSON.stringify(index, null, 2) + '\n', { mode: 0o600 });
-		}
+	/** 读取子代理状态（不存在返回 null） */
+	async loadSubagentState(
+		sessionId: string,
+		name: string,
+	): Promise<{ meta: SubagentMeta; runs: SubagentRunRecord[] } | null> {
+		const dir = this.subagentDir(sessionId, name);
+		const meta = await this.readJSON<SubagentMeta>(join(dir, SUBAGENT_META_FILE));
+		if (!meta) return null;
+		const runs = (await this.readJSON<SubagentRunRecord[]>(join(dir, SUBAGENT_RUNS_FILE))) ?? [];
+		return { meta, runs };
 	}
 
-	/** 加载指定子代理记录 */
-	async loadSubagentRecord(sessionId: string, name: string): Promise<SubagentRecord | null> {
-		return this.readJSON<SubagentRecord>(this.subagentRecordPath(sessionId, name));
-	}
-
-	/** 列出会话的所有子代理名 */
+	/** 列出会话的所有子代理名（目录扫描） */
 	async listSubagentRecords(sessionId: string): Promise<string[]> {
 		try {
-			const raw = await readFile(this.subagentIndexPath(sessionId), 'utf-8');
-			return JSON.parse(raw) as string[];
+			const entries = await readdir(this.subagentsRoot(sessionId), { withFileTypes: true });
+			return entries.filter((e) => e.isDirectory()).map((e) => e.name);
 		} catch {
 			return [];
 		}

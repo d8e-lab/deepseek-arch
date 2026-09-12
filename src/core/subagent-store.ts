@@ -6,4 +6,9 @@
  * 本文件仅保留类型 re-export，避免旧导入路径（from './subagent-store.js'）断裂。
  */
 
-export type { SubagentRecord, SubagentRoundEntry } from '../types/subagent.js';
+export type {
+	SubagentRecord,
+	SubagentRoundEntry,
+	SubagentMeta,
+	SubagentRunRecord,
+} from '../types/subagent.js';
