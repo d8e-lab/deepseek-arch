@@ -44,3 +44,10 @@ tmp/
 *.tar.gz
 *.tgz
 *.tar.zst
+
+# Local model weights (Qwen ASR/TTS)
+models/
+
+# Python bytecode
+__pycache__/
+*.pyc
