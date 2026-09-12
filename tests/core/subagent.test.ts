@@ -140,6 +140,20 @@ function subMessages(task: string, systemPrompt = 'subagent prompt'): Message[] 
 	];
 }
 
+/**
+ * 断言消息序列合法：每个 assistant.tool_calls 声明的 id 都必须有配对 tool 消息。
+ * 中断（取消）后仍应成立——否则续跑时 API 会因悬空 tool_calls 报错。
+ */
+function assertToolCallsPaired(messages: Message[]): void {
+	const toolIds = new Set(messages.filter((m) => m.role === 'tool').map((m) => m.tool_call_id));
+	for (const m of messages) {
+		if (m.role !== 'assistant' || !m.tool_calls) continue;
+		for (const tc of m.tool_calls) {
+			expect(toolIds.has(tc.id)).toBe(true);
+		}
+	}
+}
+
 function spawnCall(name: string, task: string): { id: string; function: { name: string; arguments: string } } {
 	return {
 		id: `call-${name}`,
@@ -184,10 +198,13 @@ describe('runSubagentLoop', () => {
 			{ content: '最终结果' },
 		]);
 		const entries: SubagentRoundEntry[] = [];
-		const { result } = await runSubagentLoop(subMessages('任务'), client, [fakeTool], undefined, {
+		const { status, messages } = await runSubagentLoop(subMessages('任务'), client, [fakeTool], undefined, {
 			onEntry: (e) => entries.push(e),
 		});
-		expect(result).toBe('最终结果');
+		expect(status).toBe('completed');
+		// 最终 content 作为最后一条 assistant 消息入队（取代旧的 result 字段）
+		expect(messages.at(-1)).toMatchObject({ role: 'assistant', content: '最终结果' });
+		assertToolCallsPaired(messages);
 		expect(entries.some((e) => e.type === 'thinking' && e.content === '思考中')).toBe(true);
 		expect(entries.filter((e) => e.type === 'content')).toHaveLength(2);
 		expect(entries.some((e) => e.type === 'tool_call' && e.toolName === 'fake_tool')).toBe(true);
@@ -204,10 +221,11 @@ describe('runSubagentLoop', () => {
 			},
 		} as unknown as ModelProvider;
 		const entries: SubagentRoundEntry[] = [];
-		const { result } = await runSubagentLoop(subMessages('任务'), client, [], undefined, {
+		const { status, messages } = await runSubagentLoop(subMessages('任务'), client, [], undefined, {
 			onEntry: (e) => entries.push(e),
 		});
-		expect(result).toBe('第一行续写\n第二行\n第三行');
+		expect(status).toBe('completed');
+		expect(messages.at(-1)).toMatchObject({ role: 'assistant', content: '第一行续写\n第二行\n第三行' });
 		const contentEntries = entries.filter((e) => e.type === 'content');
 		// 按 \n 边界拆成完整行，而非每 chunk 一条碎 entry
 		expect(contentEntries.map((e) => e.content)).toEqual(['第一行续写', '第二行', '第三行']);
@@ -223,16 +241,19 @@ describe('runSubagentLoop', () => {
 		expect(usages[0].total_tokens).toBe(8);
 	});
 
-	it('signal abort 返回 SUBAGENT_CANCELLED（I-1/I-2）', async () => {
+	it('signal abort 返回 status=cancelled（I-1/I-2）', async () => {
 		const controller = new AbortController();
 		const client = makeScriptClient([{ hang: true }]);
 		const p = runSubagentLoop(subMessages('任务'), client, [], controller.signal);
 		setTimeout(() => controller.abort(), 10);
-		const { result } = await p;
-		expect(result).toBe(SUBAGENT_CANCELLED);
+		const { status, messages } = await p;
+		expect(status).toBe('cancelled');
+		// 流式阶段中断：本轮 assistant 尚未入队，不存在悬空 tool_calls
+		expect(messages.filter((m) => m.role === 'assistant')).toHaveLength(0);
+		assertToolCallsPaired(messages);
 	});
 
-	it('工具执行抛 AbortError 返回 SUBAGENT_CANCELLED', async () => {
+	it('工具执行抛 AbortError：status=cancelled 且 tool_calls 仍配对（消息序列合法）', async () => {
 		const abortingTool: Tool = {
 			name: 'abort_tool',
 			description: 'aborts',
@@ -248,8 +269,86 @@ describe('runSubagentLoop', () => {
 		const client = makeScriptClient([
 			{ content: '', toolCalls: [{ id: 'c1', function: { name: 'abort_tool', arguments: '{}' } }] },
 		]);
-		const { result } = await runSubagentLoop(subMessages('任务'), client, [abortingTool]);
-		expect(result).toBe(SUBAGENT_CANCELLED);
+		const { status, messages } = await runSubagentLoop(subMessages('任务'), client, [abortingTool]);
+		expect(status).toBe('cancelled');
+		// 中断不再直接 return：assistant.tool_calls 有配对 tool 消息（与主代理中断策略一致）
+		expect(messages.filter((m) => m.role === 'assistant' && m.tool_calls?.length)).toHaveLength(1);
+		const toolMsg = messages.find((m) => m.role === 'tool' && m.tool_call_id === 'c1');
+		expect(toolMsg?.content).toContain('cancelled');
+		assertToolCallsPaired(messages);
+	});
+
+	it('中断后本轮剩余工具不执行，全部补配对结果', async () => {
+		const executed: string[] = [];
+		const abortingTool: Tool = {
+			name: 'abort_tool',
+			description: 'aborts',
+			parameters: { type: 'object', properties: {} },
+			requiresConfirm: false,
+			async execute(_args, signal) {
+				signal?.throwIfAborted();
+				const err = new Error('aborted');
+				err.name = 'AbortError';
+				throw err;
+			},
+		};
+		const otherTool: Tool = {
+			name: 'other_tool',
+			description: 'should not run after cancel',
+			parameters: { type: 'object', properties: {} },
+			requiresConfirm: false,
+			async execute() {
+				executed.push('other_tool');
+				return { content: 'other result' };
+			},
+		};
+		const client = makeScriptClient([
+			{
+				content: '',
+				toolCalls: [
+					{ id: 'c1', function: { name: 'abort_tool', arguments: '{}' } },
+					{ id: 'c2', function: { name: 'other_tool', arguments: '{}' } },
+				],
+			},
+		]);
+		const { status, messages } = await runSubagentLoop(
+			subMessages('任务'), client, [abortingTool, otherTool],
+		);
+		expect(status).toBe('cancelled');
+		expect(executed).toHaveLength(0);
+		expect(messages.find((m) => m.tool_call_id === 'c2')?.content).toContain('Not executed');
+		assertToolCallsPaired(messages);
+	});
+
+	it('中断后可续跑：追加 user 指令再次驱动，序列合法且正常完成', async () => {
+		const abortingTool: Tool = {
+			name: 'abort_tool',
+			description: 'aborts',
+			parameters: { type: 'object', properties: {} },
+			requiresConfirm: false,
+			async execute(_args, signal) {
+				signal?.throwIfAborted();
+				const err = new Error('aborted');
+				err.name = 'AbortError';
+				throw err;
+			},
+		};
+		const client = makeScriptClient([
+			{ content: '', toolCalls: [{ id: 'c1', function: { name: 'abort_tool', arguments: '{}' } }] },
+			{ content: '继续完成' },
+		]);
+		const first = await runSubagentLoop(subMessages('任务'), client, [abortingTool]);
+		expect(first.status).toBe('cancelled');
+		assertToolCallsPaired(first.messages);
+
+		const second = await runSubagentLoop(
+			[...first.messages, { role: 'user', content: '继续' }],
+			client,
+			[abortingTool],
+		);
+		expect(second.status).toBe('completed');
+		expect(second.messages.at(-1)).toMatchObject({ role: 'assistant', content: '继续完成' });
+		assertToolCallsPaired(second.messages);
 	});
 });
 
@@ -359,7 +458,10 @@ describe('SessionManager subagent 集成', () => {
 
 		// 子代理收到 abort → 返回 cancelled
 		await sleep(50);
-		expect(mgr.getSubagent('sub1')?.status).toBe('cancelled');
+		const sub = mgr.getSubagent('sub1');
+		expect(sub?.status).toBe('cancelled');
+		// cancelled 时面向 master 的返回值是状态消息（cancelled 非终态，之后可续跑）
+		expect(sub?.result).toBe(SUBAGENT_CANCELLED);
 	});
 
 	it('cancelSubagent("all") 取消全部运行中的子代理', async () => {
@@ -626,9 +728,12 @@ describe('SubagentSession 会话化', () => {
 		expect(session.messages[0].role).toBe('system');
 		expect(session.messages[1]).toEqual({ role: 'user', content: '任务' });
 		// 有 tool_calls 的轮：assistant（含 tool_calls）+ tool 消息被保留
+		// 最终 content 也作为最后一条 assistant 消息入队（取代旧 result 字段，供 lastContent 派生）
 		const assistantMsgs = session.messages.filter((m) => m.role === 'assistant');
-		expect(assistantMsgs.length).toBe(1);
+		expect(assistantMsgs).toHaveLength(2);
 		expect(assistantMsgs[0].tool_calls).toBeDefined();
+		expect(assistantMsgs[1]).toMatchObject({ content: '最终结果' });
+		expect(session.lastContent()).toBe('最终结果');
 		expect(session.messages.some((m) => m.role === 'tool' && m.content === 'fake result')).toBe(true);
 	});
 

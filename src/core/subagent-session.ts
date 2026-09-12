@@ -73,6 +73,20 @@ export class SubagentSession {
 		return this.status === 'running';
 	}
 
+	/**
+	 * 最后一次运行产出的文本（messages 中最后一条非空 assistant content）。
+	 * 取代旧的 `result` 字段：最终 content 现在由循环入队 messages，此处派生即可。
+	 */
+	lastContent(): string | undefined {
+		for (let i = this.messages.length - 1; i >= 0; i--) {
+			const m = this.messages[i];
+			if (m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length > 0) {
+				return m.content;
+			}
+		}
+		return undefined;
+	}
+
 	/** 驱动循环（首启/续跑共用）。同一时刻只允许一次驱动；运行中重复调用返回同一 promise。 */
 	drive(): Promise<string> {
 		if (this.promise && this.status === 'running') return this.promise;
@@ -83,7 +97,7 @@ export class SubagentSession {
 
 	private async _drive(): Promise<string> {
 		try {
-			const { result, messages } = await runSubagentLoop(
+			const { status, messages } = await runSubagentLoop(
 				this.messages,
 				this.provider,
 				this.tools,
@@ -95,16 +109,13 @@ export class SubagentSession {
 				this.chatDefaults,
 			);
 			this.messages = messages;
-			if (result === SUBAGENT_CANCELLED) {
-				this.status = 'cancelled';
-			} else if (result.startsWith('Error:')) {
-				this.status = 'failed';
-			} else {
-				this.status = 'completed';
-			}
-			this.result = result;
+			// 状态由循环显式返回（不再靠 result 字符串前缀猜测，后者会把模型的
+			// 正常回复 "Error: ..." 误判为失败）
+			this.status = status === 'cancelled' ? 'cancelled' : 'completed';
+			this.result = this.lastContent()
+				?? (status === 'cancelled' ? SUBAGENT_CANCELLED : '(subagent completed with no output)');
 			this.endMs = Date.now();
-			return result;
+			return this.result;
 		} catch (err) {
 			this.status = 'failed';
 			this.result = `Error: ${err instanceof Error ? err.message : String(err)}`;
