@@ -35,6 +35,8 @@ export { subagentCancelTool } from './subagent-cancel.js';
 export { subagentSendTool } from './subagent-send.js';
 export { subagentTraceTool, formatSubagentTrace } from './subagent-trace.js';
 export type { TraceableSubagent } from './subagent-trace.js';
+export { memoryReadTool } from './memory-read.js';
+export { memoryWriteTool } from './memory-write.js';
 export { tuiCaptureTool, setCaptureFn } from './tui-capture.js';
 export type { CaptureFn } from './tui-capture.js';
 export { tuiRenderPreviewTool } from './tui-render-preview.js';
@@ -66,6 +68,8 @@ import { listSubagentsTool } from './subagent-list.js';
 import { subagentCancelTool } from './subagent-cancel.js';
 import { subagentSendTool } from './subagent-send.js';
 import { subagentTraceTool } from './subagent-trace.js';
+import { memoryReadTool } from './memory-read.js';
+import { memoryWriteTool } from './memory-write.js';
 import { tuiCaptureTool } from './tui-capture.js';
 import { tuiRenderPreviewTool } from './tui-render-preview.js';
 import { tuiSessionStartTool } from './tui-session-start.js';
@@ -96,6 +100,8 @@ const ALL_TOOLS: Tool[] = [
 	subagentCancelTool,
 	subagentSendTool,
 	subagentTraceTool,
+	memoryReadTool,
+	memoryWriteTool,
 	tuiCaptureTool,
 	tuiRenderPreviewTool,
 ];
