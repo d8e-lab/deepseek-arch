@@ -1591,3 +1591,55 @@ updated: 2026-09-13T02:00:00Z
 | memory agent 模型 | **`deepseek-v4-flash`**（与召回同一模型；配置 `memory.agent_model = 'deepseek-v4-flash'`） | §7.5 / §9.1 定稿 |
 | 模糊条目入口 | **提供** `/memory candidates`（列出 `candidates.md` 内容；仅供查看，管理仍由 memory agent 独占） | §8.1 增补 |
 | 心跳机制 | **暂缓**：等 memory 主体完成后再设计（`chat --prompt` 仍按批次 2 先做，作为心跳载体） | §10 心跳部分推迟 |
+
+---
+
+## 14. 实现状态（2026-09-13 收尾）
+
+### 14.1 已实现并测试
+
+| 模块 | 文件 | 覆盖测试 |
+|:--|:--|:--|
+| 存储层 | `src/core/memory-store.ts` | `tests/core/memory-store.test.ts`（17） |
+| 召回选择（flash） | `src/core/memory-recall.ts` | `tests/core/memory-recall.test.ts`（10） |
+| 注入层（清单 + 变化提醒） | `src/core/memory-inject.ts` | `tests/core/memory-inject.test.ts`（9） |
+| 服务装配（两层路径/实例） | `src/core/memory-service.ts` | 经工具测试覆盖 |
+| 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts`（9） |
+| 后台归纳代理 | `src/core/memory-agent.ts` + `memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts`（11） |
+| 会话/TUI/CLI 接线 | `src/core/session.ts`、`src/presentation/tui-app.ts`、`src/cli/index.ts` | `tests/core/memory-session.test.ts`（6）+ `tests/cli/prompt.test.ts`（7） |
+| 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts`（+4） |
+
+关键实现选择（与前面章节的差异，以此为准）：
+
+1. **游标用轮次序号**（`state.json.lastExtractedTurnId` 存 `"1"`/`"2"`…）而非消息 uuid —— 更简单且跨进程稳定；
+   窗口 = `allTurns.slice(cursor)`，`nextCursor = String(allTurns.length)`。
+   归纳窗口的语义：**在本轮开始时**分析「已完成的历史轮次」，因此第一轮不产生归纳（没有 assistant 回复可判断）。
+2. **agent 工具集收得更紧**：只有 `memory_read` + `memory_write`（不给文件/搜索工具）→ 从根上避免它去"核实技术细节"，
+   也省掉白名单与路径限制逻辑。
+3. **写入配额在工具层强制**（包装后的 `memory_write` 超配额返回错误文本给模型，而非中断运行）→ agent 能自然收尾并给出 notes。
+4. **watchdog 中止时不推进游标**（窗口可重试）；`no_input` / `master_wrote` 时推进游标（否则会反复空转）。
+5. **变化提醒与子代理通知共用"落盘为一条 user 消息"的形态**，并**修掉了无工具轮丢弃注入块的 bug**
+   （`agentSaved` 为空或存在注入时 `saveTurn` 的 agentLoopMessages 传递方式）。
+6. **注入层不写 `MEMORY.md`**：`MEMORY.md` 由 `rebuildIndex()` 从条目文件派生（写盘后自动调用），
+   注入读的是 `manifestAll()` —— 两者用同一行渲染函数，保证字节一致。
+
+### 14.2 尚未实现（有意留到后续，按优先级）
+
+| 项 | 说明 | 依据 |
+|:--|:--|:--|
+| **心跳机制** | 用户明确暂缓；`chat --prompt`（非交互单轮，stdout/stderr/退出码契约已就绪）是它的载体 | R24 |
+| `remindAt` 到期提醒 | 字段已存、注入有 `remindAt` 透传位，但**到期主动提醒（`<memory-due>` / TUI 提示）未实现** | §6.4 / §7.1-K |
+| 衰减 / LRU 淘汰 | 置信度升级（merge 时取 max）已实现；**半衰期衰减、低频降权、低于阈值归档未实现** | §4.3/§4.4 |
+| 会话内"主动出示条目全文" | 目前发现靠清单 + `memory_read`（模型主动读）；设计里的"每轮判断该不该主动出示"未实现 | R20 第 2 处 |
+| `/memory show --audit` | 审计已落 `audit.jsonl`，但**没有查看命令** | §8.1 |
+| `pin/unpin` | 存储层无 `pinned` 字段 | §8.1 |
+| `logs/` 每日日志写入 | `appendLog()` 已实现但**无调用方**（归纳的审计已由 `agent_run.notes` 承担） | §3.1 |
+| compact 路径的集成测试 | `compactContext()` 已调用 `refreshMemoryPrompt()`，但缺"compact → 清单刷新"的端到端用例 | R7 |
+| 全局层的"已见/已出示"去重 | 目前 `seen`/`surfaced` 按 slug 全局去重（未按层区分）；跨层同 slug 时会互相影响 | — |
+
+### 14.3 运维提示
+
+- 记忆 runtime 目录 `{workspace}/.deepseek-arch/memory/` **不入版本控制**（`.gitignore` 已忽略）；
+  其中的手写笔记（无 frontmatter）会被 `scan()` 归入 legacy 并在 `MEMORY.md` 里以提示行出现，**永不进清单**。
+- 若需排查"为什么这条没注入"：看 `audit.jsonl`（`kind=inject` 记录 tokens/mode）与该条目的 `confidence`/`status`。
+- 关闭方式：`--no-memory`（进程级）、`/memory off`（写回 `memory.enabled`）、`memory.agent_on_turn_end=false`（只关归纳）。

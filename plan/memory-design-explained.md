@@ -236,24 +236,27 @@ agent 对项目层可以直接用普通 `read_file` 读全文（全局层要用�
 
 ## 10. 落地清单（要动的模块）
 
-| 模块 | 用途 |
-|:--|:--|
-| `src/core/memory-store.ts`（新） | 读/写主题 `.md`、生成/维护 `index.md`、置信度/衰减/LRU/去重/冲突、审计 |
-| `src/core/memory-inject.ts`（新） | 选择算法 + 注入块渲染 + 变化检测（含「读过的文件被更新」） |
-| `src/core/memory-agent.ts`（新） | 后台归纳代理（复用 `runSubagentLoop`，独立中断信号、watchdog、配额） |
-| `src/tools/memory-search.ts` / `memory-write.ts`（新） | 主 agent 的检索/写入工具（项目层 + 全局层） |
-| `src/core/session.ts` | ① 概览注入 system prompt 的构建点（会话创建 / resume 首轮）② `compactContext` 重建 system prompt + **重写 `<session>/system-prompt.txt`** ③ `/memory refresh` 的重建入口 ④ `afterTurnAsync` 触发（用户发消息后并发）⑤ `memory_updated` 事件 |
-| `src/tools/memory-read.ts` / `memory-write.ts`（新） | 主 agent 的读取/写入工具：`memory_read` 按路径读两层记忆（绕过沙箱，全局层唯一通道）、`memory_write` 参数即字段（`scope` 决定写哪个目录） |
-| `src/presentation/tui-app.ts` | `/memory show/forget/pin/on/off` + `/memory refresh`（重建 system prompt 与快照）、一行 dim 的「已更新记忆」提示 |
-| `src/core/config.ts` + `src/types/config.ts` | `[memory]`/`[heartbeat]` 五处同步（约束 C） |
-| `src/presentation/tui-app.ts` | `/memory*` 命令、一行 dim 的「已更新记忆」提示 |
-| `src/cli/index.ts` | `--no-memory` 等参数、`chat --prompt`（心跳载体） |
+> **实现状态（2026-09-13）：已全部落地并测试**（全量 569 测试通过）。逐模块状态与「未做项」见设计稿 §14。
+
+| 模块 | 用途 | 状态 |
+|:--|:--|:--|
+| `src/core/memory-store.ts`（新） | 读/写主题 `.md`、生成/维护 `MEMORY.md`、置信度分层、去重/取代、审计 | ✅ |
+| `src/core/memory-recall.ts`（新） | flash 召回选择（超预算裁剪），失败退化为按更新时间倒序 | ✅ |
+| `src/core/memory-inject.ts`（新） | 清单块渲染、变化提醒（新增/更新/移除）、已读追踪、已出示去重 | ✅ |
+| `src/core/memory-service.ts`（新） | 两层路径 + 实例装配（工具与 agent 共用） | ✅ |
+| `src/core/memory-agent.ts` + `memory-agent-prompt.ts`（新） | 后台归纳代理（游标增量、主/后台互斥、watchdog、配额、失败只写审计） | ✅ |
+| `src/tools/memory-read.ts` / `memory-write.ts`（新） | `memory_read` 读两层（绕过沙箱，全局层唯一通道）、`memory_write` 参数即字段（`scope` 选目录） | ✅ |
+| `src/core/session.ts` | 清单注入 system prompt（会话创建）、resume 播种、变化提醒落盘、归纳触发、`refreshMemoryPrompt`、compact 后重建 | ✅ |
+| `src/core/config.ts` + `src/types/config.ts` | `[memory]` 五处同步（约束 C） | ✅ |
+| `src/presentation/tui-app.ts` | `/memory [show\|candidates\|forget\|on\|off\|refresh]`、写入/归纳提示行 | ✅ |
+| `src/cli/index.ts` | 装配、`--no-memory`、headless「已更新记忆」走 stderr | ✅ |
+| 衰减/LRU 淘汰、`remindAt` 到期提醒、`/memory show --audit`、`pin/unpin`、`logs/` 写入、**心跳** | — | ⏳ 见设计稿 §14.2 |
 
 ---
 
 ## 11. 还需要你拍板的点
 
-（已全部确认，实施依据见设计稿 §13 R24）
+（已全部确认，实施依据见设计稿 §13 R24；**实现已完成**，状态见 §10 与设计稿 §14）
 
 | 项 | 决定 |
 |:--|:--|
