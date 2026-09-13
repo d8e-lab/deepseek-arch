@@ -1582,3 +1582,12 @@ updated: 2026-09-13T02:00:00Z
 ### R23 【用户决定】游标方案确认采纳
 
 - R14 的**游标 `lastExtractedTurnId` + 主/后台互斥**确认采纳（存 `state.json`，跨进程可恢复）。
+
+### R24 第三轮确认（2026-09-13，实施前定稿）
+
+| 项 | 决定 | 落点 |
+|:--|:--|:--|
+| 置信度阈值 | **取 2**（`memory.master_min_confidence = 2`）→ 否决/确认类条目 master 可见；`confidence=1` 模糊条目不可见 | R21 定稿 |
+| memory agent 模型 | **`deepseek-v4-flash`**（与召回同一模型；配置 `memory.agent_model = 'deepseek-v4-flash'`） | §7.5 / §9.1 定稿 |
+| 模糊条目入口 | **提供** `/memory candidates`（列出 `candidates.md` 内容；仅供查看，管理仍由 memory agent 独占） | §8.1 增补 |
+| 心跳机制 | **暂缓**：等 memory 主体完成后再设计（`chat --prompt` 仍按批次 2 先做，作为心跳载体） | §10 心跳部分推迟 |

@@ -253,16 +253,16 @@ agent 对项目层可以直接用普通 `read_file` 读全文（全局层要用�
 
 ## 11. 还需要你拍板的点
 
-1. **置信度阈值取 2 还是 3**（决定"你能看到哪些记忆"）：默认取 **2**（否决/确认类也可见）；若你希望**只看到明确说过的**，就取 3。
-2. **「读过的记忆被更新」的判定范围**：只算模型通过 `memory_read`/显式 `read_file` 读过的文件，还是凡注入进清单的条目被改动都提醒？
-3. **memory agent 自身用哪个模型**（与召回用的 flash 不同）：跟随 `defaults.model`（贵但准）还是也用 flash？
-4. **旧手写笔记**：`.deepseek-arch/memory/*.md`（现存 2 篇，无 frontmatter）——要不要在首次启用时做一次「迁移成记忆条目」的归纳，还是永远只作为 `legacy/` 参考资料？
-5. **`/memory refresh` 的范围**：只重建 system prompt + 重写快照，还是顺带强制跑一次归纳（立即把本次会话的偏好落库）？
-6. **模糊条目要不要给你看**：`candidates.md`（confidence=1）默认对 master 不可见；要不要给一个 `/memory candidates` 让你能查？
+（已全部确认，实施依据见设计稿 §13 R24）
 
-> 已定：compact 后重建 system prompt（含重写快照）→ **本期必做**；增量判断（游标 + 主/后台互斥）；
-> 去重简化（清单前置 + 三条等值规则）；文件/目录格式对齐 Claude Code；**召回用 `deepseek-v4-flash`**；
-> **无 `memory_search`**（改为清单整份注入 + `memory_read`）；**注入落盘**（历史字节稳定，UI 只渲染一行）。
+| 项 | 决定 |
+|:--|:--|
+| 置信度阈值 | **2**（你能看到「否决/确认」类；`confidence=1` 的模糊条目不可见） |
+| memory agent 用的模型 | **`deepseek-v4-flash`**（与召回同一模型） |
+| 模糊条目查看入口 | **提供** `/memory candidates`（只查看，管理仍归 memory agent） |
+| 心跳机制 | **暂缓**，等 memory 主体完成后再做 |
+| compact 后重建 system prompt | 本期必做（含重写快照） |
+| 增量判断 / 去重简化 / 文件格式 / 召回用 flash / 无 memory_search / 注入落盘 / 游标 | 已定（见设计稿 §13） |
 
 ---
 
