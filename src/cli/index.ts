@@ -16,7 +16,7 @@ import { buildDisplayPreset, isDisplayMode } from '../render/display-mode.js';
 import type { DisplayMode } from '../render/display-mode.js';
 import { ApiClient } from '../core/api.js';
 import { MockProvider } from '../core/mock-provider.js';
-import { SessionManager } from '../core/session.js';
+import { SessionManager, deriveSessionTitle } from '../core/session.js';
 import { Storage } from '../core/storage.js';
 import { TuiApp } from '../presentation/tui-app.js';
 import type { TuiConfig } from '../presentation/types.js';
@@ -28,6 +28,8 @@ import { loadSkills, buildSkillListing } from '../core/skill.js';
 import { configureBrowser } from '../tools/browser-state.js';
 import { startApiMonitor } from '../core/api-monitor.js';
 import { getApiRequestsDir } from '../core/workspace-paths.js';
+import { existsSync, statSync } from 'node:fs';
+import { turnAssistantContent } from '../utils/turn-utils.js';
 
 /** 获取主代理工具集（含 subagent_spawn/wait/list_subagents） */
 function loadMasterTools(debug = false, selfInteraction = false) {
@@ -128,6 +130,69 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	return sessionMgr;
 }
 
+/**
+ * 应用 `--workspace`：覆盖工作区根目录。
+ *
+ * 影响面：工具的工作目录、`{workspace}/.deepseek-arch/` runtime 目录（plan/memory/api-requests）、
+ * 以及所有走 `DEEPSEEK_ARCH_SESSION_CWD` 的路径解析。
+ * **必须在创建 SessionManager 之前调用**（其构造函数会把该值锁定为会话 cwd，见 core/session.ts）。
+ * @returns 目录不可用时返回 false（已打印错误）
+ */
+function applyWorkspace(workspace?: string): boolean {
+	if (!workspace) return true;
+	const resolved = resolve(workspace);
+	if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
+		console.error(`Error: --workspace is not an accessible directory: ${resolved}`);
+		return false;
+	}
+	process.env.DEEPSEEK_ARCH_SESSION_CWD = resolved;
+	return true;
+}
+
+/**
+ * 非交互单轮执行（`chat --prompt <content>`）：不进 TUI，跑完一轮就退出。
+ *
+ * 契约（供脚本/心跳复用）：
+ *  - stdout = 最终回复（一行结尾）；stderr = 进度（工具名）与错误；
+ *  - 退出码：0 = 成功；1 = 会话不存在 / 本轮失败；
+ *  - 工具确认：不注册 onConfirm → 需要确认的工具直接执行（即 yolo，见需求 D6）；
+ *  - 失败且未产生轮次时丢弃刚创建的空会话（避免自动化反复留空壳）。
+ */
+async function runPromptOnce(
+	sessionMgr: SessionManager,
+	prompt: string,
+	resumeId: string | null,
+): Promise<number> {
+	if (resumeId) {
+		const storage = new Storage(ConfigManager.getInstance().getSessionsDir());
+		let session = await storage.getSession(resumeId);
+		if (!session) session = await storage.getSessionByName(resumeId);
+		if (!session) {
+			console.error(`Session not found: ${resumeId}`);
+			return 1;
+		}
+		await sessionMgr.resumeSession(session.meta.id);
+	} else {
+		await sessionMgr.startNewSession(deriveSessionTitle(prompt));
+	}
+
+	const turn = await sessionMgr.sendMessageStream(prompt, (event) => {
+		if (event.type === 'tool_call_start' && event.toolName) {
+			process.stderr.write(`[tool] ${event.toolName}\n`);
+		} else if (event.type === 'error' && event.error) {
+			process.stderr.write(`[error] ${event.error}\n`);
+		}
+	});
+
+	if (!turn) {
+		if (!resumeId) await sessionMgr.discardEmptySession();
+		return 1;
+	}
+	const text = turnAssistantContent(turn);
+	process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+	return 0;
+}
+
 /** 解析展示模式：--short/--normal/--detail 互斥；缺省时回退 configMode（合法）→ 'normal' */
 function resolveDisplayMode(opts: { short?: boolean; normal?: boolean; detail?: boolean }, configMode?: string): DisplayMode {
 	const flags = (['short', 'normal', 'detail'] as const).filter((k) => opts[k]);
@@ -164,11 +229,18 @@ program
 	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
 	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (options: { resume?: string; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.option('--workspace <dir>', 'workspace root for tools & runtime files (default: current directory)')
+	.option('-p, --prompt <content>', 'run a single non-interactive turn and print the reply to stdout (yolo; combines with --resume)')
+	.action(async (options: { resume?: string; prompt?: string; workspace?: string; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			// 加载配置（幂等）——必须先于 cfg.get，否则 defaults/display 读不到
 			const cfg = ConfigManager.getInstance();
 			await cfg.load();
+
+			// 工作区覆盖必须在创建 SessionManager 之前（构造时锁定会话 cwd）
+			if (!applyWorkspace(options.workspace)) {
+				process.exit(1);
+			}
 
 			// YOLO：CLI 参数优先（--yolo true / --no-yolo false），回退到配置文件 defaults（重启保持）；默认开启
 			const yolo = options.yolo ?? cfg.get<boolean>('defaults.yolo') ?? true;
@@ -197,6 +269,11 @@ program
 			const tools = loadMasterTools(debug, options.selfInteraction);
 
 			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options.mock);
+
+			// 非交互单轮（headless）：不进 TUI，跑完一轮直接退出
+			if (options.prompt !== undefined) {
+				process.exit(await runPromptOnce(sessionMgr, options.prompt, options.resume ?? null));
+			}
 
 			if (options.resume) {
 				// 按 ID 或名称查找会话
@@ -314,9 +391,14 @@ program
 	.option('--self-interaction', 'enable TUI session (PTY) tools for self-interaction testing')
 	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.option('--workspace <dir>', 'workspace root for tools & runtime files (default: current directory)')
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; workspace?: string; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
+			// 工作区覆盖必须在创建 SessionManager 之前（构造时锁定会话 cwd）
+			if (options?.workspace && !applyWorkspace(options.workspace)) {
+				process.exit(1);
+			}
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
 			const storage = new Storage(sessionsDir);
 			const monitorUrl = options?.monitor ?? process.env.DEEPSEEK_API_MONITOR_URL;
