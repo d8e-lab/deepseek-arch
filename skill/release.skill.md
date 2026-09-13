@@ -1,6 +1,6 @@
 ---
 name: release
-description: 版本发布全流程（前置检查 → 版本号更新 → 构建打包 → AUR 更新 → Git Tag → GitHub Release → 发布后验证）
+description: 版本发布全流程（前置检查 → 版本号更新 → 构建打包 → **发布前校验** → [AUR 可选] → Git Tag → GitHub Release → 发布后验证）
 when_to_use: 用户要求发版、打 tag、发布 release、打包、生成 Release Notes 时
 aliases: [publish, release-version, tag]
 argument-hint: "[版本号，如 1.4.0]"
@@ -57,10 +57,37 @@ bash scripts/build-prebuilt-tarball.sh /tmp
 ```
 
 产物：
-- `deepseek-arch-X.Y.Z.tgz`（npm 包，~170 KB）
+- `deepseek-arch-X.Y.Z.tgz`（含 dist/ 与依赖，~16 MB）
 - `/tmp/deepseek-arch-X.Y.Z-prebuilt.tar.gz`（AUR 包，~19 MB）
 
 ---
+
+## 2.5 发布前校验（**必须先于第 4 步 tag**，不可跳过）
+
+> 教训（v2.0.0 实测）：曾在**打 tag 之后**才发现"Release notes 里的安装命令指向不存在的 npm 包"，
+> 结果只能 force-update 已推送的 tag 来让内容一致 —— 顺序做对就完全不会有这一步。
+
+```
+□ 分发渠道真实存在：`npm view <pkg> version`（预期 404 就别写 npm 安装命令！）
+   —— 本项目**未发布到 npm registry**，对外安装路径只有 GitHub Release tgz + AUR + 源码
+□ 包内容正确：`tar -tzf deepseek-arch-X.Y.Z.tgz | head`；确认 `package/dist/**` 与 `package.json` 版本号
+□ 包内 README 是最新且安装段可用（README.md 在 files 白名单里，会被打进包）
+□ 版本号三处一致：package.json / package-lock.json / PACKAGE_VERSION（`node dist/cli/index.js --version`）
+□ **实测安装路径可用**：`npm install -g --dry-run <release tgz URL>` 或 `--dry-run ./deepseek-arch-X.Y.Z.tgz`
+□ Release notes 里的每条命令都亲自跑过（含 URL 可达性 `curl -sIL -o /dev/null -w "%{http_code}"`）
+```
+
+**顺序铁律**：`构建 → 校验 → 修 → 提交 → tag → 推送 → 发布`。
+**已推送的 tag 是不可变的**：若发现已发布内容有误 ——
+- 只是 release notes 写错 → `gh release edit --notes-file` 修页面，**不要动 tag**；
+- 产物内容有误 → 修好发 **patch 版本**（X.Y.Z+1），而不是改写 tag；
+- 唯一例外：发布后极短时间内、确认**任何消费者都还没拿到**（未发 registry / 无人 fetch），
+  才可删除 release 与 tag 重发，且必须在汇报里显式说明力度的代价。
+
+---
+
+> **跳过条件**：用户明确说"不打 AUR 包"时，跳过本节与第 2 节的 AUR 预构建包；
+> 但必须在 Release Notes 的安装段写明 **AUR 未同步到该版本**（否则用户 `yay -S` 装到旧版会困惑）。
 
 ## 3. AUR 文件更新
 
