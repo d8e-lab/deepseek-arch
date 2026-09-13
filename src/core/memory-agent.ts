@@ -44,6 +44,9 @@ export interface MemoryAgentOptions {
 	minIntervalSec: number;
 	/** 会话 id（审计用） */
 	sessionId?: string;
+	/** 索引里"⏳待销毁(已 N/limit 活动日)"的分母（与 [memory] 配置保持一致） */
+	destroyAfterDays?: number;
+	candidateTtlDays?: number;
 }
 
 /** 一轮对话（已剥离工具轨迹与思维链） */
@@ -98,9 +101,11 @@ export async function renderMemoryIndex(
 	store: MemoryStore,
 	maxPerSection = 30,
 	taskText = '',
-	activeDay = 0,
+	limits: { activeDay?: number; destroyAfterDays?: number; candidateTtlDays?: number } = {},
 ): Promise<string> {
 	const out: string[] = [];
+	const destroyAfter = limits.destroyAfterDays ?? 30;
+	const candidateTtl = limits.candidateTtlDays ?? 365;
 	const all: (MemoryEntry & { scopeLabel: string })[] = [];
 	for (const scope of ['project', 'global'] as const) {
 		const label = scope === 'project' ? '项目层' : '全局层';
@@ -108,7 +113,7 @@ export async function renderMemoryIndex(
 		const candidates = await store.listCandidates(scope);
 		const state = await store.getState(scope);
 		const usage = state.usage ?? {};
-		const day = activeDay || state.activeDayCount || 0;
+		const day = limits.activeDay || state.activeDayCount || 0;
 		all.push(...active.map((e) => ({ ...e, scopeLabel: label })), ...candidates.map((e) => ({ ...e, scopeLabel: label })));
 		if (active.length === 0 && candidates.length === 0) continue;
 
@@ -134,7 +139,7 @@ export async function renderMemoryIndex(
 					const ts = [Date.parse(u.evictedAt), Date.parse(u.lastSeenAt ?? '')].filter((t) => !Number.isNaN(t));
 					elapsed = ts.length > 0 ? Math.max(0, Math.floor((Date.now() - Math.max(...ts)) / 86_400_000)) : 0;
 				}
-				bits.push(`⏳待销毁(已 ${elapsed} 活动日)`);
+				bits.push(`⏳待销毁(已 ${elapsed}/${u.evictReason === 'candidate' ? candidateTtl : destroyAfter} 活动日)`);
 			}
 			out.push(`${renderManifestLine(e).replace(/ \(confidence/, ` (${bits.join(', ')}, confidence`)}`);
 		}
@@ -238,7 +243,10 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 			const tools = this.buildTools(writes);
 			// 索引前置：正式条目 + 候选池 + 「可能与本轮相关」（关键词初筛），并附本轮对话文本供初筛
 			const taskText = [...turns.map((t) => `${t.user}\n${t.assistant}`), input.currentUser].join('\n');
-			const index = await renderMemoryIndex(store, 30, taskText).catch(() => '');
+			const index = await renderMemoryIndex(store, 30, taskText, {
+				destroyAfterDays: this.opts.destroyAfterDays,
+				candidateTtlDays: this.opts.candidateTtlDays,
+			}).catch(() => '');
 			const { messages } = await runSubagentLoop(
 				[
 					{ role: 'system', content: MEMORY_AGENT_PROMPT },

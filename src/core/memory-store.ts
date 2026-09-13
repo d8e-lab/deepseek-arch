@@ -195,6 +195,13 @@ export interface MemoryLruOptions {
 	windowSize?: number;
 	/** 换出后的销毁倒计时（**活动日**，默认 30）；期间被使用即复活 */
 	destroyAfterDays?: number;
+	/**
+	 * **出生候选**（从未进过可见清单）的销毁期限（活动日，默认 365）。
+	 *
+	 * 为什么与上面分开：候选池的成本≈0（不注入、不进 master 上下文），而"晋升"要求**重复出现**——
+	 * 若也给 30 活动日，"一年只提一次"的有效偏好会在两次出现之间被销毁 → 永远升不上来（churn）。
+	 */
+	candidateTtlDays?: number;
 	/** 销毁方式：archive = 移到 legacy/archive/（默认）；delete = 物理删除 */
 	destroyMode?: 'archive' | 'delete';
 }
@@ -727,6 +734,7 @@ export class MemoryStore {
 		const promoteUses = opts.promoteUses ?? 2;
 		const windowSize = opts.windowSize ?? 200;
 		const destroyAfter = opts.destroyAfterDays ?? 30;
+		const candidateTtl = opts.candidateTtlDays ?? 365;
 		const destroyMode = opts.destroyMode ?? 'archive';
 		const DAY = 86_400_000;
 		const nowMs = Date.now();
@@ -817,7 +825,9 @@ export class MemoryStore {
 					continue;
 				}
 				const inCountdown = countdownOf(u);
-				if (inCountdown > destroyAfter) {
+				// 期限按"离场原因"区分：出生候选给更长的 TTL（否则稀疏偏好永远攒不到晋升证据）
+				const limit = u.evictReason === 'candidate' ? candidateTtl : destroyAfter;
+				if (inCountdown > limit) {
 					result.destroyed.push(entry.slug);
 					plan.push({ slug: entry.slug, confidence: entry.confidence, status: entry.status, destroy: true });
 				}

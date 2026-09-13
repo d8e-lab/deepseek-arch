@@ -238,15 +238,55 @@ describe('memory LRU（活动日 + 窗口 + 销毁倒计时）', () => {
 		expect(await store.listEntries('project')).toHaveLength(1);
 	});
 
-	it('代理索引里标出倒计时进度（⏳待销毁），让它能决定救还是放手', async () => {
+	it('代理索引里标出倒计时进度（⏳已N/期限），分母按离场原因区分', async () => {
 		const evictedAt = new Date(Date.now() - 100 * DAY).toISOString();
-		await seed({
-			subject: 'a.one', confidence: 1, activeDay: 100, lastUsedDay: 1,
-			evictedAt, evictedDay: 70, evictReason: 'decay',
+		const decayed = await store.write('project', { subject: 'a.one', name: 'a.one', description: 'd', confidence: 1, body: 'b1' });
+		const candidate = await store.write('project', { subject: 'b.two', name: 'b.two', description: 'd', confidence: 1, body: 'b2' });
+		await store.setState('project', {
+			usage: {
+				[decayed.slug]: { uses: 0, lastUsedAt: evictedAt, lastUsedDay: 1, evictedAt, evictedDay: 70, evictReason: 'decay' },
+				[candidate.slug]: { uses: 0, lastUsedAt: evictedAt, lastUsedDay: 1, evictedAt, evictedDay: 70, evictReason: 'candidate' },
+			},
+			activeDayCount: 100,
+			lastActiveDate: new Date().toISOString().slice(0, 10),
 		});
 
 		const index = await renderMemoryIndex(store, 30, '');
-		expect(index).toContain('⏳待销毁(已 30 活动日)');
+
+		expect(index).toContain('⏳待销毁(已 30/30 活动日)');    // 曾进过清单：30 活动日缓刑
+		expect(index).toContain('⏳待销毁(已 30/365 活动日)');   // 出生候选：365 活动日 TTL
+	});
+
+	it('稀疏偏好（一年才提一次）不再被"晋升需重复 vs 存活仅 30 活动日"互相削弱', async () => {
+		const slug = await seed({ subject: 'sparse.pref', confidence: 1, activeDay: 95, lastUsedDay: 1, uses: 1 });
+		const now = new Date().toISOString();
+
+		// 活动日 95：出生候选闲置 → 开始倒计时
+		const r1 = await store.reconcile('project');
+		expect(r1.evicted).toEqual([{ slug, reason: 'candidate' }]);
+		const evictedDay = (await store.getState('project')).usage![slug].evictedDay!;
+
+		// 活动日 130（> 30 但 < 365）：**不该**被销毁 —— 否则"下一次出现"时它已经不在了
+		await store.setState('project', {
+			activeDayCount: 130, lastActiveDate: now.slice(0, 10),
+		});
+		expect((await store.reconcile('project')).destroyed).toEqual([]);
+		expect(await store.readEntry('project', slug)).not.toBeNull();
+
+		// 活动日 200：用户又提到它 → 写入重申 → 复活回到清单
+		await store.write('project', { subject: 'sparse.pref', name: 'sparse.pref', description: 'd', confidence: 2, body: 'body-sparse.pref', slug });
+		await store.setState('project', { activeDayCount: 200, lastActiveDate: now.slice(0, 10) });
+		const r2 = await store.reconcile('project');
+		expect(r2.revived).toEqual([slug]);
+		expect(await store.listEntries('project')).toHaveLength(1);
+
+		// 对照：曾进过清单（window/decay）的条目仍是 30 活动日缓刑 → 超期销毁
+		const old = await seed({
+			subject: 'was.visible', confidence: 1, activeDay: 100, lastUsedDay: 1,
+			evictedAt: new Date(Date.now() - 400 * DAY).toISOString(), evictedDay: evictedDay + 5, evictReason: 'window',
+		});
+		await store.setState('project', { activeDayCount: 100 + 5 + 31, lastActiveDate: now.slice(0, 10) });
+		expect((await store.reconcile('project')).destroyed).toEqual([old]);
 	});
 
 	it('出生即候选的条目长期无人问津 → 进入倒计时（候选池不是无限期坟场）', async () => {

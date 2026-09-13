@@ -47,6 +47,12 @@
 - 本文件只登记**已明确暂缓**的事项；不要在此堆想法，想法放 `plan/`。
 - 任何一项开工前，先在 `plan/memory-heartbeat-design.md` 对应章节写清最终方案，再改代码（避免"文档与实现漂移"重演）。
 
+**R29 审计（2026-09-13）：「conf 1」与「待销毁」共用一个状态的一致性审查** —— 8 条结论
+（2 处修正 + 6 处刻意设计）见设计稿 **§4.4**；修正项是"出生候选 TTL 与晋升阈值互相削弱"
+（新增 `lru_candidate_ttl_days`，默认 365 活动日）。**遗留可选项**：`/memory candidates` 已分组，
+但 `listCandidates()` 仍是"两类混在一起"的单一视图 —— 若以后需要程序化区分（如容量统计、GC 报表），
+建议在 store 层加 `listEvicted()`/`listPending()` 两个方法（当前只有渲染层在意，故未加）。
+
 **另一处已修的静默 bug（2026-09-13，R28）**：`--no-memory` 一直**没生效** ——
 commander 对 `--no-*` 生成的是 `options.memory = false`，而代码读的是 `options.noMemory`（恒 undefined）；
 此前没被发现是因为"没有记忆条目时不会有任何 IO"，测试只是**碰巧**通过。

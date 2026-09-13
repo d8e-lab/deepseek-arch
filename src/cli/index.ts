@@ -127,6 +127,7 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 		lruPromoteUses: cfg.get<number>('memory.lru_promote_uses') ?? 2,
 		lruWindowSize: cfg.get<number>('memory.lru_window_size') ?? 200,
 		lruDestroyAfterDays: cfg.get<number>('memory.lru_destroy_after_days') ?? 30,
+		lruCandidateTtlDays: cfg.get<number>('memory.lru_candidate_ttl_days') ?? 365,
 		lruDestroyMode: (cfg.get<string>('memory.lru_destroy_mode') === 'delete' ? 'delete' : 'archive'),
 		});
 	}

@@ -2,7 +2,7 @@
 
 > **版本说明**
 > - **v2（2026-09-13）**：与实现一致，是唯一的实施依据。§13 列出 v1 已废弃的方案及理由。
-> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；五轮评审（R1–R28）后改为
+> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；五轮评审（R1–R29）后改为
 >   「每主题 Markdown + 清单注入 system prompt + 落盘式变化提醒 + flash 召回」，
 >   并删除了 reviewer（censor agent）；R25–R28 补齐了「过时记忆如何淘汰」「候选池如何升级」「活动日时钟 + 窗口 + 销毁倒计时」（§4、§4.1、§4.2）。
 >
@@ -392,6 +392,27 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 
 ---
 
+### 4.4 「confidence 1」与「待销毁」的重叠审计（R29）
+
+两个机制**共用同一个状态**（`status='candidate'` + `confidence=1`），必须逐条对齐语义。
+一次专门审计的结论（8 条，2 处修正 + 6 处刻意设计）：
+
+| # | 发现 | 结论 / 处理 |
+|:--|:--|:--|
+| 1 | **语义重载**：conf 1 同时表示"待晋升"与"待销毁" | 判据是 `usage.evictedAt` 是否存在（数据层无第三种状态）；渲染层已区分（索引标 `⏳`，`/memory candidates` 分组为「待观察 / ⏳待销毁」） |
+| 2 | **晋升阈值与存活期互相削弱**（真冲突，已修） | 晋升要 `uses ≥ lru_promote_uses`(2)（＝"重复出现"），而出生候选原本只有 `decay(90)+destroy(30)` 活动日寿命 → "一年才提一次"的有效偏好**在第二次出现前就被销毁**，历史计数随之丢失，下次只能重建（churn，且**永远升不进清单**）。修法：**销毁期限按离场原因区分** —— 出生候选 `lru_candidate_ttl_days`（默认 **365** 活动日），曾进过清单的仍是 `lru_destroy_after_days`（默认 30）。依据：候选池成本≈0（不注入、不进上下文），没必要急着清 |
+| 3 | **复活阈值 ≠ 晋升阈值**（刻意） | 离场条目**1 次真实使用即复活**（撤销判决：判决依据本就是"长期无人使用"）；出生候选要 **2 次**才算晋升（需要"重复出现"来排除偶然）。两者都使 conf 1 → 2 进清单，但审计可区分（`revived` vs `promoted`） |
+| 4 | 复活**只回到门槛**（2），不回原等级（3） | 刻意：等级反映证据强度。复活 = 回到"可用"；再往上要靠继续被使用（promote 仍生效）→ 避免"偶然读一次就恢复最高等级" |
+| 5 | 倒计时中**不会走 promote 分支**（`evicted` 判定在前） | 刻意：离场条目只有两条出路（复活 / 销毁）。副作用：它即使 `uses` 达标也不会 promote；但因为"1 次使用即复活"，不会锁死。`uses` 在复活时**不清零** → 复活后仍可继续升到 3 |
+| 6 | `master_min_confidence = 1` 会让两套语义失效 | 边界说明：conf 1 直接变 `active` → 可见清单里就有它、`listCandidates` 为空（代理索引的候选池段消失、倒计时队列暴露给 master）。**建议保持默认 2** |
+| 7 | 审计里同一 slug 可能同时出现在 `demoted` 与 `evicted` | 刻意（两个不同事实：等级下降 / 离开可见清单，由 `reason=decay` 关联）。不是重复计数 |
+| 8 | `superseded`（取代/遗忘的墓碑）**不会被销毁**；`forget` 与销毁的终态不同 | 刻意：reconcile 只处理 `status !== 'superseded'` → 演化记录永久保留；`forget` = 墓碑（文件留在层目录），销毁 = 归档到 `legacy/archive/` 或删除。两者并存不冲突 |
+
+> 一句话总结：**"待晋升"是入口（staging），"待销毁"是出口（eviction queue）**，
+> 共用 conf 1 只是"master 不可见"这一个共同点；用 `evictedAt` 区分意图、用 `reason` 区分期限与理由。
+
+---
+
 ## 5. 去重与冲突
 
 **核心：不写相似度算法。** 重复检测交给模型，代码只做确定性动作。
@@ -578,7 +599,8 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | `lru_decay_active_days` | `90` | 闲置超过该**活动日**数 → 置信度降一级（活动日 = 程序被使用的天数，缺席不老化） |
 | `lru_promote_uses` | `2` | 累计使用次数达标且最近有使用 → 升一级 |
 | `lru_window_size` | `200` | memory window：master 可见条目上限，超出按 LRU 换出最久未用者 |
-| `lru_destroy_after_days` | `30` | 换出后的销毁倒计时（**活动日**）；期间被再次使用即复活 |
+| `lru_destroy_after_days` | `30` | 换出后的销毁倒计时（**活动日**）；期间被再次使用即复活（曾进过清单的条目） |
+| `lru_candidate_ttl_days` | `365` | **出生候选**（从未进过清单）的销毁期限（活动日）—— 候选池成本≈0，给"低频偏好"留出被再次印证的机会 |
 | `lru_destroy_mode` | `"archive"` | 销毁方式：`archive`（移入 `legacy/archive/`）或 `delete`（物理删除） |
 
 ### 10.2 必须同步的 5 处（约束 C）
@@ -623,7 +645,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 ## 12. 实现状态与测试映射
 
-截至 2026-09-13：**全量 614 测试通过**（54 个测试文件），`tsc` 无错。
+截至 2026-09-13：**全量 615 测试通过**（54 个测试文件），`tsc` 无错。
 
 | 模块 | 文件 | 测试 | 用例数 |
 |:--|:--|:--|:--|
@@ -633,7 +655,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 | 服务装配 | `src/core/memory-service.ts` | 经工具测试覆盖 | — |
 | 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts` | 11 |
 | 淘汰工具 | `src/tools/memory-forget.ts` | `tests/tools/memory-forget.test.ts` | 6 |
-| LRU 维护（窗口/倒计时/活动日/触达语义）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`recordTouch`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 20 |
+| LRU 维护（窗口/倒计时/活动日/触达语义/候选 TTL）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`recordTouch`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 21 |
 | 归纳代理（索引前置 + 相关性初筛） | `src/core/memory-agent.ts`（`renderMemoryIndex`/`pickRelated`）、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 17 |
 | 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts` | +4 |
 | CLI（含 `--no-memory`、`--prompt`） | `src/cli/index.ts` | `tests/cli/prompt.test.ts` | 7 |
