@@ -236,6 +236,25 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 而"离散档位（3→2→1→候选池→superseded）+ 由归纳代理在读到相关对话时决定"既可控又可审计（每次动作都落 `audit.jsonl`）。
 清单预算 ≤800 tokens 是安全阀：即使滞留条目存在，它们也只能挤占预算、不会撑爆上下文。
 
+**什么时候会写出 `confidence: 1`（降级 vs 出生低）**
+
+代码层只有一条规则：**显式传入 `confidence` 才改它**（`pickFields`），且 `status` 一律由**最终 confidence** 派生（`deriveStatus`）。
+
+| 路径 | 场景 | 结果 |
+|:--|:--|:--|
+| 出生即 1（非降级） | 归纳代理按信号 F（重复模式推断）新增条目 | 新条目直接进候选池 |
+| **显式软淘汰**（唯一"降级"入口） | `memory_write {slug, confidence: 1}` —— 归纳代理按 §4 规则判断"已无意义"；master 自己也能这么写 | 原条目退出清单 → `candidates.md`，**可逆**（再写回 2/3 即恢复） |
+| 显式降级到 2 | 同上但传 2（仍 ≥ 阈值） | 仍在清单，等级 3 → 2 |
+| 什么都不传 | 更新条目（给 slug）而未给 confidence | **原值保留**，状态不变 → 不会无意降级 |
+| 同义重复（merge 分支） | 同 subject + 正文归一化后相等（无论传多低） | **永不降级**：confidence 取 `max`，状态按最终 confidence 重算（见下） |
+| 取代 / 遗忘 | supersede / forget | confidence 不改，改的是 `status`（`superseded` 是终态，后续 update 不会复活） |
+
+> **实现注意（本次修复的一个真 bug）**：`status` 原先由 `pickFields` 按传入 confidence 直接写成 `candidate`，
+> 而 merge 分支只在之后把 confidence 抬回 `max`，于是出现 `confidence=3 + status=candidate` 的自相矛盾状态 ——
+> **一条正式条目会因为"低置信的同义重复"而静默退出注入清单**（已由 `deriveStatus` 统一派生修复，
+> 并加了单测：merge 不降级、显式降级可逆、superseded 终态、阈值可配 `masterMinConfidence=3`）。
+> 提示词与工具描述同步加了"更新已有条目时沿用原 confidence，别在改写措辞时降级"。
+
 ---
 
 ## 5. 去重与冲突

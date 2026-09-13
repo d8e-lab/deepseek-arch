@@ -75,7 +75,9 @@ export const memoryWriteTool: Tool = {
 		'never write technical facts, task details or temporary context that can be re-derived from the repo. ' +
 		'Reuse the same `subject` for the same topic — the store will then update or supersede the existing entry ' +
 		'instead of creating a duplicate. Use confidence 3 for explicit user statements, 2 for corrections/confirmations, ' +
-		'1 for uncertain inferences. Read the memory index injected as <memory_listing> first if you are unsure ' +
+		'1 for uncertain inferences; when you pass a `slug` to update an existing entry, keep its current confidence ' +
+		'(a lower value really downgrades it — 1 moves it out of the visible index). ' +
+		'Read the memory index injected as <memory_listing> first if you are unsure ' +
 		'whether the topic is already remembered.',
 	parameters: {
 		type: 'object',

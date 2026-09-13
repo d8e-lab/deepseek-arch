@@ -120,6 +120,81 @@ describe('memory-store', () => {
 		expect(actives.map((e) => e.slug)).toEqual([r.slug]);
 	});
 
+	it('write(update)：显式传低置信 → 真降级（软淘汰），退出清单进候选池', async () => {
+		const w = await store.write('project', { subject: 'reply.format', name: 'A', description: 'd', confidence: 3, body: '要精简' });
+		expect(await store.listEntries('project')).toHaveLength(1);
+
+		// 归纳代理判定"已无意义" → 同 slug + confidence 1
+		const r = await store.write('project', {
+			subject: 'reply.format', confidence: 1, body: '要精简', slug: w.slug,
+		});
+
+		expect(r.action).toBe('update');
+		const entry = (await store.readEntry('project', w.slug))!;
+		expect(entry.confidence).toBe(1);
+		expect(entry.status).toBe('candidate');
+		expect(await store.listEntries('project')).toHaveLength(0);
+		expect((await store.listCandidates('project')).map((e) => e.slug)).toEqual([w.slug]);
+		// 索引同步（索引由调用方 rebuildIndex 派生）：移出 MEMORY.md，进入 candidates.md
+		await store.rebuildIndex('project');
+		expect(await readFile(join(projectDir, 'MEMORY.md'), 'utf-8')).not.toContain('reply-format.md');
+		expect(await readFile(join(projectDir, 'candidates.md'), 'utf-8')).toContain('reply-format.md');
+
+		// 可逆：再写回 3 即恢复
+		await store.write('project', { subject: 'reply.format', confidence: 3, body: '要精简', slug: w.slug });
+		expect(await store.listEntries('project')).toHaveLength(1);
+	});
+
+	it('write(update)：降级到 2（仍可见）与不传 confidence（保留原值）', async () => {
+		const w = await store.write('project', { subject: 'a.b', name: 'A', description: 'd', confidence: 3, body: 'x' });
+
+		// 传更低但仍达阈值 → 留在清单，置信度降为 2
+		await store.write('project', { subject: 'a.b', name: 'A', description: 'd', confidence: 2, body: 'x', slug: w.slug });
+		expect((await store.readEntry('project', w.slug))!.confidence).toBe(2);
+		expect(await store.listEntries('project')).toHaveLength(1);
+
+		// 不传 confidence → 原值保留（不会被默认成 2 或 1）
+		await store.write('project', { subject: 'a.b', name: 'A', description: 'd2', body: 'x', slug: w.slug });
+		const entry = (await store.readEntry('project', w.slug))!;
+		expect(entry.confidence).toBe(2);
+		expect(entry.description).toBe('d2'); // 其它字段照常更新
+	});
+
+	it('write(merge)：低置信的同义重复不得把正式条目踢出清单（取 max，不降级）', async () => {
+		const w = await store.write('project', { subject: 'reply.format', name: 'A', description: 'd', confidence: 3, body: '不要铺垫' });
+
+		// 归纳代理重复观察到同一偏好、按信号 F 报 1（正文归一化后与已有条目相等 → 命中 merge）
+		const r = await store.write('project', {
+			subject: 'reply.format', name: 'A', description: 'd', confidence: 1, body: '不要 铺垫。',
+		});
+
+		expect(r.action).toBe('merge');
+		const entry = (await store.readEntry('project', w.slug))!;
+		expect(entry.confidence).toBe(3);        // 取 max
+		expect(entry.status).toBe('active');     // 关键：状态与最终 confidence 一致
+		expect(await store.listEntries('project')).toHaveLength(1);
+	});
+
+	it('write：superseded 是终态，后续 update/merge 不会把它复活', async () => {
+		const old = await store.write('project', { subject: 'x.y', name: '旧', description: 'd', confidence: 3, body: '旧说法' });
+		await store.write('project', { subject: 'x.y', name: '新', description: 'd', confidence: 3, body: '新说法' });
+		expect((await store.readEntry('project', old.slug))!.status).toBe('superseded');
+
+		// 再次以旧 slug 更新（哪怕给高置信）
+		await store.write('project', { subject: 'x.y', name: '旧', description: 'd', confidence: 3, body: '旧说法', slug: old.slug });
+		expect((await store.readEntry('project', old.slug))!.status).toBe('superseded');
+		expect(await store.listEntries('project')).toHaveLength(1);
+	});
+
+	it('write：阈值可配（masterMinConfidence=3 时 confidence 2 视为候选）', async () => {
+		const strict = new MemoryStore({ projectDir: join(root, 'strict-p'), globalDir: join(root, 'strict-g'), masterMinConfidence: 3 });
+		const w = await strict.write('project', { subject: 'a.b', name: 'A', description: 'd', confidence: 2, body: 'x' });
+
+		expect((await strict.readEntry('project', w.slug))!.status).toBe('candidate');
+		expect(await strict.listEntries('project')).toHaveLength(0);
+		expect((await strict.listCandidates('project')).map((e) => e.slug)).toEqual([w.slug]);
+	});
+
 	it('置信度分层：confidence=1 只进候选，不进清单/正式条目', async () => {
 		await store.write('project', { subject: 'maybe.thing', name: '模糊', description: 'd', confidence: 1, body: 'x' });
 		await store.write('project', { subject: 'sure.thing', name: '明确', description: 'd', confidence: 3, body: 'y' });

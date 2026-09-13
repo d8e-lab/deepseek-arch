@@ -335,6 +335,8 @@ export class MemoryStore {
 		// 1. 指定 slug → 更新
 		if (target) {
 			const updated = mergeEntryFields(target, input, now);
+			// 显式传低置信 → 真正降级（软淘汰）；未传则 confidence 原样保留（状态因此不变）
+			updated.status = deriveStatus(target.status, updated.confidence, this.masterMinConfidence);
 			await this.writeEntry(dir, updated);
 			await this.audit({ kind: 'write', at: now, action: 'update', slug: updated.slug, ...auditBase });
 			return { action: 'update', slug: updated.slug };
@@ -344,7 +346,9 @@ export class MemoryStore {
 		for (const existing of sameSubject) {
 			if (normalizeText(existing.body) === normalizeText(input.body)) {
 				const merged = mergeEntryFields(existing, input, now);
+				// merge **不降级**：同义重复（哪怕是低置信推断）不得把正式条目踢出清单 → 取 max
 				merged.confidence = Math.max(existing.confidence, input.confidence ?? existing.confidence);
+				merged.status = deriveStatus(existing.status, merged.confidence, this.masterMinConfidence);
 				await this.writeEntry(dir, merged);
 				await this.audit({ kind: 'merge', at: now, slug: merged.slug, ...auditBase });
 				return { action: 'merge', slug: merged.slug };
@@ -367,6 +371,7 @@ export class MemoryStore {
 				...blankEntry(scope, slug, now, dir),
 				...pickFields(input, now),
 			};
+			created.status = deriveStatus('active', created.confidence, this.masterMinConfidence);
 			await this.writeEntry(dir, created);
 			for (const old of supersedeTargets) {
 				const tomb = { ...old, status: 'superseded' as MemoryStatus, supersededBy: slug, updated: now };
@@ -381,6 +386,7 @@ export class MemoryStore {
 		// 3. 新增
 		const slug = await this.uniqueSlug(scope, slugify(input.subject || input.name || 'memory'));
 		const entry: MemoryEntry = { ...blankEntry(scope, slug, now, dir), ...pickFields(input, now) };
+		entry.status = deriveStatus('active', entry.confidence, this.masterMinConfidence);
 		await this.writeEntry(dir, entry);
 		await this.audit({ kind: 'write', at: now, action: 'add', slug, ...auditBase });
 		return { action: 'add', slug };
@@ -675,9 +681,7 @@ function pickFields(input: MemoryWriteInput, now: string): Partial<MemoryEntry> 
 	if (input.paths !== undefined) out.paths = input.paths;
 	if (input.remindAt !== undefined) out.remindAt = input.remindAt;
 	if (input.confidence !== undefined) {
-		const confidence = clampConfidence(input.confidence);
-		out.confidence = confidence;
-		out.status = confidence < 2 ? 'candidate' : 'active';
+		out.confidence = clampConfidence(input.confidence);
 	}
 	return out;
 }
@@ -690,9 +694,23 @@ function mergeEntryFields(entry: MemoryEntry, input: MemoryWriteInput, now: stri
 		// created 与 slug 永不改写；slug 由文件名决定
 		slug: entry.slug,
 		created: entry.created,
-		// 更新时不降级状态：superseded 只能通过新条目改写
-		status: entry.status === 'superseded' ? entry.status : (patch.status ?? entry.status),
+		// status 不在这里决定：由 MemoryStore.write() 依**最终 confidence** 统一派生
+		// （否则"低置信的同义重复"会把正式条目挤进候选池，见 write() 的 deriveStatus）
+		status: entry.status,
 	};
+}
+
+/**
+ * 状态派生（`status` 是 confidence 的投影，唯一例外见下）。
+ * - `superseded` 是**终态**：只能由新条目改写，不会被后续 update/merge 复原；
+ * - 其余按**最终 confidence** 对阈值取 `active` / `candidate`。
+ *
+ * 关键：必须在算出最终 confidence **之后**调用（merge 取 max、update 可能显式降级），
+ * 否则会出现 `status=candidate` + `confidence=3` 这种自相矛盾、且条目静默消失于注入清单的状态。
+ */
+function deriveStatus(previous: MemoryStatus, confidence: number, minConfidence: number): MemoryStatus {
+	if (previous === 'superseded') return 'superseded';
+	return confidence >= minConfidence ? 'active' : 'candidate';
 }
 
 function clampConfidence(v?: number): number {
