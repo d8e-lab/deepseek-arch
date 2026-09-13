@@ -94,14 +94,21 @@ export interface MemoryAgentResult {
  * @param maxPerSection 每段最多列多少条（防超长；超出标注省略数）
  * @param taskText 本轮对话文本（用于相关性初筛；省略则不生成"可能相关"段）
  */
-export async function renderMemoryIndex(store: MemoryStore, maxPerSection = 30, taskText = ''): Promise<string> {
+export async function renderMemoryIndex(
+	store: MemoryStore,
+	maxPerSection = 30,
+	taskText = '',
+	activeDay = 0,
+): Promise<string> {
 	const out: string[] = [];
 	const all: (MemoryEntry & { scopeLabel: string })[] = [];
 	for (const scope of ['project', 'global'] as const) {
 		const label = scope === 'project' ? '项目层' : '全局层';
 		const active = await store.listEntries(scope);
 		const candidates = await store.listCandidates(scope);
-		const usage = (await store.getState(scope)).usage ?? {};
+		const state = await store.getState(scope);
+		const usage = state.usage ?? {};
+		const day = activeDay || state.activeDayCount || 0;
 		all.push(...active.map((e) => ({ ...e, scopeLabel: label })), ...candidates.map((e) => ({ ...e, scopeLabel: label })));
 		if (active.length === 0 && candidates.length === 0) continue;
 
@@ -114,8 +121,22 @@ export async function renderMemoryIndex(store: MemoryStore, maxPerSection = 30, 
 		out.push(`### ${label} — 候选池（confidence 1，**master 看不到**，需要你维护：被再次印证就升级，确认无价值才淘汰）`);
 		if (candidates.length === 0) out.push('(无)');
 		for (const e of candidates.slice(0, maxPerSection)) {
-			const uses = usage[e.slug]?.uses ?? 0;
-			out.push(`${renderManifestLine(e).replace(/ \(confidence/, ` (共被使用 ${uses} 次, confidence`)}`);
+			const u = usage[e.slug];
+			const bits = [`共被使用 ${u?.uses ?? 0} 次`];
+			if (u?.evictedAt !== undefined) {
+				// 让代理看到"离销毁还有多久"：它才能决定 救（升到 2）/ 放手（什么都不做）/ 立即淘汰
+				const start = Math.max(u.evictedDay ?? 0, u.lastSeenDay ?? 0);
+				let elapsed: number;
+				if (start > 0 && day > 0) {
+					elapsed = Math.max(0, day - start);
+				} else {
+					// 老数据（无活动日记录）回退日历天
+					const ts = [Date.parse(u.evictedAt), Date.parse(u.lastSeenAt ?? '')].filter((t) => !Number.isNaN(t));
+					elapsed = ts.length > 0 ? Math.max(0, Math.floor((Date.now() - Math.max(...ts)) / 86_400_000)) : 0;
+				}
+				bits.push(`⏳待销毁(已 ${elapsed} 活动日)`);
+			}
+			out.push(`${renderManifestLine(e).replace(/ \(confidence/, ` (${bits.join(', ')}, confidence`)}`);
 		}
 		if (candidates.length > maxPerSection) out.push(`- …(${candidates.length - maxPerSection} more)`);
 		out.push('');
@@ -314,7 +335,8 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 		let forgets = 0;
 		const readTool: Tool = {
 			...memoryReadTool,
-			execute: (params) => readMemoryEntry(store, String(params.path ?? '')),
+			// 代理的读是「看到」而非「使用」：只推迟销毁倒计时，不参与升级/复活判定
+			execute: (params) => readMemoryEntry(store, String(params.path ?? ''), 'touch'),
 		};
 		const writeTool: Tool = {
 			...memoryWriteTool,

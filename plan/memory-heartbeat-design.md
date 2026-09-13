@@ -317,6 +317,35 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 - **可逆**：倒计时内被读到/被重申即复活；升级路径让候选池能回到清单（§4.2）。
 - 换出顺序（LRU 序）：`lastUsedAt` 升序 → `uses` 升序 → slug（确定性，可测）。
 
+**谁能救它？触达语义（三种信号，效果不同）**
+
+| 信号 | 谁触发 | 作用 | 为什么这样定 |
+|:--|:--|:--|:--|
+| **使用** `recordUse` | master 真读全文（`memory_read` 工具）／任何写入与重申 | `uses+1`、刷新 `lastUsedDay` → **推动升级、刷新老化、在倒计时中即复活** | "确实被用上"的最强证据 |
+| **看到** `recordTouch` | **归纳代理**为查重而 `memory_read` | 只刷新 `lastSeenAt/lastSeenDay` → **推迟销毁倒计时**（起点取 `max(evictedDay, lastSeenDay)`），不增 uses、**不复活** | "这个话题又出现了"是弱信号：值得缓刑，但不值得直接拉回清单 |
+| **写入升级** `write(conf ≥ 阈值)` | 归纳代理按 §4.2 职责升级 | 回到可见清单；下次结算走复活分支 | 代理是唯一能主动救候选条目的角色（master 看不见它） |
+
+由此回答"代理还会不会更新/救活待销毁的条目"：
+- **会**：候选池（含倒计时中的）就列在它的输入索引里，且带 `⏳待销毁(已 N 活动日)`；
+  确认仍有效 → 带 slug 写 `confidence: 2` → **用后即复活**（`usedSince` 判定优先于销毁，不会先被杀掉）；
+- **只读不写** → 只推迟、不复活（到期仍销毁）；
+- **什么都不做** → 到期销毁（默认归档到 `legacy/archive/`）；确认无用可 `memory_forget` 立即淘汰。
+
+**触发时机与可见性**
+
+| 时机 | 说明 |
+|:--|:--|
+| **会话创建时**（`startNewSession`） | 在**构建清单之前**同步跑一次（两层）→ 注入的清单就是结算后的结果；异常只记审计（不打扰） |
+| `/memory gc [--dry-run]` | 手动触发；`--dry-run` 只返回计划、零副作用（预览会降/换出/销毁哪些条） |
+| 审计 | 每次结算落一条 `{kind:'lru', activeDay, promoted[], demoted[], evicted[], revived[], destroyed[]}` |
+| 透明度 | `/memory show` 每行显示 `uses=N last-used=Nd ago pinned`，另 `/memory status` 显示参数 |
+
+**用户控制面**：`lru_enabled`（总开关）、阈值可配、`pin` 永久免疫、`/memory forget` 立即遗忘、
+`lru_destroy_mode = "delete"` 才物理删除（默认归档）。
+**明确不做**：半衰期/连续数值衰减（可见性随日期漂移无法解释）、按打分公式排序（召回已交给 flash）。
+
+---
+
 ### 4.2 候选池（conf 1）怎么升上来（R27：三条通道，缺一不可）
 
 **问题**：候选条目 `confidence = 1` 时 master 看不到、不会被注入、也永远不会去读它 ——
@@ -337,18 +366,29 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 - `pinned` 的候选条目同样免疫 LRU，但**通道 1 仍可把它升到 2**（pin 只免疫自动结算，不禁止显式升级）。
 - 候选条目长期无人问津时由 §4.1 的**销毁倒计时**接管（reason=`candidate`），不会无限期占据候选池。
 
-**触发时机与可见性**
+### 4.3 换出/销毁到底由什么控制（现状：recency + 容量，不是"滑动窗口频率"）
 
-| 时机 | 说明 |
-|:--|:--|
-| **会话创建时**（`startNewSession`） | 在**构建清单之前**同步跑一次（两层）→ 注入的清单就是结算后的结果；异常只记审计（不打扰） |
-| `/memory gc [--dry-run]` | 手动触发；`--dry-run` 只返回计划、零副作用（预览会降/换出/销毁哪些条） |
-| 审计 | 每次结算落一条 `{kind:'lru', activeDay, promoted[], demoted[], evicted[], revived[], destroyed[]}` |
-| 透明度 | `/memory show` 每行显示 `uses=N last-used=Nd ago pinned`，另 `/memory status` 显示参数 |
+**明确结论**：当前是**"最近使用时间（活动日）"为主 + "窗口容量"封顶**，**没有**"滑动时间窗内统计使用频率"这层。
+频率（`uses`）只在**容量换出的排序并列时**当 tie-break 用，不参与阈值判定。
 
-**用户控制面**：`lru_enabled`（总开关）、阈值可配、`pin` 永久免疫、`/memory forget` 立即遗忘、
-`lru_destroy_mode = "delete"` 才物理删除（默认归档）。
-**明确不做**：半衰期/连续数值衰减（可见性随日期漂移无法解释）、按打分公式排序（召回已交给 flash）。
+| 触发 | 判据 | 是否看频率 |
+|:--|:--|:--|
+| 降级（conf −1） | 闲置**活动日** > `lru_decay_active_days` | ❌ 只看"多久没用" |
+| 换出（进候选池 + 倒计时） | ① 属于"超出 `lru_window_size` 的最久未用者"，或 ② 降级后跌破可见阈值，或 ③ 出生候选长期闲置 | ① 的排序在 recency 并列时用 `uses` 升序 tie-break |
+| 销毁 | 换出后倒计时（活动日）> `lru_destroy_after_days`，且期间没有"使用/看到" | ❌ |
+| 升级 | `uses ≥ lru_promote_uses` 且在 decay 窗口内有使用 | ✅ 唯一真正看频率的地方 |
+
+**为什么没做"滑动窗口频率"**（诚实说明取舍）：
+1. 我们的 `uses` 很稀疏（一条记忆一生可能只被读几次），按"最近 M 个活动日内 N 次"算频率全是噪声；
+2. `uses` 在升级/降级时会被**清零**（"要求重新积累证据"），它不是终生计数，直接当权重会失真；
+3. "多久没被用"对记忆这类对象已经足够直觉，且能向用户解释（"90 个活动日没用到了"）；
+4. 频率其实已经在另一处发挥作用：**升一级** —— 高频条目自然往上走、更难被降出清单。
+
+**若要更"频率敏感"，可选的下一步（未做，需决策）**：
+- 方案 A（推荐，改动小）：给 `uses` **不清零的终生计数** `totalUses`，把降级阈值改为
+  `decay × min(1 + totalUses, 3)`（用得多的条目享有更长老化窗口）。代价：多一个字段 + 阈值语义变复杂；
+- 方案 B（不建议）：真正的滑动窗口频率（按活动日分桶存 use 时间戳），实现与测试成本高、稀疏数据下收益低。
+> 本期不做；若你想让"重度使用的记忆更抗老化"，说一声我按方案 A 加（约 30 行 + 单测）。
 
 ---
 
@@ -583,7 +623,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 ## 12. 实现状态与测试映射
 
-截至 2026-09-13：**全量 611 测试通过**（54 个测试文件），`tsc` 无错。
+截至 2026-09-13：**全量 614 测试通过**（54 个测试文件），`tsc` 无错。
 
 | 模块 | 文件 | 测试 | 用例数 |
 |:--|:--|:--|:--|
@@ -593,7 +633,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 | 服务装配 | `src/core/memory-service.ts` | 经工具测试覆盖 | — |
 | 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts` | 11 |
 | 淘汰工具 | `src/tools/memory-forget.ts` | `tests/tools/memory-forget.test.ts` | 6 |
-| LRU 维护（窗口/倒计时/活动日）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 17 |
+| LRU 维护（窗口/倒计时/活动日/触达语义）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`recordTouch`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 20 |
 | 归纳代理（索引前置 + 相关性初筛） | `src/core/memory-agent.ts`（`renderMemoryIndex`/`pickRelated`）、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 17 |
 | 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts` | +4 |
 | CLI（含 `--no-memory`、`--prompt`） | `src/cli/index.ts` | `tests/cli/prompt.test.ts` | 7 |
@@ -612,6 +652,8 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
    调用方不再需要记得 `rebuildIndex` —— 消除"第二个写入口忘刷索引"的隐患。
 8. **LRU 的"使用"只算读全文与重申**，注入不算（避免"越注入越升级"的正反馈）。
 9. **老化以"活动日"为钟**（`state.activeDayCount`）：缺席不老化，避免"长期不启动程序 → 回来一次清空"。
+   **触达分三级**：`use`（master 读全文/写入 → 升级+复活）、`touch`（代理查重读 → 只推迟销毁）、
+   写入升级（代理救候选条目）——语义表见 §4.1。
 10. **`--no-memory` 归一到 `options.memory === false`**：commander 的 `--no-*` 生成的是 `memory: false`，
     此前读 `options.noMemory`（恒 undefined）导致该开关**静默失效**；同时把记忆装配提前到
     `createSessionManager` 内（否则"会话启动结算"会先跑一遍，凭空创建记忆目录）。

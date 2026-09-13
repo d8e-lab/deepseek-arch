@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MemoryStore, type MemoryUsage } from '../../src/core/memory-store.js';
+import { renderMemoryIndex } from '../../src/core/memory-agent.js';
 
 const DAY = 86_400_000;
 
@@ -191,6 +192,61 @@ describe('memory LRU（活动日 + 窗口 + 销毁倒计时）', () => {
 		expect(entry.status).toBe('active');
 		expect(await store.listEntries('project')).toHaveLength(1);
 		expect((await store.getState('project')).usage![slug].evictedAt).toBeUndefined();
+	});
+
+	it('倒计时中：代理的「看到」（查重读）只推迟销毁，master 的「使用」才复活', async () => {
+		const evictedAt = new Date(Date.now() - 100 * DAY).toISOString();
+		const slug = await seed({
+			subject: 'a.one', confidence: 1, activeDay: 100, lastUsedDay: 1,
+			evictedAt, evictedDay: 80, evictReason: 'decay',
+		});
+
+		// 代理查重读到它（touch）→ 只推迟倒计时
+		await store.recordTouch('project', slug);
+		const afterTouch = await store.reconcile('project');
+		expect(afterTouch.revived).toEqual([]);
+		expect(afterTouch.destroyed).toEqual([]);        // 倒计时重置到当下 → 未超期
+		expect((await store.readEntry('project', slug))!.confidence).toBe(1);
+		const usage = (await store.getState('project')).usage![slug];
+		expect(usage.lastSeenDay).toBe(100);
+		expect(usage.uses).toBe(0);                      // 弱信号不进 uses（不推动升级）
+
+		// master 真读全文（use）→ 复活
+		await store.recordUse('project', slug);
+		const afterUse = await store.reconcile('project');
+		expect(afterUse.revived).toEqual([slug]);
+		expect((await store.readEntry('project', slug))!.confidence).toBe(2);
+	});
+
+	it('代理把倒计时中的条目升到 2 → 用后即复活（不销毁）', async () => {
+		const evictedAt = new Date(Date.now() - 100 * DAY).toISOString();
+		const slug = await seed({
+			subject: 'a.one', confidence: 1, activeDay: 100, lastUsedDay: 1,
+			evictedAt, evictedDay: 5, evictReason: 'window',
+		});
+
+		// 代理按职责带着 slug 升级（索引里能看到 slug，也有 ⏳ 倒计时提示）
+		const r = await store.write('project', {
+			subject: 'a.one', name: 'a.one', description: 'd', confidence: 2, body: 'body-a.one', slug,
+		});
+		expect(r.action).toBe('update');
+
+		const after = await store.reconcile('project');
+		expect(after.destroyed).toEqual([]);             // 已超期也不销毁
+		expect(after.revived).toEqual([slug]);
+		expect((await store.readEntry('project', slug))!.status).toBe('active');
+		expect(await store.listEntries('project')).toHaveLength(1);
+	});
+
+	it('代理索引里标出倒计时进度（⏳待销毁），让它能决定救还是放手', async () => {
+		const evictedAt = new Date(Date.now() - 100 * DAY).toISOString();
+		await seed({
+			subject: 'a.one', confidence: 1, activeDay: 100, lastUsedDay: 1,
+			evictedAt, evictedDay: 70, evictReason: 'decay',
+		});
+
+		const index = await renderMemoryIndex(store, 30, '');
+		expect(index).toContain('⏳待销毁(已 30 活动日)');
 	});
 
 	it('出生即候选的条目长期无人问津 → 进入倒计时（候选池不是无限期坟场）', async () => {

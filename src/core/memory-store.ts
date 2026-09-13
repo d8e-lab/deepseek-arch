@@ -142,6 +142,13 @@ export interface MemoryUsage {
 	evictedAt?: string;
 	/** 被换出时的活动日序号（倒计时按活动日推进） */
 	evictedDay?: number;
+	/**
+	 * 最近一次被「看到」的时间/活动日 —— 与 `uses` 无关的**弱信号**，只用于
+	 * **推迟销毁倒计时**（归纳代理为了查重读了它 = "这个话题又出现了"）。
+	 * 不参与升级判定（那是 master 真读全文 / 重申的专属证据）。
+	 */
+	lastSeenAt?: string;
+	lastSeenDay?: number;
 	/** 换出原因（审计：decay / window / candidate） */
 	evictReason?: string;
 	/** 最近一次因使用而升级（审计） */
@@ -657,6 +664,20 @@ export class MemoryStore {
 		if (changed) await this.setState(scope, { usage });
 	}
 
+	/**
+	 * 记录一次**弱信号「看到」**：只刷新 `lastSeenAt/lastSeenDay`，**不增 uses、不动 lastUsedAt**。
+	 * 用途单一：归纳代理为了查重读了某条（说明"这个话题又出现了"）→ **推迟它的销毁倒计时**。
+	 * 它不能复活条目、也不参与升级判定（升级只认 master 的读全文与重申）。
+	 */
+	async recordTouch(scope: MemoryScope, slug: string, now: string = new Date().toISOString()): Promise<void> {
+		const state = await this.getState(scope);
+		const usage = { ...(state.usage ?? {}) };
+		const cur = usage[slug] ?? { uses: 0, lastUsedAt: now };
+		usage[slug] = { ...cur, lastSeenAt: now, lastSeenDay: state.activeDayCount ?? 0 };
+		await this.setState(scope, { usage });
+		await this.audit({ kind: 'use', at: now, scope, slug, touch: true, activeDay: usage[slug].lastSeenDay });
+	}
+
 	/** 钉住 / 取消钉住（免疫 LRU 升降级与归档；不改 `updated`，不影响内容时效显示） */
 	async setPinned(scope: MemoryScope, slug: string, pinned: boolean): Promise<boolean> {
 		const entry = await this.readEntry(scope, slug);
@@ -736,6 +757,19 @@ export class MemoryStore {
 		};
 		const isEvicted = (slug: string): boolean => usage[slug]?.evictedAt !== undefined;
 
+		/**
+		 * 倒计时已推进多少（活动日）：起点取 `max(evictedDay, lastSeenDay)` ——
+		 * 归纳代理的"看到"（查重读）可以**推迟**销毁，但不能复活。
+		 */
+		const countdownOf = (u: MemoryUsage): number => {
+			const startDay = Math.max(u.evictedDay ?? 0, u.lastSeenDay ?? 0);
+			if (startDay > 0) return Math.max(0, activeDay - startDay);
+			const from = u.evictedDay !== undefined
+				? Date.parse(latestIso(u.evictedAt!, u.lastSeenAt))
+				: Date.parse(latestIso(u.lastSeenAt ?? '', u.evictedAt ?? ''));
+			return Number.isNaN(from) ? 0 : Math.floor((nowMs - from) / DAY);
+		};
+
 		// ── 窗口：可见集合超容量 → 最久未用者先被换出（LRU 序：lastUsedAt → uses → slug）──
 		const visible = live
 			.filter((e) => !e.pinned && !isEvicted(e.slug) && e.confidence >= minConf)
@@ -782,9 +816,7 @@ export class MemoryStore {
 					});
 					continue;
 				}
-				const inCountdown = u.evictedDay !== undefined
-					? Math.max(0, activeDay - u.evictedDay)
-					: Math.floor((nowMs - Date.parse(u.evictedAt!)) / DAY);
+				const inCountdown = countdownOf(u);
 				if (inCountdown > destroyAfter) {
 					result.destroyed.push(entry.slug);
 					plan.push({ slug: entry.slug, confidence: entry.confidence, status: entry.status, destroy: true });
