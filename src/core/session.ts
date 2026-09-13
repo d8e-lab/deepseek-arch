@@ -130,12 +130,16 @@ export interface MemorySessionConfig {
 	notifyReadUpdates?: boolean;
 	/** LRU 维护总开关（默认 true） */
 	lruEnabled?: boolean;
-	/** 闲置超过该天数 → 降一级（默认 90） */
-	lruDecayDays?: number;
+	/** 闲置超过该**活动日**数 → 降一级（默认 90；活动日 = 程序实际被使用的天数，缺席不老化） */
+	lruDecayActiveDays?: number;
 	/** 累计使用达到该次数且最近有使用 → 升一级（默认 2） */
 	lruPromoteUses?: number;
-	/** 候选池中闲置超过该天数 → 归档（默认 180） */
-	lruArchiveDays?: number;
+	/** memory window：master 可见条目上限（默认 200），超出按 LRU 换出 */
+	lruWindowSize?: number;
+	/** 换出后的销毁倒计时（活动日，默认 30）；期间被使用即复活 */
+	lruDestroyAfterDays?: number;
+	/** 销毁方式：archive（默认）/ delete */
+	lruDestroyMode?: 'archive' | 'delete';
 	/** 显式注入存储（测试用；省略时按当前工作区构造） */
 	store?: MemoryStore;
 }
@@ -359,9 +363,11 @@ export class SessionManager {
 			agentTimeoutMs: cfg.agentTimeoutMs ?? 90_000,
 			notifyReadUpdates: cfg.notifyReadUpdates ?? true,
 			lruEnabled: cfg.lruEnabled ?? true,
-			lruDecayDays: cfg.lruDecayDays ?? 90,
+			lruDecayActiveDays: cfg.lruDecayActiveDays ?? 90,
 			lruPromoteUses: cfg.lruPromoteUses ?? 2,
-			lruArchiveDays: cfg.lruArchiveDays ?? 180,
+			lruWindowSize: cfg.lruWindowSize ?? 200,
+			lruDestroyAfterDays: cfg.lruDestroyAfterDays ?? 30,
+			lruDestroyMode: cfg.lruDestroyMode ?? 'archive',
 		};
 		if (!config.enabled) {
 			this.memory = null;
@@ -411,9 +417,11 @@ export class SessionManager {
 		if (!mem || !mem.config.lruEnabled) return [];
 		const lru = {
 			enabled: mem.config.lruEnabled,
-			decayDays: mem.config.lruDecayDays,
+			decayActiveDays: mem.config.lruDecayActiveDays,
 			promoteUses: mem.config.lruPromoteUses,
-			archiveDays: mem.config.lruArchiveDays,
+			windowSize: mem.config.lruWindowSize,
+			destroyAfterDays: mem.config.lruDestroyAfterDays,
+			destroyMode: mem.config.lruDestroyMode,
 		};
 		const out: MemoryMaintenanceResult[] = [];
 		for (const scope of ['project', 'global'] as const) {

@@ -123,6 +123,28 @@ describe('memory 工具', () => {
 		expect((await memoryReadTool.execute({ path: '' })).error).toBe('path is required');
 	});
 
+	it('memory_read：候选池（confidence 1）与索引文件都能读 —— 归纳代理维护候选池的前提', async () => {
+		await memoryWriteTool.execute({ subject: 'cand.one', name: '候选条', description: 'd', confidence: 1, body: '模糊候选正文' });
+
+		// ① 按 slug 直接读候选条目（master 看不到它，但代理必须能读）
+		const byslug = await memoryReadTool.execute({ path: 'cand-one.md' });
+		expect(byslug.error).toBeUndefined();
+		expect(byslug.content).toContain('[memory:project] cand-one (confidence 1');
+		expect(byslug.content).toContain('模糊候选正文');
+
+		// ② 读候选清单文件本身
+		const cand = await memoryReadTool.execute({ path: 'candidates.md' });
+		expect(cand.content).toContain('cand-one.md');
+
+		// ③ 读正式索引
+		const index = await memoryReadTool.execute({ path: 'MEMORY.md' });
+		expect(index.content).toContain('Memory index');
+
+		// ④ 读到条目会记一次「使用」（LRU 信号；注入不算）
+		const usage = JSON.parse(await readFile(join(projectDir, 'state.json'), 'utf-8')).usage ?? {};
+		expect(usage['cand-one']?.uses).toBeGreaterThan(0);
+	});
+
 	it('工具注册：主代理有 memory_read/memory_write，子代理没有', () => {
 		const master = getAllTools({ includeSubagent: true }).map((t) => t.name);
 		expect(master).toContain('memory_read');

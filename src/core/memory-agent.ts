@@ -20,7 +20,7 @@ import { MEMORY_AGENT_PROMPT } from './memory-agent-prompt.js';
 import { memoryReadTool, readMemoryEntry } from '../tools/memory-read.js';
 import { memoryWriteTool, writeMemoryEntry } from '../tools/memory-write.js';
 import { memoryForgetTool, forgetMemoryEntry } from '../tools/memory-forget.js';
-import { estimateTokens, renderManifestLine, type MemoryStore } from './memory-store.js';
+import { estimateTokens, renderManifestLine, type MemoryEntry, type MemoryStore } from './memory-store.js';
 
 /** 每轮归纳最多硬淘汰几条（独立于 maxWritesPerRun，防误删；软降级走 memory_write confidence=1） */
 const MAX_FORGETS_PER_RUN = 3;
@@ -87,15 +87,22 @@ export interface MemoryAgentResult {
  *   - **候选池（confidence 1）master 看不到、也不会被 `memory_read` 命中**，
  *     因此那批条目的升级只能由 agent 在归纳时决定 —— 它必须先"看得见"候选池。
  *
+ * 另外给一段「**可能与本轮相关**」：条目多时上面的索引会截断，靠这段把"语义接近的几条"
+ * 顶到眼前（本轮对话关键词 × 条目 name/description/tags/subject/正文的**确定性**重叠打分，
+ * 零 API 成本；只负责"挑出来给你看"，是否同义/该更新哪条仍由你判断）。
+ *
  * @param maxPerSection 每段最多列多少条（防超长；超出标注省略数）
+ * @param taskText 本轮对话文本（用于相关性初筛；省略则不生成"可能相关"段）
  */
-export async function renderMemoryIndex(store: MemoryStore, maxPerSection = 30): Promise<string> {
+export async function renderMemoryIndex(store: MemoryStore, maxPerSection = 30, taskText = ''): Promise<string> {
 	const out: string[] = [];
+	const all: (MemoryEntry & { scopeLabel: string })[] = [];
 	for (const scope of ['project', 'global'] as const) {
 		const label = scope === 'project' ? '项目层' : '全局层';
 		const active = await store.listEntries(scope);
 		const candidates = await store.listCandidates(scope);
 		const usage = (await store.getState(scope)).usage ?? {};
+		all.push(...active.map((e) => ({ ...e, scopeLabel: label })), ...candidates.map((e) => ({ ...e, scopeLabel: label })));
 		if (active.length === 0 && candidates.length === 0) continue;
 
 		out.push(`### ${label} — 正式条目（master 可见，已在清单里）`);
@@ -113,7 +120,47 @@ export async function renderMemoryIndex(store: MemoryStore, maxPerSection = 30):
 		if (candidates.length > maxPerSection) out.push(`- …(${candidates.length - maxPerSection} more)`);
 		out.push('');
 	}
+
+	const related = pickRelated(all, taskText);
+	if (related.length > 0) {
+		out.push('### 可能与本轮相关（按关键词初筛，仅供定位；**判断语义是否接近要你自己读**）');
+		for (const e of related) out.push(`${renderManifestLine(e)}  [${e.scopeLabel}${e.confidence < 2 ? ', 候选池' : ''}]`);
+		out.push('');
+	}
 	return out.join('\n');
+}
+
+/** 说话文本的粗分词：拉丁词（≥3 字母）+ 中日韩二元组（确定性、零依赖） */
+export function keywordsOf(text: string): Set<string> {
+	const out = new Set<string>();
+	const lower = text.toLowerCase();
+	for (const m of lower.matchAll(/[a-z0-9_][a-z0-9_.-]{2,}/g)) out.add(m[0]);
+	const cjk = lower.match(/[\u4e00-\u9fff]+/g) ?? [];
+	for (const chunk of cjk) {
+		for (let i = 0; i < chunk.length - 1; i++) out.add(chunk.slice(i, i + 2));
+		if (chunk.length === 1) out.add(chunk);
+	}
+	return out;
+}
+
+/** 从全部条目里挑出"与本轮对话关键词重叠最多"的若干条（确定性；不调模型） */
+export function pickRelated<T extends MemoryEntry>(entries: T[], taskText: string, limit = 8): T[] {
+	const task = keywordsOf(taskText);
+	if (task.size === 0) return [];
+	const scored: { entry: T; score: number }[] = [];
+	for (const entry of entries) {
+		const own = keywordsOf([entry.name, entry.description, entry.subject, entry.tags.join(' '), entry.body].join(' '));
+		let score = 0;
+		for (const k of own) if (task.has(k)) score++;
+		// 标签/subject 命中加权（比正文泛词更能代表主题）
+		if (task.has(entry.subject.toLowerCase())) score += 3;
+		for (const tag of entry.tags) if (task.has(tag.toLowerCase())) score += 2;
+		if (score > 0) scored.push({ entry, score });
+	}
+	return scored
+		.sort((a, b) => (b.score - a.score) || (a.entry.updated < b.entry.updated ? 1 : -1) || a.entry.slug.localeCompare(b.entry.slug))
+		.slice(0, limit)
+		.map((s) => s.entry);
 }
 
 export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
@@ -168,7 +215,9 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 
 		try {
 			const tools = this.buildTools(writes);
-			const index = await renderMemoryIndex(store).catch(() => '');
+			// 索引前置：正式条目 + 候选池 + 「可能与本轮相关」（关键词初筛），并附本轮对话文本供初筛
+			const taskText = [...turns.map((t) => `${t.user}\n${t.assistant}`), input.currentUser].join('\n');
+			const index = await renderMemoryIndex(store, 30, taskText).catch(() => '');
 			const { messages } = await runSubagentLoop(
 				[
 					{ role: 'system', content: MEMORY_AGENT_PROMPT },

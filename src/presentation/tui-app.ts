@@ -944,7 +944,7 @@ export class TuiApp {
 				this.cmdOut(dim(`  注入预算 ${mem.config.maxInjectTokens} tokens · 召回/归纳模型 ${mem.config.recallModel}/${mem.config.agentModel}`));
 				this.cmdOut(dim(`  项目层目录 ${store.dirOf('project')}`));
 				this.cmdOut(dim('  子命令：show [kw] | candidates | gc [--dry-run] | pin <slug> | unpin <slug> | forget <slug> | on | off | refresh'));
-				this.cmdOut(dim(`  LRU 维护：${mem.config.lruEnabled ? '开' : '关'} · 闲置 ${mem.config.lruDecayDays} 天降一级 · 使用满 ${mem.config.lruPromoteUses} 次升一级 · 候选闲置 ${mem.config.lruArchiveDays} 天归档`));
+				this.cmdOut(dim(`  LRU 维护：${mem.config.lruEnabled ? '开' : '关'} · 活动日闲置 ${mem.config.lruDecayActiveDays} 天降一级 · 使用满 ${mem.config.lruPromoteUses} 次升一级 · 窗口 ${mem.config.lruWindowSize} 条 · 换出后 ${mem.config.lruDestroyAfterDays} 活动日${mem.config.lruDestroyMode === 'delete' ? '删除' : '归档'}`));
 				return true;
 			}
 			case 'show': {
@@ -981,9 +981,11 @@ export class TuiApp {
 					const bits: string[] = [];
 					if (r.promoted.length) bits.push(`升级 ${r.promoted.map((p) => `${p.slug} ${p.from}→${p.to}`).join(', ')}`);
 					if (r.demoted.length) bits.push(`降级 ${r.demoted.map((p) => `${p.slug} ${p.from}→${p.to}`).join(', ')}`);
-					if (r.archived.length) bits.push(`归档 ${r.archived.join(', ')}`);
+					if (r.evicted.length) bits.push(`换出 ${r.evicted.map((e) => `${e.slug}(${e.reason})`).join(', ')}`);
+					if (r.revived.length) bits.push(`复活 ${r.revived.join(', ')}`);
+					if (r.destroyed.length) bits.push(`销毁 ${r.destroyed.join(', ')}`);
 					if (r.pinned.length) bits.push(dim(`免疫(pinned) ${r.pinned.length} 条`));
-					this.cmdOut(dim(`  ${r.scope}: ${bits.length ? bits.join(' · ') : '无变化'}`));
+					this.cmdOut(dim(`  ${r.scope}: ${bits.length ? bits.join(' · ') : '无变化'}${r.activeDay !== undefined ? dim(`  [活动日 ${r.activeDay}]`) : ''}`));
 				}
 				return true;
 			}
@@ -1047,9 +1049,11 @@ export class TuiApp {
 						agentModel: cfg?.get<string>('memory.agent_model') ?? undefined,
 						agentOnTurnEnd: cfg?.get<boolean>('memory.agent_on_turn_end') ?? undefined,
 						lruEnabled: cfg?.get<boolean>('memory.lru_enabled') ?? undefined,
-						lruDecayDays: cfg?.get<number>('memory.lru_decay_days') ?? undefined,
+						lruDecayActiveDays: cfg?.get<number>('memory.lru_decay_active_days') ?? undefined,
 						lruPromoteUses: cfg?.get<number>('memory.lru_promote_uses') ?? undefined,
-						lruArchiveDays: cfg?.get<number>('memory.lru_archive_days') ?? undefined,
+						lruWindowSize: cfg?.get<number>('memory.lru_window_size') ?? undefined,
+						lruDestroyAfterDays: cfg?.get<number>('memory.lru_destroy_after_days') ?? undefined,
+						lruDestroyMode: (cfg?.get<string>('memory.lru_destroy_mode') === 'delete' ? 'delete' : undefined),
 					});
 				}
 				this.cmdOut(green(`[memory: ${enabled ? 'ON' : 'OFF'}]`) + dim(enabled ? '  下次发言起生效' : '  不再注入/归纳（已存在的记忆保留）'));

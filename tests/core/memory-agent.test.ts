@@ -10,7 +10,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MemoryStore } from '../../src/core/memory-store.js';
-import { MemoryAgent, renderInput } from '../../src/core/memory-agent.js';
+import { MemoryAgent, renderInput, pickRelated } from '../../src/core/memory-agent.js';
 import type { ModelProvider } from '../../src/core/model-provider.js';
 import type { Message, StreamChunk } from '../../src/types/index.js';
 
@@ -262,6 +262,46 @@ describe('MemoryAgent', () => {
 		expect(input).toContain(cand.slug);          // 候选条目（拿得到 slug 才能升级）
 		expect(input).toContain('共被使用 3 次');     // 升级判断依据
 		expect(input.indexOf('现有记忆')).toBeLessThan(input.indexOf('需要归纳的对话片段'));  // 清单前置
+	});
+
+	it('「可能与本轮相关」：按本轮对话关键词初筛（语义接近的条目顶到眼前）', async () => {
+		await store.write('project', { subject: 'reply.format', name: '回复格式', description: '回复先给结论', tags: ['reply'], confidence: 3, body: '先给结论。' });
+		await store.write('project', { subject: 'test.policy', name: '测试策略', description: '集成测试用真实依赖', tags: ['test'], confidence: 3, body: '集成测试不打桩。' });
+		const cand = await store.write('project', { subject: 'commit.message', name: '提交信息', description: '遵循约定', tags: ['git'], confidence: 1, body: '提交信息写清动机。' });
+
+		const seen: string[] = [];
+		const provider = makeProvider([{ content: 'ok' }], (messages) => {
+			seen.push(String(messages[1]?.content ?? ''));
+		});
+		const agent = makeAgent(provider, store);
+		await agent.run({
+			turns: [{ user: '提交信息怎么写比较好？', assistant: '按约定来。', turnId: 't1' }],
+			currentUser: '提交信息怎么写比较好？',
+		});
+
+		const input = seen[0];
+		expect(input).toContain('可能与本轮相关');
+		const related = input.slice(input.indexOf('可能与本轮相关'));
+		expect(related).toContain(cand.slug);          // 语义接近的候选条目被挑出来
+		expect(related).toContain('候选池');            // 并标注它在候选池
+		expect(related).not.toContain('测试策略');      // 不相关的条目不进这段
+	});
+
+	it('关键词初筛：拉丁词 + 中文二元组，标签/subject 加权；无关则不出段', () => {
+		const base = {
+			name: 'A', description: '描述', type: 'user' as const, subject: 'replyformat',
+			tags: ['reply'], scope: 'project' as const, confidence: 3,
+			created: '2026-01-01T00:00:00Z', updated: '2026-01-01T00:00:00Z',
+			status: 'active' as const, body: '正文', filePath: '/x.md',
+		};
+		expect(pickRelated([{ ...base, slug: 'a' }], '帮我改一下 reply 的风格').map((e) => e.slug)).toEqual(['a']);
+		expect(pickRelated([{ ...base, slug: 'a' }], '今天天气不错')).toEqual([]);
+		expect(
+			pickRelated(
+				[{ ...base, slug: 'b', name: '提交信息', description: '提交信息写清动机', subject: 'commitmessage', tags: [], body: 'b' }],
+				'提交信息要写什么？',
+			).map((e) => e.slug),
+		).toEqual(['b']);
 	});
 
 	// ── 淘汰（memory_forget）：归纳时顺带清理过时记忆 ──────────────────────

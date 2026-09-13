@@ -64,7 +64,7 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	};
 }
 
-async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false, monitorUrl?: string, mock = false): Promise<SessionManager> {
+async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode = false, monitorUrl?: string, mock = false, noMemory = false): Promise<SessionManager> {
 	const cfg = ConfigManager.getInstance();
 	// 供应商级超时/重试配置（可选，默认 120s / 2 次）
 	const timeoutMs = cfg.get<number>(`providers.${config.provider}.timeout_ms`) ?? 120_000;
@@ -102,8 +102,12 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	// 设置子代理异步模式
 	sessionMgr.setSubagentAsync(asyncMode);
 
-	// 记忆机制：按 [memory] 段装配（默认开启；CLI --no-memory 会在创建后覆盖为关闭）
-	sessionMgr.configureMemory({
+	// 记忆机制：按 [memory] 段装配。--no-memory 时**完全不装配**（否则"会话启动 LRU 结算"会
+	// 在覆盖为关闭之前先跑一遍，凭空创建记忆目录/审计）
+	if (noMemory) {
+		sessionMgr.configureMemory({ enabled: false });
+	} else {
+		sessionMgr.configureMemory({
 		enabled: cfg.get<boolean>('memory.enabled') ?? true,
 		inject: cfg.get<boolean>('memory.inject') ?? true,
 		maxInjectTokens: cfg.get<number>('memory.max_inject_tokens') ?? 800,
@@ -119,10 +123,13 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 		agentTimeoutMs: cfg.get<number>('memory.agent_timeout_ms') ?? 90_000,
 		notifyReadUpdates: cfg.get<boolean>('memory.notify_read_updates') ?? true,
 		lruEnabled: cfg.get<boolean>('memory.lru_enabled') ?? true,
-		lruDecayDays: cfg.get<number>('memory.lru_decay_days') ?? 90,
+		lruDecayActiveDays: cfg.get<number>('memory.lru_decay_active_days') ?? 90,
 		lruPromoteUses: cfg.get<number>('memory.lru_promote_uses') ?? 2,
-		lruArchiveDays: cfg.get<number>('memory.lru_archive_days') ?? 180,
-	});
+		lruWindowSize: cfg.get<number>('memory.lru_window_size') ?? 200,
+		lruDestroyAfterDays: cfg.get<number>('memory.lru_destroy_after_days') ?? 30,
+		lruDestroyMode: (cfg.get<string>('memory.lru_destroy_mode') === 'delete' ? 'delete' : 'archive'),
+		});
+	}
 	// 记忆工具（memory_read/write）与「已更新记忆」提示：与工作区/阈值保持一致
 	setMemoryStore(sessionMgr.getMemory()?.store ?? null);
 	sessionMgr.setMemoryNoticeCallback((count) => {
@@ -257,8 +264,11 @@ program
 	.option('--workspace <dir>', 'workspace root for tools & runtime files (default: current directory)')
 	.option('--no-memory', 'disable long-term memory entirely (no injection, no extraction, no memory tools)')
 	.option('-p, --prompt <content>', 'run a single non-interactive turn and print the reply to stdout (yolo; combines with --resume)')
-	.action(async (options: { resume?: string; prompt?: string; workspace?: string; noMemory?: boolean; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.action(async (options: { resume?: string; prompt?: string; workspace?: string; memory?: boolean; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
+			// commander 的 `--no-memory` 生成的是 `memory: false`（不是 `noMemory`）——
+			// 曾经读 `options.noMemory`（恒 undefined）导致该开关**静默失效**，这里统一归一化
+			const noMemory = options.memory === false;
 			// 加载配置（幂等）——必须先于 cfg.get，否则 defaults/display 读不到
 			const cfg = ConfigManager.getInstance();
 			await cfg.load();
@@ -293,20 +303,9 @@ program
 
 			// 主代理工具集（debug 模式才含 tui_capture / tui_render_preview）
 			const tools = loadMasterTools(debug, options.selfInteraction)
-				.filter((t) => !(options.noMemory && (t.name === 'memory_read' || t.name === 'memory_write')));
+				.filter((t) => !(noMemory && (t.name === 'memory_read' || t.name === 'memory_write')));
 
-			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options.mock);
-
-			// --no-memory：完全关闭（不注入、不归纳、工具已在上方剔除）
-			if (options.noMemory) {
-				sessionMgr.configureMemory({ enabled: false });
-				setMemoryStore(null);
-			}
-			// resume 命令的 --no-memory
-			if (options?.noMemory) {
-				sessionMgr.configureMemory({ enabled: false });
-				setMemoryStore(null);
-			}
+			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options.mock, noMemory);
 
 			// 非交互单轮（headless）：不进 TUI，跑完一轮直接退出
 			if (options.prompt !== undefined) {
@@ -431,14 +430,15 @@ program
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
 	.option('--workspace <dir>', 'workspace root for tools & runtime files (default: current directory)')
 	.option('--no-memory', 'disable long-term memory entirely (no injection, no extraction, no memory tools)')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; workspace?: string; noMemory?: boolean; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; workspace?: string; memory?: boolean; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			// 工作区覆盖必须在创建 SessionManager 之前（构造时锁定会话 cwd）
 			if (options?.workspace && !applyWorkspace(options.workspace)) {
 				process.exit(1);
 			}
-			// --no-memory：工具剔除在 createSessionManager 之后统一处理（见下方 sessionMgr 创建处）
+			// commander 的 `--no-memory` → `memory: false`（见 chat 命令处的说明）
+			const noMemory = options?.memory === false;
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
 			const storage = new Storage(sessionsDir);
 			const monitorUrl = options?.monitor ?? process.env.DEEPSEEK_API_MONITOR_URL;
@@ -465,8 +465,9 @@ program
 				const displayPreset = buildDisplayPreset(displayMode, cfg.get('display'));
 				const asyncMode = options?.async ?? cfg.get<boolean>('defaults.async') ?? false;
 				const debug = options?.debug ?? false;
-				const tools = loadMasterTools(debug, options?.selfInteraction);
-				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
+				const tools = loadMasterTools(debug, options?.selfInteraction)
+					.filter((t) => !(noMemory && (t.name === 'memory_read' || t.name === 'memory_write')));
+				const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock, noMemory);
 				await sessionMgr.resumeSession(session.meta.id);
 
 				const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock, displayMode, displayPreset);
@@ -534,8 +535,9 @@ program
 			const displayPreset = buildDisplayPreset(displayMode, cfg.get('display'));
 			const asyncMode = options?.async ?? cfg.get<boolean>('defaults.async') ?? false;
 			const debug = options?.debug ?? false;
-			const tools = loadMasterTools(debug, options?.selfInteraction);
-			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock);
+			const tools = loadMasterTools(debug, options?.selfInteraction)
+				.filter((t) => !(noMemory && (t.name === 'memory_read' || t.name === 'memory_write')));
+			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options?.mock, noMemory);
 			await sessionMgr.resumeSession(session.meta.id);
 
 			const app = new TuiApp(sessionMgr, tuiConfig, tools, ConfigManager.getInstance(), yolo, options?.mock, displayMode, displayPreset);

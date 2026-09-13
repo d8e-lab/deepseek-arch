@@ -13,7 +13,7 @@
 |:--|:--|:--|:--|:--|
 | **A2** | 写入提示通道：StreamEvent `memory_updated` | 用 `SessionManager.setMemoryNoticeCallback` + TUI 一行 dim + headless stderr | 回调方案更简单且已够用；事件化的收益（外部订阅）当前无消费者 | `types/chat.ts` + `session.ts` 事件泵；S |
 | **A3a** | ✅ **已做（2026-09-13）**：淘汰过时记忆 —— 归纳代理 `memory_forget` 工具 + 软淘汰（`confidence: 1`）+ 提示词"时效与清理"规则 | `src/tools/memory-forget.ts`（`confidence: 3` 拒绝、每轮上限 3 条、不计写入配额）、`memory-agent.ts` 工具集与配额、`memory-agent-prompt.ts` 规则表；测试 `tests/tools/memory-forget.test.ts`(6) + `tests/core/memory-agent.test.ts`(+3) | 起因：**"静默失效"（没人再提且未被推翻）原本无任何淘汰路径** —— 先前判"无消费者"不准确：原设计的消费者（打分 + fold）被废弃了，而淘汰本身需要有落点，落点就在"归纳时顺带判断" | — |
-| **A3b** | ✅ **已做（2026-09-13，见设计稿 §4.1 / R26）**：LRU 主动维护 —— 用进废退的置信度升降级 + 候选池归档 | `MemoryStore.reconcile()` / `recordUse()` / `setPinned()`（`src/core/memory-store.ts`）；会话创建时结算（`SessionManager.maintainMemory()`）；命令 `/memory gc [--dry-run]`、`/memory pin\|unpin`；配置 `lru_enabled` / `lru_decay_days` / `lru_promote_uses` / `lru_archive_days`；测试 `tests/core/memory-lru.test.ts`(13) + `memory-session.test.ts`(+1) | — |
+| **A3b** | ✅ **已做（2026-09-13，设计稿 §4.1 / R26 + R28）**：LRU 主动维护 —— **活动日时钟**（缺席不老化）+ **memory window 换出** + **销毁倒计时**（换出→缓刑→复活/销毁）+ 置信度升降级 | `MemoryStore.reconcile()` / `recordUse()` / `setPinned()`（`src/core/memory-store.ts`）；会话创建时结算（`SessionManager.maintainMemory()`）；命令 `/memory gc [--dry-run]`、`/memory pin\|unpin`；配置 `lru_enabled` / `lru_decay_days` / `lru_promote_uses` / `lru_archive_days`；测试 `tests/core/memory-lru.test.ts`(13) + `memory-session.test.ts`(+1) | — |
 | **A3c** | 连续数值衰减（半衰期 `0.5^(Δdays/180)`） | 未实现 | **不做**：可见性随日期漂移无法解释、无用户可感知收益；改用离散档位（3→2→1→候选池→archive），每次动作落 `audit.jsonl` 可审计 | — |
 | **A3d** | 会话内"主动出示条目全文" | 未实现（只出示清单与变化提醒） | 每轮多一次 LLM 调用或引入打分噪声，收益边际；`memory_read` 已提供按需通道 | `memory-inject.ts` + `memory-recall.ts`；M–L |
 | **A4** | `logs/yyyy/mm/dd.md` 每日日志写入 | `MemoryStore.appendLog()` 已实现但**无调用方** | 归纳的可审计性已由 `audit.jsonl` 的 `agent_run.notes` 承担；再写一份原始日志属重复 | `memory-agent.ts` 在 run 结束追加；S |
@@ -46,6 +46,12 @@
 
 - 本文件只登记**已明确暂缓**的事项；不要在此堆想法，想法放 `plan/`。
 - 任何一项开工前，先在 `plan/memory-heartbeat-design.md` 对应章节写清最终方案，再改代码（避免"文档与实现漂移"重演）。
+
+**另一处已修的静默 bug（2026-09-13，R28）**：`--no-memory` 一直**没生效** ——
+commander 对 `--no-*` 生成的是 `options.memory = false`，而代码读的是 `options.noMemory`（恒 undefined）；
+此前没被发现是因为"没有记忆条目时不会有任何 IO"，测试只是**碰巧**通过。
+现在归一到 `options.memory === false`，并把记忆装配提前进 `createSessionManager`（否则"会话启动结算"
+会在覆盖为关闭之前先跑一遍，凭空创建记忆目录/审计）；`chat` 与 `resume` 两条路径的记忆工具剔除也补齐。
 
 **已修复的文档漂移（2026-09-13，R27）**：设计稿 §5 长期声称"归纳代理的输入带上现有记忆清单"，
 但代码里代理的输入**只有对话片段**（既看不到正式条目，也看不到候选池）—— 这既是重复条目的来源，
