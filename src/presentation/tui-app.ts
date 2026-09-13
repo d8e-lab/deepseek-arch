@@ -61,7 +61,7 @@ import type { ViewInputResult } from './views/types.js';
 const FALLBACK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
 /** 可用命令列表 */
-const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/review_model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/memory', '/compact', '/exit'];
+const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/memory', '/compact', '/exit'];
 
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
@@ -74,7 +74,6 @@ export class TuiApp {
 	private configMgr: ConfigManager | null;
 	private tools: Tool[];
 	private yolo: boolean;
-	private reviewModel?: string;
 	/** 可选模型列表（从配置 pricing/providers 动态生成） */
 	private availableModels: string[] = FALLBACK_MODELS;
 	/** 子代理异步模式 */
@@ -148,7 +147,6 @@ export class TuiApp {
 		this.displayMode = displayMode;
 		this.preset = displayPreset ?? DISPLAY_PRESETS[displayMode];
 		this.thinkVisibleLines = this.preset.thinkLiveLines;
-		this.reviewModel = config.reviewModel;
 		this.asyncMode = sessionMgr.getSubagentAsync();
 		this.conversation = new ConversationView();
 		this.input = new InputEditor();
@@ -632,10 +630,6 @@ export class TuiApp {
 			return await this.switchSystemPrompt(content.slice(7).trim());
 		}
 
-		if (content.startsWith('/review_model')) {
-			return await this.switchReviewModel(content.slice(13).trim());
-		}
-
 		if (content.startsWith('/help')) {
 			return this.showHelp();
 		}
@@ -776,22 +770,6 @@ export class TuiApp {
 		return true;
 	}
 
-	/** /review_model [name] — 切换 YOLO 审查模型（写回 defaults.review_model） */
-	private async switchReviewModel(name: string): Promise<boolean> {
-		if (!name) {
-			const current = this.reviewModel ?? '(unset, default deepseek-v4-flash)';
-			this.cmdOut(dim(`Current review model: ${current}`));
-			this.cmdOut(dim('Usage: /review_model <model-name>'));
-			return true;
-		}
-
-		this.reviewModel = name;
-		if (this.configMgr) {
-			await this.configMgr.set('defaults.review_model', name);
-		}
-		this.cmdOut(green(`[Review model switched: ${name}]`));
-		return true;
-	}
 
 	/** /help — 显示可用命令列表 */
 	private showHelp(): true {
@@ -804,7 +782,6 @@ export class TuiApp {
 			['/model [name]', 'Switch model (interactive picker if no arg)'],
 			['/provider [name]', 'Switch provider (interactive picker if no arg)'],
 			['/system [name]', 'List/switch system prompt template'],
-			['/review_model [name]', 'Show/set YOLO review model'],
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
 			['/memory',        'Long-term memory: /memory [show|candidates|forget <slug>|on|off|refresh]'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
@@ -840,7 +817,6 @@ export class TuiApp {
 		this.cmdOut(`  Provider:  ${this.config.provider}`);
 		this.cmdOut(`  Model:     ${this.config.model}`);
 		this.cmdOut(`  System:    ${this.config.systemPrompt ?? 'default'}`);
-		this.cmdOut(`  Review:    ${this.reviewModel ?? '(default flash)'}`);
 		this.cmdOut(`  YOLO mode: ${this.yolo ? green('ON') : dim('OFF')}`);
 		this.cmdOut(`  Subagent:  ${this.asyncMode ? green('async') : dim('sync')}`);
 		this.cmdOut(`  Session:   ${meta?.id ?? '—'}${meta?.title ? ' "' + dim(meta.title) + '"' : ''}`);
@@ -1950,24 +1926,6 @@ export class TuiApp {
 							this.writeOutputLines(outLines);
 							break;
 						}
-						case 'review_verdict': {
-							flush(true);
-
-							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
-							const v = event.verdict ?? 'completed';
-							const r = event.reviewReason ?? '';
-							if (event.autoContinue) {
-								this.writeOutputLine(dim(`[审查: ${v}] ${r}`));
-								this.writeOutputLine(dim('[审查: 自动续期继续执行...]'));
-								// 重置 reasoning/content 追踪，使续期后的输出独立渲染
-								reasoningStarted = false;
-								contentStarted = false;
-								reasoningEndsWithNewline = true;
-							} else if (v === 'asking_user') {
-								this.writeOutputLine(dim('[审查: 模型在询问用户，等待输入]'));
-							}
-							break;
-						}
 						case 'subagent_spawned': {
 							flush(true);
 
@@ -2045,7 +2003,6 @@ export class TuiApp {
 				this.tools.length > 0 && !this.yolo
 					? (toolName, params) => this.requestToolConfirm(toolName, params)
 					: undefined,
-				this.yolo ? this.reviewModel : undefined,
 			);
 		} catch (err: any) {
 			// F-5：catch 时进入 ERROR 状态（finally 恢复 IDLE）

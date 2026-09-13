@@ -95,7 +95,7 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 - **Subagents 总览视图**：Ctrl+T 任意状态打开全屏实时视图（状态条 + 选中子代理输出 + 视图内输入），n/p/数字切换，master 转入后台静默执行，返回时补渲染
 - **全双工输入**：模型输出期间 `/` 命令立即执行（结果固定显示在底部命令结果区），普通文本/`!shell` 排队不中断输出、结束后自动发送
 - **Skill 机制**：模型可发现并调用技能（plan/release/research），frontmatter 元数据 + 目录加载 + 条件激活（触碰 docs/ 等路径自动出现）
-- **YOLO 审查模型**：默认 YOLO 模式（`--no-yolo` 关闭）自动批准工具执行，并在 agent loop 自然终止处审查输出（stalled/deflecting 自动续答）
+- **YOLO 模式**：默认开启（`--no-yolo` 关闭）自动批准工具执行，不打断 agent loop
 - **展示模式**：`--detail`（完整实时输出）/ `--normal`（think ≤4 行、结果 ≤6 行，默认）/ `--short`（工具只显示调用与成败，文件修改除外）
 - **命令补全**：输入 `/` 触发命令补全，建议列表支持滚动浏览全部选项
 - **Token 记录**：保存 API 返回的 `usage`，每轮记录 KV cache 命中率日志（5% 异常标记）
@@ -139,7 +139,6 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 /model [name]       切换模型（无参时交互选择，候选从配置动态生成）
 /provider [name]    切换供应商（写回 defaults.provider）
 /system [name]      列出/切换 system prompt 模板（写回 defaults.system_prompt）
-/review_model [name] 查看/设置 YOLO 审查模型（写回 defaults.review_model）
 /async              切换子代理异步模式（写回 defaults.async）
 /yolo               切换 YOLO 模式（写回 defaults.yolo）
 /subagent [name]    查看子代理详情
@@ -203,7 +202,6 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 | `provider` | `deepseek` | 默认供应商 |
 | `model` | `deepseek-v4-pro` | 默认模型 |
 | `system_prompt` | `default` | system prompt 模板名 |
-| `review_model` | `deepseek-v4-flash` | YOLO 审查模型 |
 | `temperature` / `max_tokens` | 未设置 | 生成参数（deepseek-v4 思考模式下 temperature 不生效） |
 | `reasoning_effort` | `high` | 推理强度 low/high/max |
 | `thinking` | `enabled` | 思考模式开关 |
@@ -330,7 +328,6 @@ src/
 │   ├── subagent-store.ts   # 子代理类型 re-export（原内存缓冲已由 SubagentSession 取代）
 │   ├── compact.ts          # 上下文压缩核心（摘要生成 + 文件重注入 + 分代）
 │   ├── skill.ts            # Skill 引擎（frontmatter 解析 + 加载 + 条件激活）
-│   ├── reviewer.ts         # YOLO 审查模型（completed/stalled/deflecting/asking_user）
 │   ├── api-monitor.ts      # API 请求监听服务器
 │   ├── cache-log.ts        # KV cache 命中率日志
 │   └── system-info.ts      # 环境信息采集（注入 system prompt）

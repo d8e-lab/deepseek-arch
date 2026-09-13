@@ -15,5 +15,4 @@ export interface TuiConfig {
 	/** 当前 system prompt 模板名 */
 	systemPrompt?: string;
 	/** YOLO 模式下审查模型名（默认同主模型） */
-	reviewModel?: string;
 }

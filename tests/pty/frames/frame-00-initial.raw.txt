@@ -1,4 +1,4 @@
-[?2004hdeepseek-arch v1.4.1  |  Provider: deepseek  |  Model: deepseek-v4-flash  |  [MOCK]
-[2mSession: 6db9e239...  |  Turns: 0[0m
+[?2004hdeepseek-arch v1.5.3  |  Provider: deepseek  |  Model: deepseek-v4-flash  |  [MOCK]
+[2mSession: 679ab438...  |  Turns: 0[0m
 ───────────────────────────────────────────────────────────────────────────────
-[48;5;238m                                                                               [0m
+[?25l[0J[2K[48;5;238m                                                                               [0m[?25h

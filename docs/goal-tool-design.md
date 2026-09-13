@@ -3,7 +3,10 @@
 > 状态：**设计稿（未实现）**
 > 日期：2026-08-20
 > 分支：feat/api-config-and-docs-sync（仅文档，无代码）
-> 目标：为"长程任务不偏离目标"提供机制设计，含 goal × reviewer 配合方案、compact 集成、prompt 影响面分析。
+> ⚠️ **前提已失效（2026-09-13）**：本文依赖的 reviewer（censor agent）已随 YOLO 审查机制一并移除
+> （见 `plan/memory-heartbeat-design.md` A1）。若日后重启该设计，需先确定新的锚点（agent loop 自然终止处的其它钩子）。
+>
+> 原目标：为"长程任务不偏离目标"提供机制设计，含 goal × reviewer 配合方案、compact 集成、prompt 影响面分析。
 
 ---
 

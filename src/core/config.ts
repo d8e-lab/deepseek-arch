@@ -52,8 +52,6 @@ provider = "deepseek"
 model = "deepseek-v4-pro"
 # system prompt 模板名（system-prompt.toml 中的模板键；/system 切换写回）
 system_prompt = "default"
-# YOLO 审查模型（/review_model 切换写回；--yolo 下审查输出用）
-review_model = "deepseek-v4-flash"
 
 # 生成参数：默认不设置（= 交由 API 侧默认值）。
 # 注意：deepseek-v4 思考模式下 temperature 不生效。
@@ -164,7 +162,6 @@ const MEMORY_DEFAULTS: Required<MemoryConfig> = {
  * temperature/max_tokens 保持"未设置"（默认不传，交 API 侧默认；模板中为注释示例）。
  */
 const DEFAULT_DEFAULTS: Partial<ConfigDefaults> = {
-	review_model: 'deepseek-v4-flash',
 	reasoning_effort: 'high',
 	thinking: 'enabled',
 	yolo: true,

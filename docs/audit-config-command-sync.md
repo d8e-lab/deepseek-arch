@@ -19,7 +19,7 @@
 | `defaults.provider` | 默认供应商 | cli/index.ts:43 | 仅手改 config.toml |
 | `defaults.model` | 默认模型 | cli/index.ts:44 | **`/model` 命令写回**（tui-app.ts:530）+ 手改 |
 | `defaults.system_prompt` | system prompt 模板名 | cli/index.ts:80 | 仅手改 config.toml |
-| `defaults.review_model` | YOLO 审查模型（**类型未声明**，见 §5） | cli/index.ts:48 → tui-app.ts:150, 2054 → session.ts:813 | 仅手改 config.toml |
+| `defaults.review_model` | ~~YOLO 审查模型~~ **已移除（2026-09-13，reviewer 删除）** | — | 配置键已不再读取（旧 config.toml 中的该键被忽略） |
 | `providers.<name>.base_url` | 供应商 API 地址 | cli/index.ts:45 | 仅手改 providers.toml |
 | `providers.<name>.api_key` | API 密钥 | cli/index.ts:46 | 仅手改 providers.toml |
 | `systemPrompts.<name>.content` | system prompt 内容 | cli/index.ts:81 | 仅手改 system-prompt.toml |

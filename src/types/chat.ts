@@ -77,7 +77,6 @@ export interface TurnRecord {
 }
 
 /** 审查模型判决类型 */
-export type ReviewVerdict = 'completed' | 'stalled' | 'deflecting' | 'asking_user';
 
 /** Agent loop 单轮 token 用量（用于记录每轮 API 调用的缓存行为） */
 export interface RoundUsage {
@@ -98,7 +97,6 @@ export interface StreamEvent {
 	type: 'reasoning_delta' | 'content_delta' | 'done' | 'error'
 		| 'tool_call_delta' | 'tool_call_start' | 'tool_preview' | 'tool_result'
 		| 'tool_output'
-		| 'review_verdict'
 		| 'subagent_spawned' | 'subagent_finished' | 'subagent_update'
 		| 'auto_compact';
 	/** 增量文本（reasoning_delta / content_delta / tool_call_delta） */
@@ -122,12 +120,6 @@ export interface StreamEvent {
 	/** tool 实时输出行（tool_output），stream 标识 stdout/stderr */
 	outputLine?: string;
 	outputStream?: 'stdout' | 'stderr';
-	/** 审查判决（review_verdict 事件） */
-	verdict?: ReviewVerdict;
-	/** 审查理由（review_verdict 事件） */
-	reviewReason?: string;
-	/** 是否自动继续（review_verdict 事件：true=注入 continuation, false=等待用户） */
-	autoContinue?: boolean;
 	/** 子代理名（subagent_spawned / subagent_finished / subagent_update） */
 	subagentName?: string;
 	/** 子代理任务（subagent_spawned） */

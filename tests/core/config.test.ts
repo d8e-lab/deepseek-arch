@@ -149,7 +149,6 @@ describe('ConfigManager', () => {
         provider: 'deepseek',
         model: 'deepseek-v4-pro',
         system_prompt: 'default',
-        review_model: 'deepseek-v4-flash',
         reasoning_effort: 'high',
         thinking: 'enabled',
         yolo: true,
@@ -211,7 +210,6 @@ describe('ConfigManager', () => {
       // 缺失键被补全为默认值
       expect(mgr.get('defaults.reasoning_effort')).toBe('high');
       expect(mgr.get('defaults.thinking')).toBe('enabled');
-      expect(mgr.get('defaults.review_model')).toBe('deepseek-v4-flash');
       expect(mgr.get('defaults.yolo')).toBe(true);
       expect(mgr.get('defaults.async')).toBe(false);
       expect(mgr.get('defaults.auto_compact')).toBe(true);

@@ -48,8 +48,6 @@ export interface ConfigDefaults {
 	model: string;
 	/** system prompt 模板名 */
 	system_prompt: string;
-	/** YOLO 审查模型名（默认 deepseek-v4-flash） */
-	review_model?: string;
 	/** 默认 temperature（思考模式下不生效） */
 	temperature?: number;
 	/** 默认 max_tokens（输出上限） */

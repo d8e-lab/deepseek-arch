@@ -53,8 +53,6 @@ async function createTuiConfig(): Promise<TuiConfig> {
 	const apiKey = cfg.get<string>(`providers.${providerName}.api_key`)
 		?? process.env.DEEPSEEK_API_KEY
 		?? '';
-	// 审查模型：可从配置读取，默认用 flash（更便宜）
-	const reviewModel = cfg.get<string>('defaults.review_model') ?? 'deepseek-v4-flash';
 
 	return {
 		provider: providerName,
@@ -63,7 +61,6 @@ async function createTuiConfig(): Promise<TuiConfig> {
 		apiKey,
 		version: PACKAGE_VERSION,
 		systemPrompt: cfg.get<string>('defaults.system_prompt') ?? 'default',
-		reviewModel,
 	};
 }
 

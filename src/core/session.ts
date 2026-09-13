@@ -16,7 +16,6 @@ import type { ModelProvider, ChatOptions } from './model-provider.js';
 import { yieldEventLoop } from '../utils/event-loop.js';
 import { turnUserContent, turnAssistantContent } from '../utils/turn-utils.js';
 import { appendCacheLog } from './cache-log.js';
-import { reviewConversation } from './reviewer.js';
 import type {
 	Message,
 	Session,
@@ -28,7 +27,6 @@ import type {
 	StreamEvent,
 	ToolDefinition,
 	RoundUsage,
-	ReviewVerdict,
 } from '../types/index.js';
 
 // Re-export for backward compatibility (chat-ui.ts imports from here)
@@ -897,7 +895,6 @@ export class SessionManager {
 		onEvent: (event: StreamEvent) => void,
 		signal?: AbortSignal,
 		onConfirm?: (toolName: string, params: Record<string, unknown>) => Promise<boolean>,
-		reviewModelName?: string,
 	): Promise<TurnRecord | null> {
 		if (!this.session) {
 			throw new Error('未创建会话——请先调用 startNewSession() 或 resumeSession()');
@@ -924,9 +921,6 @@ export class SessionManager {
 		const agentMessages: Message[] = [];
 		/** 每轮 API 调用的 token 用量（用于监控缓存命中率） */
 		const roundUsages: RoundUsage[] = [];
-		/** 审查自动续期计数（防无限循环） */
-		let autoContinueCount = 0;
-		const MAX_AUTO_CONTINUE = 3;
 		/** 是否已创建进行中的 turn（用于增量落盘） */
 		let turnSaved = false;
 		const userMsg: Message = { role: 'user', content: userContent };
@@ -1336,46 +1330,6 @@ export class SessionManager {
 					// M-2：异步模式下子代理状态已由 roundMessages 末尾的状态块提供给模型，
 					// 模型看到状态后自主调度 wait/list_subagents；不再注入静态提醒或强制 continue。
 
-					// ── YOLO 审查：检查模型回复是否需要自动继续 ──────
-					if (reviewModelName && autoContinueCount < MAX_AUTO_CONTINUE) {
-						const pastInputs = this.session!.turns
-							.slice(-(MAX_AUTO_CONTINUE + 1))
-							.map(t => turnUserContent(t));
-						const recentInputs = [...pastInputs, userContent].slice(-5);
-
-						const { verdict, reason } = await reviewConversation(
-							recentInputs,
-							roundContent,
-							this.provider,
-							reviewModelName,
-						);
-
-						if (verdict === 'stalled' || verdict === 'deflecting') {
-							autoContinueCount++;
-							const prompt = verdict === 'stalled'
-								? '[auto-continue] 任务未完成，请继续执行。直接完成剩余操作，使用所需的工具。如果任务已完成，请输出完成情况说明。'
-								: '[auto-continue] 请直接使用工具执行所需命令来完成任务。不要将操作推给用户，你有 shell、文件编辑等工具可用。任务完成后请输出完成情况说明。';
-
-							agentMessages.push({ role: 'user', content: prompt });
-
-							onEvent({
-								type: 'review_verdict',
-								verdict,
-								reviewReason: reason,
-								autoContinue: true,
-							});
-
-							continue;
-						}
-
-						onEvent({
-							type: 'review_verdict',
-							verdict,
-							reviewReason: reason,
-							autoContinue: false,
-						});
-					}
-
 					break;
 				}
 
@@ -1699,7 +1653,7 @@ export class SessionManager {
 					costRmb,
 					false,
 					undefined,
-					// 有注入块（子代理通知 / 记忆变化提醒 / [auto-continue]）时写入完整消息序列：
+					// 有注入块（子代理通知 / 记忆变化提醒）时写入完整消息序列：
 					// 注入内容必须随 turn.messages 落盘，否则下一轮前缀在该位置断开、重算上一轮内容。
 					// 注意：无工具轮的 assistant 消息也已 push 进 agentMessages，此处不再重复追加。
 					agentMessages.length > 0 ? [userMsg, ...agentMessages] : undefined,
