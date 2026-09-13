@@ -323,8 +323,9 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | 审计 | `{kind:'lru', activeDay, promoted[], demoted[], windowEvicted[], revived[], destroyed[]}` |
 | 透明度 | `/memory show` 每行显示 `uses=N last-used=Nd ago pinned`；`/memory candidates` 分「待观察(1) / ⏳待销毁(0)」；索引行带 `⏳待销毁(已 N/期限 活动日)` 与 `📌` |
 
-**用户控制面**：`lru_enabled`、三个阈值、`pin`（免疫 + 拉回可见）、`/memory forget`（立即墓碑）、
-`lru_destroy_mode = "delete"`（默认归档）。
+**用户控制面**：`lru_enabled`（总开关）、`lru_decay_active_days` / `lru_promote_uses` /
+`lru_window_size` / `lru_total_limit` / `lru_destroy_after_days`（阈值）、`lru_destroy_mode`（archive|delete）、
+`/memory pin|unpin`（免疫 + 拉回可见）、`/memory forget`（立即墓碑）、`/memory gc --dry-run`（预览）。
 **明确不做**：半衰期/连续数值衰减、按打分公式排序。
 
 ### 4.2 候选池（conf 1）怎么升上来（R27：三条通道，缺一不可）
@@ -672,9 +673,11 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
    调用方不再需要记得 `rebuildIndex` —— 消除"第二个写入口忘刷索引"的隐患。
 8. **LRU 的"使用"只算读全文与重申**，注入不算（避免"越注入越升级"的正反馈）。
 9. **老化以"活动日"为钟**（`state.activeDayCount`）：缺席不老化，避免"长期不启动程序 → 回来一次清空"。
-   **触达分三级**：`use`（master 读全文/写入 → 升级+复活）、`touch`（代理查重读 → 只推迟销毁）、
-   写入升级（代理救候选条目）——语义表见 §4.1。
-10. **`--no-memory` 归一到 `options.memory === false`**：commander 的 `--no-*` 生成的是 `memory: false`，
+   **触达两种强度**：`use`（master 读全文 / 写入重申 → `uses+1`、刷新时钟、推动升级）；
+   `touch`（归纳代理查重读 → 只刷新老化时钟，**不增 uses、不推动升级**，但能让 conf 0 回到 1）。
+   注入（出现在清单里）不算触达 —— 见 §4.1。
+10. **闲置不致死**（R31）：闲置降级下限是 conf 1；conf 0（待销毁）只由 `lru_total_limit` 超限产生。
+11. **`--no-memory` 归一到 `options.memory === false`**：commander 的 `--no-*` 生成的是 `memory: false`，
     此前读 `options.noMemory`（恒 undefined）导致该开关**静默失效**；同时把记忆装配提前到
     `createSessionManager` 内（否则"会话启动结算"会先跑一遍，凭空创建记忆目录）。
 
