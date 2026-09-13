@@ -1526,3 +1526,59 @@ updated: 2026-09-13T02:00:00Z
 - 若要与其一致（缓存最优）：把注入块**写进 `turn.messages`**，UI 单独渲染成一行提示 —— **本仓库已有先例**：子代理通知就是"落盘 + 渲染为 `⇢ [Subagent] …` 一行"（`src/render/conversation.ts`）；
 - 代价：compact 序列化会带上它（Claude Code 靠"压缩后附件消失 → 去重集合自然重置"化解）；
 - **待用户拍板**：(a) 不落盘（transcript 干净，每轮一次小重算）／(b) 落盘（缓存最优，UI 用一行提示承载）。
+
+---
+
+## 13. 第二轮评审决议（2026-09-13 晚）
+
+### R19 【用户决定】删除 `memory_search`，改为**清单全量注入 + `memory_read` 工具**
+
+- **删除 `memory_search`**（含 §8.4 的"必须性"论证）：发现通道改为**清单文件 `MEMORY.md`**（整份注入 system prompt）。
+  → 连带修正：既然靠清单发现，清单就必须**完整可见**（受预算约束），而不是只注入"top-K 摘要"；模型看到清单行后，
+  用 `memory_read` 取全文。
+  → 这与 Claude Code 一致：它**也没有** memory_search 工具，靠"索引注入 + 模型自己 Read/Grep 记忆目录"（报告 §8）。
+- **新增 `memory_read` 工具**：按路径读取记忆文件（项目层相对路径、全局层用 `global:` 前缀），**core 内直接 `node:fs`**
+  （绕过 `checkPath` 沙箱）→ 这是约束 A（全局层对文件工具不可见）的唯一解，也取代了原 `memory_search` 的"全局层通道"职责。
+- 参数 schema（草案）：`{ path: string, layer?: 'auto' | 'project' | 'global', offset?: number, limit?: number }`；
+  `layer: 'auto'` 时按路径前缀/是否存在自动判定；返回内容 + 该文件 mtime（供"读过的文件被更新"提醒使用）。
+- **注册**：主代理 `ALL_TOOLS`（`src/tools/index.ts:75-97`）追加 `memory_read` + `memory_write`；子代理**不追加**。
+
+### R20 【用户决定】召回选择用 `deepseek-v4-flash`
+
+- 配置项 `memory.recall_model` 默认 `deepseek-v4-flash`（不再走确定性打分，废弃 §6.3 的打分公式作为**默认**方案）。
+- 精确适用范围（避免"到处都调 LLM"）：
+  1. **清单超预算时**：`MEMORY.md` 超过 `max_inject_tokens` → 用 flash 从清单里挑相关的 N 行注入（其余保留在文件里，模型可 `memory_read`）；
+  2. **会话内动态出示**：判断"当前任务该不该主动出示某几条记忆全文"（Claude Code 的 `relevant_memories` 通道，它用 Sonnet）→ 我们用 flash；
+  3. 清单在预算内时**不需要任何选择**：直接整份注入（零额外调用）。
+- 失败兜底：flash 调用失败/超时 → 退化为「按 `updated` 倒序取预算内的行」并记审计；**不得**因召回失败而少注入或不注入。
+
+### R21 【用户决定】置信度可见性：master 只看"相对稳定"的条目
+
+- **注入过滤**：只有 `confidence ≥ memory.master_min_confidence`（默认 **2**）的条目进入 `MEMORY.md` 与注入块；
+  `confidence = 1`（模糊/F 重复模式推断）**不进 master 视野**。
+- **模糊条目由 memory agent 独占管理**：存放于 `candidates.md`（不入 `MEMORY.md`、不注入），memory agent 负责其
+  升/降级、合并、淘汰；升级到阈值后由它**移入正式条目并把索引行写进 `MEMORY.md`**。
+- master 的 `memory_write` 仍允许写入（需求 `plan/20260912Task.md:14`），但其产出按同一阈值规则进入 `MEMORY.md`；
+  master 不负责管理模糊条目（不展示、不合并、不淘汰）。
+- 目录补充：
+```
+{workspace}/.deepseek-arch/memory/
+  MEMORY.md      # 正式索引（只列 confidence ≥ 阈值；注入用）
+  <slug>.md      # 正式主题文件
+  candidates.md  # 模糊条目（memory agent 独占；不注入、master 不可见）
+  logs/…  state.json  audit.jsonl  legacy/
+```
+
+### R22 【用户决定】注入块**落盘**（R18 选 (b)）
+
+- 注入块写进 `turn.messages`（成为历史的一部分）→ 历史字节稳定 → **前缀缓存不断**（与 Claude Code 的附件落盘一致）。
+- 载体形态：作为**独立的一条 `role:'user'` 消息**紧随当前用户消息之后（不合并进用户原文，避免污染 `turnUserContent`）。
+  代价与现状一致：会产生连续两条 `role:user` —— 本项目已在这么做（子代理状态块 `src/core/session.ts:746`），OpenAI 兼容协议允许；
+  若将来接入严格交替 provider，再改为"合并进当前 user 消息"的 `<system-reminder>` 形态（R12 的形态保留为备选）。
+- **UI 必须单独渲染**：渲染成一行提示（先例：子代理通知 `⇢ [Subagent] …`，`src/render/conversation.ts`），
+  不要把整块记忆正文打到对话里；`compact` 序列化会带上它（可接受，且压缩后"已出示"去重集合自然重置）。
+- 去重：采纳 Claude Code 的「已读过滤 + 已出示过滤」；落盘后"已出示"可直接从 `turn.messages` 里扫（无需额外状态）。
+
+### R23 【用户决定】游标方案确认采纳
+
+- R14 的**游标 `lastExtractedTurnId` + 主/后台互斥**确认采纳（存 `state.json`，跨进程可恢复）。
