@@ -162,29 +162,42 @@ export interface MemoryState {
 /**
  * LRU 维护参数（来自 `[memory]` 配置段）。
  *
- * **统一模型（R30）：只靠 confidence 档位表达生命周期，不再有独立的"换出队列"。**
+ * **统一模型（R30/R31）：只靠 confidence 档位表达生命周期，不再有独立的"换出队列"。**
  *
  * ```
- *   conf 3 ──闲置超期──▶ 2 ──闲置超期──▶ 1 ──闲置超期──▶ 0 ──闲置超期──▶ 销毁
- *          ◀──升级(uses≥N)──        ◀──升级──        ◀──升级──   ◀──任何触达(=回到 1 重新观察)
+ *   conf 3 ──闲置超期──▶ 2 ──闲置超期──▶ 1 ──容量超限──▶ 0 ──闲置超期──▶ 销毁
+ *          ◀──升级(uses≥N)──        ◀──升级──        ◀──触达(=回到 1 重新观察)
  * ```
  * | conf | 含义 | master 可见 |
  * |:--|:--|:--|
  * | 3 / 2 | 正式记忆（明确陈述 / 确认） | ✅ |
- * | 1 | **待观察**（模糊，等待被印证） | ❌ |
- * | 0 | **待销毁**（长期无人使用；销毁期限一到即归档/删除） | ❌ |
+ * | 1 | **待观察**（模糊 / 曾可见但久未用；等待被印证） | ❌ |
+ * | 0 | **待销毁**（只在**容量装不下**时产生；销毁期限一到即归档/删除） | ❌ |
+ *
+ * 两条关键边界（R31）：
+ *   - **闲置的最低档位是 1**：只是没人用（没有容量压力）不会把记忆推向销毁；
+ *   - **0 只由容量压力产生**（`totalLimit` 超限时把最久未用的**候选**降到 0）——
+ *     这样"一年才提一次"的稀疏偏好永远不会被闲置清掉。
  *
  * 时间为**活动日**（程序实际被使用的天数），不是日历天。
  */
 export interface MemoryLruOptions {
 	/** 总开关（默认 true） */
 	enabled?: boolean;
-	/** 闲置超过该**活动日**数 → 降一级（默认 90；1 → 0 也走这一步） */
+	/** 闲置超过该**活动日**数 → 降一级（默认 90；**下限是 1**，不会因闲置变成 0） */
 	decayActiveDays?: number;
 	/** 累计使用达到该次数且最近有使用 → 升一级（默认 2） */
 	promoteUses?: number;
 	/** memory window：master 可见条目上限（默认 200）；超出时按 LRU 把最久未用者降到 conf 1 */
 	windowSize?: number;
+	/**
+	 * **记忆总量上限**（默认 400；可见 + 候选，不含 superseded）。
+	 * 超出部分把**最久未用的候选条目**降到 **conf 0（待销毁）**。
+	 *
+	 * 为什么要它：**"只是闲置"不该致死** —— 没有容量压力时条目最多降到 conf 1（待观察，成本≈0）；
+	 * 只有真的"装不下了"才动用销毁，于是稀疏偏好不会被闲置清掉。
+	 */
+	totalLimit?: number;
 	/** **conf 0 的销毁期限**（活动日，默认 180）：期间被触达 → 回到 conf 1 重新观察 */
 	destroyAfterDays?: number;
 	/** 销毁方式：archive = 移到 legacy/archive/（默认）；delete = 物理删除 */
@@ -200,6 +213,8 @@ export interface MemoryMaintenanceResult {
 	demoted: { slug: string; from: number; to: number }[];
 	/** 因超出 memory window 被降到 conf 1 的条目（观察区） */
 	windowEvicted: string[];
+	/** 因超出 totalLimit 被降到 conf 0 的候选条目（待销毁）—— 容量压力才会产生 0 */
+	doomed: { slug: string; from: number; to: number }[];
 	/** conf 0 → 1：被再次触达，回到观察区重新开始 */
 	revived: string[];
 	/** conf 0 且超过销毁期限 → 销毁（归档/删除） */
@@ -713,8 +728,9 @@ export class MemoryStore {
 	 *      b. 否则闲置活动日 > `destroyAfterDays` → **销毁**（默认归档 `legacy/archive/`，可配物理删除）
 	 *   2. **conf ≥ 1**：
 	 *      a. **升级**：`uses ≥ promoteUses` 且最近有使用（闲置 ≤ decay）且 conf < 3 → +1，uses 清零
-	 *      b. **窗口换出**：属于"超出 `windowSize` 的最久未用者" → 直接降到 conf 1（观察区，不是判死刑）
-	 *      c. **闲置降级**：闲置活动日 > decay → −1（3→2→1→0）
+	 *      b. **窗口换出**：属于"超出 `windowSize` 的最久未用者" → 降到 conf 1（观察区，不是判死刑）
+	 *      c. **容量淘汰（conf → 0）**：属于"超出 `totalLimit` 的最久未用**候选**" → 降到 0（待销毁）
+	 *      d. **闲置降级**：闲置活动日 > decay → −1（**下限 1**：只是没人用不会致死）
 	 *
 	 * 不变量：
 	 *   - **一次结算每条只走一步**（`lastStepDay` 保证同一活动日内重复结算不连降）；
@@ -729,7 +745,7 @@ export class MemoryStore {
 		dryRun = false,
 	): Promise<MemoryMaintenanceResult> {
 		const result: MemoryMaintenanceResult = {
-			scope, promoted: [], demoted: [], windowEvicted: [], revived: [], destroyed: [],
+			scope, promoted: [], demoted: [], windowEvicted: [], doomed: [], revived: [], destroyed: [],
 			pinned: [], dryRun: dryRun || undefined,
 		};
 		if (opts.enabled === false) return result;
@@ -737,6 +753,7 @@ export class MemoryStore {
 		const decayDays = opts.decayActiveDays ?? 90;
 		const promoteUses = opts.promoteUses ?? 2;
 		const windowSize = opts.windowSize ?? 200;
+		const totalLimit = opts.totalLimit ?? 400;
 		const destroyAfter = opts.destroyAfterDays ?? 180;
 		const destroyMode = opts.destroyMode ?? 'archive';
 		const DAY = 86_400_000;
@@ -786,6 +803,23 @@ export class MemoryStore {
 		const over = Math.max(0, visible.length - windowSize);
 		const windowEvict = new Set(visible.slice(0, over).map((e) => e.slug));
 
+		// 容量淘汰（R31）：**只有装不下时才会出现 conf 0**。
+		// 候选区上限 = 总量上限 − 可见上限；超出的最久未用候选降到 0（待销毁）。
+		const candidateLimit = Math.max(0, totalLimit - windowSize);
+		const candidates = live
+			.filter((e) => !e.pinned && e.confidence < minConf)
+			.sort((a, b) => {
+				const ua = usage[a.slug] ?? { uses: 0, lastUsedAt: a.updated };
+				const ub = usage[b.slug] ?? { uses: 0, lastUsedAt: b.updated };
+				const ta = Date.parse(ua.lastUsedAt || a.updated);
+				const tb = Date.parse(ub.lastUsedAt || b.updated);
+				if (ta !== tb) return ta - tb;
+				if (ua.uses !== ub.uses) return ua.uses - ub.uses;
+				return a.slug.localeCompare(b.slug);
+			});
+		const overCandidates = Math.max(0, candidates.length - candidateLimit);
+		const capacityDoom = new Set(candidates.slice(0, overCandidates).map((e) => e.slug));
+
 		/** 先算完整计划（纯计算），再统一落盘 —— dry-run 因此零副作用 */
 		const plan: { slug: string; confidence: number; usage?: MemoryUsage; destroy?: boolean }[] = [];
 
@@ -826,8 +860,15 @@ export class MemoryStore {
 				continue;
 			}
 
-			// 2c. 闲置降级（一次一级：3→2→1→0）
-			if (idle > decayDays) {
+			// 2c. 容量淘汰 → 降到 conf 0（待销毁）：只有在"装不下"时才会发生
+			if (capacityDoom.has(entry.slug)) {
+				result.doomed.push({ slug: entry.slug, from: conf, to: 0 });
+				plan.push({ slug: entry.slug, confidence: 0, usage: { ...u, uses: 0, lastStepDay: activeDay } });
+				continue;
+			}
+
+			// 2d. 闲置降级（一次一级；**下限 1** —— 只是没人用不会把记忆推向销毁）
+			if (idle > decayDays && conf > 1) {
 				const to = conf - 1;
 				result.demoted.push({ slug: entry.slug, from: conf, to });
 				plan.push({ slug: entry.slug, confidence: to, usage: { ...u, uses: 0, lastStepDay: activeDay } });
@@ -861,7 +902,8 @@ export class MemoryStore {
 		await this.audit({
 			kind: 'lru', at: nowIso, scope, activeDay,
 			promoted: result.promoted, demoted: result.demoted,
-			windowEvicted: result.windowEvicted, revived: result.revived, destroyed: result.destroyed,
+			windowEvicted: result.windowEvicted, doomed: result.doomed,
+			revived: result.revived, destroyed: result.destroyed,
 		});
 		return result;
 	}

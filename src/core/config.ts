@@ -114,6 +114,7 @@ lru_enabled = true             # 按使用情况主动维护：升降级 + 窗�
 lru_decay_active_days = 90     # 闲置超过该「活动日」数 → 置信度降一级（活动日 = 程序被使用的天数）
 lru_promote_uses = 2           # 累计被读/被重申该次数且最近有使用 → 升一级
 lru_window_size = 200          # memory window：master 可见条目上限，超出按 LRU 换出最久未用者
+lru_total_limit = 400          # 记忆总量上限（可见+候选）；只有超限时才把最久未用的候选标记为待销毁(conf 0)
 lru_destroy_after_days = 180   # conf 0（待销毁）的销毁期限（活动日）；期间被触达即回到观察区(1)
 lru_destroy_mode = "archive"   # 销毁方式：archive（移到 legacy/archive/）或 delete（物理删除）
 `;
@@ -165,6 +166,7 @@ const MEMORY_DEFAULTS: Required<MemoryConfig> = {
 	lru_decay_active_days: 90,
 	lru_promote_uses: 2,
 	lru_window_size: 200,
+	lru_total_limit: 400,
 	lru_destroy_after_days: 180,
 	lru_destroy_mode: 'archive',
 };

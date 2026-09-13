@@ -118,14 +118,16 @@ export interface MemoryConfig {
 	agent_timeout_ms?: number;
 	/** 「你读过的记忆被更新」是否提醒（默认 true） */
 	notify_read_updates?: boolean;
-	/** LRU 维护总开关（默认 true）：按使用情况主动升降级 + 窗口换出 + 销毁倒计时 */
+	/** LRU 维护总开关（默认 true）：档位升降级 + 窗口换出 + 容量淘汰 + 销毁 */
 	lru_enabled?: boolean;
-	/** 闲置超过该**活动日**数 → 置信度降一级（默认 90；活动日 = 程序实际被使用的天数） */
+	/** 闲置超过该**活动日**数 → 置信度降一级（默认 90；**下限是 1**，闲置不会降到 0） */
 	lru_decay_active_days?: number;
 	/** 累计使用达到该次数且最近有使用 → 置信度升一级（默认 2） */
 	lru_promote_uses?: number;
 	/** memory window：master 可见条目上限（默认 200）；超出时按 LRU 换出最久未用者 */
 	lru_window_size?: number;
+	/** 记忆总量上限（默认 400；可见 + 候选）—— 只有超限时才把最久未用的候选标记为待销毁(conf 0) */
+	lru_total_limit?: number;
 	/** conf 0（待销毁）的销毁期限（**活动日**，默认 180）；期间被触达 → 回到 conf 1 重新观察 */
 	lru_destroy_after_days?: number;
 	/** 销毁方式："archive"（默认，移到 legacy/archive/）或 "delete"（物理删除） */

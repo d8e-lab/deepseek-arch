@@ -136,6 +136,8 @@ export interface MemorySessionConfig {
 	lruPromoteUses?: number;
 	/** memory window：master 可见条目上限（默认 200），超出按 LRU 换出 */
 	lruWindowSize?: number;
+	/** 记忆总量上限（默认 400）—— 只有超限时才会产生 conf 0（待销毁） */
+	lruTotalLimit?: number;
 	/** conf 0（待销毁）的销毁期限（活动日，默认 180）；期间被触达 → 回到 conf 1 重新观察 */
 	lruDestroyAfterDays?: number;
 	/** 销毁方式：archive（默认）/ delete */
@@ -366,6 +368,7 @@ export class SessionManager {
 			lruDecayActiveDays: cfg.lruDecayActiveDays ?? 90,
 			lruPromoteUses: cfg.lruPromoteUses ?? 2,
 			lruWindowSize: cfg.lruWindowSize ?? 200,
+			lruTotalLimit: cfg.lruTotalLimit ?? 400,
 			lruDestroyAfterDays: cfg.lruDestroyAfterDays ?? 180,
 			lruDestroyMode: cfg.lruDestroyMode ?? 'archive',
 		};
@@ -421,6 +424,7 @@ export class SessionManager {
 			decayActiveDays: mem.config.lruDecayActiveDays,
 			promoteUses: mem.config.lruPromoteUses,
 			windowSize: mem.config.lruWindowSize,
+			totalLimit: mem.config.lruTotalLimit,
 			destroyAfterDays: mem.config.lruDestroyAfterDays,
 			destroyMode: mem.config.lruDestroyMode,
 		};

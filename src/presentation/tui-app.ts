@@ -944,7 +944,7 @@ export class TuiApp {
 				this.cmdOut(dim(`  注入预算 ${mem.config.maxInjectTokens} tokens · 召回/归纳模型 ${mem.config.recallModel}/${mem.config.agentModel}`));
 				this.cmdOut(dim(`  项目层目录 ${store.dirOf('project')}`));
 				this.cmdOut(dim('  子命令：show [kw] | candidates | gc [--dry-run] | pin <slug> | unpin <slug> | forget <slug> | on | off | refresh'));
-				this.cmdOut(dim(`  LRU 维护：${mem.config.lruEnabled ? '开' : '关'} · 活动日闲置 ${mem.config.lruDecayActiveDays} 天降一级 · 使用满 ${mem.config.lruPromoteUses} 次升一级 · 窗口 ${mem.config.lruWindowSize} 条 · conf0 ${mem.config.lruDestroyAfterDays} 活动日${mem.config.lruDestroyMode === 'delete' ? '删除' : '归档'}`));
+				this.cmdOut(dim(`  LRU 维护：${mem.config.lruEnabled ? '开' : '关'} · 活动日闲置 ${mem.config.lruDecayActiveDays} 天降一级 · 使用满 ${mem.config.lruPromoteUses} 次升一级 · 窗口 ${mem.config.lruWindowSize}/${mem.config.lruTotalLimit} 条 · conf0 ${mem.config.lruDestroyAfterDays} 活动日${mem.config.lruDestroyMode === 'delete' ? '删除' : '归档'}`));
 				return true;
 			}
 			case 'show': {
@@ -982,6 +982,7 @@ export class TuiApp {
 					if (r.promoted.length) bits.push(`升级 ${r.promoted.map((p) => `${p.slug} ${p.from}→${p.to}`).join(', ')}`);
 					if (r.demoted.length) bits.push(`降级 ${r.demoted.map((p) => `${p.slug} ${p.from}→${p.to}`).join(', ')}`);
 					if (r.windowEvicted.length) bits.push(`窗口换出 ${r.windowEvicted.join(', ')}`);
+					if (r.doomed.length) bits.push(`容量淘汰→待销毁 ${r.doomed.map((d) => d.slug).join(', ')}`);
 					if (r.revived.length) bits.push(`回到观察区 ${r.revived.join(', ')}`);
 					if (r.destroyed.length) bits.push(`销毁 ${r.destroyed.join(', ')}`);
 					if (r.pinned.length) bits.push(dim(`免疫(pinned) ${r.pinned.length} 条`));
@@ -1068,6 +1069,7 @@ export class TuiApp {
 						lruDecayActiveDays: cfg?.get<number>('memory.lru_decay_active_days') ?? undefined,
 						lruPromoteUses: cfg?.get<number>('memory.lru_promote_uses') ?? undefined,
 						lruWindowSize: cfg?.get<number>('memory.lru_window_size') ?? undefined,
+						lruTotalLimit: cfg?.get<number>('memory.lru_total_limit') ?? undefined,
 						lruDestroyAfterDays: cfg?.get<number>('memory.lru_destroy_after_days') ?? undefined,
 						lruDestroyMode: (cfg?.get<string>('memory.lru_destroy_mode') === 'delete' ? 'delete' : undefined),
 					});

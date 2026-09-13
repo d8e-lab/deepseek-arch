@@ -372,6 +372,7 @@ describe('ConfigManager', () => {
       expect(mgr.get<number>('memory.lru_decay_active_days')).toBe(90);
       expect(mgr.get<number>('memory.lru_promote_uses')).toBe(2);
       expect(mgr.get<number>('memory.lru_window_size')).toBe(200);
+      expect(mgr.get<number>('memory.lru_total_limit')).toBe(400);
       expect(mgr.get<number>('memory.lru_destroy_after_days')).toBe(180);
       expect(mgr.get<string>('memory.lru_destroy_mode')).toBe('archive');
     });

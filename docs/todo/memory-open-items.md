@@ -51,7 +51,7 @@
 （`evictedAt/evictedDay/evictReason` + 销毁倒计时 + 复活分支 + `lastSeen*` + 候选 TTL），
 改为 **`confidence 0 = 待销毁`**、`1 = 待观察`、`2/3 = 可见`；`state.json` 的 usage 从 11 字段收敛到
 **4 个**（`uses / lastUsedAt / lastUsedDay / lastStepDay`）；销毁期限统一为 `lru_destroy_after_days`（默认 180 活动日）。
-`/memory candidates` 按档位分组（1 = 待观察，0 = ⏳待销毁）。**遗留可选项**：`listCandidates()` 仍是单一视图
+`/memory candidates` 按档位分组（1 = 待观察，0 = ⏳待销毁）；**R31：闲置不致死** —— 闲置降级下限为 1，conf 0 只由 `lru_total_limit`（默认 400）超限产生。**遗留可选项**：`listCandidates()` 仍是单一视图
 （含 0/1 两档）—— 若以后需要程序化区分（容量统计、GC 报表），再在 store 层加 `listDoomed()`（当前只有渲染层在意）。
 
 **另一处已修的静默 bug（2026-09-13，R28）**：`--no-memory` 一直**没生效** ——

@@ -58,16 +58,27 @@ describe('memory LRU（统一 confidence 档位）', () => {
 	}
 
 	/**
-	 * 把条目推到 **conf 0（待销毁）**：先造闲置超期，再由 reconcile 降级 ——
-	 * 0 只能由 LRU 产生（写路径的 confidence 被 clamp 到 1..3），所以测试走真实路径。
+	 * 把条目推到 **conf 0（待销毁）**：R31 起 0 **只能由容量压力产生**
+	 * （`totalLimit` 超限 → 最久未用的候选降到 0），闲置最多只降到 1。
+	 * 做法：目标条目 + 一条"较新"的候选，把总量上限压到刚好 1 条候选 → 最久未用者进 0。
+	 * 注意用增量 `setState`（不要用会整体覆盖 state 的 `seed`）。
 	 */
-	async function toDoomed(subject: string, doomedAt: number, idleFrom: number): Promise<string> {
-		const slug = await seed({
-			subject, confidence: 1, activeDay: doomedAt - 1, lastUsedDay: idleFrom, lastStepDay: idleFrom,
+	async function toDoomed(subject: string, activeDay = 100, idleFrom = 1): Promise<string> {
+		const w = await store.write('project', { subject, name: subject, description: 'd', confidence: 1, body: `body-${subject}` });
+		const filler = await store.write('project', { subject: 'filler.one', name: 'filler.one', description: 'd', confidence: 1, body: 'body-filler' });
+		const now = Date.now();
+		await store.setState('project', {
+			activeDayCount: activeDay,
+			lastActiveDate: new Date().toISOString().slice(0, 10),
+			usage: {
+				...(await store.getState('project')).usage,
+				[w.slug]: { uses: 0, lastUsedAt: new Date(now - 30 * DAY).toISOString(), lastUsedDay: idleFrom, lastStepDay: idleFrom },
+				[filler.slug]: { uses: 0, lastUsedAt: new Date(now + 1000).toISOString(), lastUsedDay: activeDay },
+			},
 		});
-		await store.setState('project', { activeDayCount: doomedAt, lastActiveDate: new Date().toISOString().slice(0, 10) });
-		expect((await store.reconcile('project')).demoted).toEqual([{ slug, from: 1, to: 0 }]);
-		return slug;
+		const r = await store.reconcile('project', { windowSize: 10, totalLimit: 11 });
+		expect(r.doomed.map((d) => d.slug)).toEqual([w.slug]);
+		return w.slug;
 	}
 
 	it('使用计数：写入即一次使用；注入（清单）不算', async () => {
@@ -124,19 +135,21 @@ describe('memory LRU（统一 confidence 档位）', () => {
 		expect(await store.listEntries('project')).toHaveLength(0);       // 1 = 待观察，离开清单
 		expect((await store.readEntry('project', slug))!.status).toBe('candidate');
 
+		// 只是继续闲置 → **停在 1（待观察）**，不会被闲置推向销毁（R31）
 		await setDay(300);
-		expect((await store.reconcile('project')).demoted).toEqual([{ slug, from: 1, to: 0 }]);  // 0 = 待销毁
-		expect((await store.readEntry('project', slug))!.confidence).toBe(0);
+		expect((await store.reconcile('project')).demoted).toEqual([]);
+		expect((await store.readEntry('project', slug))!.confidence).toBe(1);
+		expect((await store.readEntry('project', slug))!.status).toBe('candidate');
 	});
 
 	it('conf 0 = 待销毁：闲置超过销毁期限 → 销毁（默认归档，文件保留）', async () => {
-		const slug = await toDoomed('a.one', 200, 1);                 // 1 → 0（lastStepDay = 200）
-		await store.setState('project', { activeDayCount: 200 + 31, lastActiveDate: new Date().toISOString().slice(0, 10) });
+		const slug = await toDoomed('a.one');                        // 容量淘汰 → conf 0
+		await store.setState('project', { activeDayCount: 100 + 31, lastActiveDate: new Date().toISOString().slice(0, 10) });
 
 		const r = await store.reconcile('project', { destroyAfterDays: 30 });
 
 		expect(r.destroyed).toEqual([slug]);
-		expect((await store.scan('project')).entries).toHaveLength(0);
+		expect((await store.scan('project')).entries.map((e) => e.slug)).not.toContain(slug);
 		expect((await store.getState('project')).usage![slug]).toBeUndefined();
 		expect(existsSync(join(projectDir, 'legacy', 'archive', `${slug}.md`))).toBe(true);
 
@@ -146,37 +159,40 @@ describe('memory LRU（统一 confidence 档位）', () => {
 	});
 
 	it('destroyMode=delete：物理删除文件（用户显式要求时才这么配）', async () => {
-		const slug = await toDoomed('a.one', 200, 1);
-		await store.setState('project', { activeDayCount: 200 + 31, lastActiveDate: new Date().toISOString().slice(0, 10) });
+		const slug = await toDoomed('a.one');
+		await store.setState('project', { activeDayCount: 100 + 31, lastActiveDate: new Date().toISOString().slice(0, 10) });
 
 		expect((await store.reconcile('project', { destroyAfterDays: 30, destroyMode: 'delete' })).destroyed).toEqual([slug]);
 		expect(existsSync(join(projectDir, `${slug}.md`))).toBe(false);
 		expect(existsSync(join(projectDir, 'legacy', 'archive', `${slug}.md`))).toBe(false);
 	});
 
-	it('conf 0 被触达 → 回到 conf 1 重新观察（不销毁、也不直接回 2）', async () => {
-		const slug = await toDoomed('a.one', 200, 1);
-		await store.setState('project', { activeDayCount: 200 + 31, lastActiveDate: new Date().toISOString().slice(0, 10) });
+	it('conf 0 被 master 使用 → 回到 conf 1 重新观察（不销毁、也不直接回 2）', async () => {
+		const slug = await toDoomed('a.one');
+		await store.setState('project', { activeDayCount: 100 + 31, lastActiveDate: new Date().toISOString().slice(0, 10) });
 
-		// master 真读全文（use）→ 刷新老化时钟 → 不该被销毁
-		await store.recordUse('project', slug);
+		await store.recordUse('project', slug);                       // master 读全文
 		const r = await store.reconcile('project', { destroyAfterDays: 30 });
 
 		expect(r.destroyed).toEqual([]);
 		expect(r.revived).toEqual([slug]);
 		const entry = (await store.readEntry('project', slug))!;
-		expect(entry.confidence).toBe(1);            // 从 1 开始观察，不是 2
+		expect(entry.confidence).toBe(1);                             // 从 1 开始观察，不是 2
 		expect(entry.status).toBe('candidate');
 		expect(await store.listEntries('project')).toHaveLength(0);
+	});
 
-		// 归纳代理查重读到（touch）同样能把它从 0 拉回 1（话题又出现了），但不增 uses
-		const slug2 = await toDoomed('b.two', 200, 1);
-		await store.recordTouch('project', slug2);
-		const r2 = await store.reconcile('project', { destroyAfterDays: 30 });
-		expect(r2.revived).toEqual([slug2]);
-		expect(r2.destroyed).toEqual([]);
-		expect((await store.readEntry('project', slug2))!.confidence).toBe(1);
-		expect((await store.getState('project')).usage![slug2].uses).toBe(0);
+	it('conf 0 被归纳代理「看到」→ 回到 conf 1（话题又出现了），但不增 uses', async () => {
+		const slug = await toDoomed('b.two');
+		await store.setState('project', { activeDayCount: 100 + 31, lastActiveDate: new Date().toISOString().slice(0, 10) });
+
+		await store.recordTouch('project', slug);
+		const r = await store.reconcile('project', { destroyAfterDays: 30 });
+
+		expect(r.destroyed).toEqual([]);
+		expect(r.revived).toEqual([slug]);
+		expect((await store.readEntry('project', slug))!.confidence).toBe(1);
+		expect((await store.getState('project')).usage![slug].uses).toBe(0);
 	});
 
 	it('memory window：可见条目超容量 → 最久未用者降到 conf 1（观察区，不是判死刑）', async () => {
@@ -238,9 +254,41 @@ describe('memory LRU（统一 confidence 档位）', () => {
 		expect((await store.readEntry('project', slug))!.confidence).toBe(3);
 	});
 
+	it('conf 0 只由容量压力产生：总量不超限时，闲置再久也不会出现 0', async () => {
+		// 一条候选闲置 10 万个活动日，但总量完全没超限 → 不许出现 conf 0/销毁
+		const slug = await seed({ subject: 'lonely.one', confidence: 1, activeDay: 100_000, lastUsedDay: 1, lastStepDay: 1 });
+		const r = await store.reconcile('project', { windowSize: 200, totalLimit: 400, destroyAfterDays: 30 });
+		expect(r.doomed).toEqual([]);
+		expect(r.destroyed).toEqual([]);
+		expect((await store.readEntry('project', slug))!.confidence).toBe(1);
+	});
+
+	it('候选区超容量 → 最久未用的候选降到 conf 0（待销毁），可见清单不受影响', async () => {
+		// 可见 1 条（窗口 10 不超）+ 候选 2 条（候选区上限 = 11−10 = 1，超 1 条）
+		const visible = await store.write('project', { subject: 'vis.one', name: 'vis.one', description: 'd', confidence: 3, body: 'b0' });
+		const oldCand = await store.write('project', { subject: 'old.cand', name: 'old.cand', description: 'd', confidence: 1, body: 'b1' });
+		const newCand = await store.write('project', { subject: 'new.cand', name: 'new.cand', description: 'd', confidence: 1, body: 'b2' });
+		const now = Date.now();
+		await store.setState('project', {
+			activeDayCount: 10, lastActiveDate: new Date().toISOString().slice(0, 10),
+			usage: {
+				[visible.slug]: { uses: 1, lastUsedAt: new Date(now).toISOString(), lastUsedDay: 10 },
+				[oldCand.slug]: { uses: 0, lastUsedAt: new Date(now - 30 * DAY).toISOString(), lastUsedDay: 1 },
+				[newCand.slug]: { uses: 0, lastUsedAt: new Date(now - 1 * DAY).toISOString(), lastUsedDay: 9 },
+			},
+		});
+
+		const r = await store.reconcile('project', { windowSize: 10, totalLimit: 11 });
+
+		expect(r.doomed).toEqual([{ slug: oldCand.slug, from: 1, to: 0 }]);   // 最久未用的候选
+		expect((await store.readEntry('project', oldCand.slug))!.confidence).toBe(0);
+		expect((await store.readEntry('project', newCand.slug))!.confidence).toBe(1);
+		expect((await store.readEntry('project', visible.slug))!.confidence).toBe(3);   // 可见清单不受影响
+	});
+
 	it('索引标注：conf 1 = 待观察、conf 0 = ⏳待销毁（带 已N/期限 活动日）、pinned = 📌', async () => {
 		const today = new Date().toISOString().slice(0, 10);
-		const doomed = await toDoomed('doomed.one', 100, 1);          // 1 → 0，lastStepDay = 100
+		const doomed = await toDoomed('doomed.one', 100, 1);          // 容量淘汰 → conf 0，lastStepDay = 100
 		// 注意：以下都用 store.write（增量更新 usage），不要用 seed（它会整体覆盖 state）
 		await store.write('project', { subject: 'watch.one', name: 'watch.one', description: 'd', confidence: 1, body: 'b1' });
 		const pinned = (await store.write('project', { subject: 'kept.one', name: 'kept.one', description: 'd', confidence: 2, body: 'b2' })).slug;
@@ -280,25 +328,26 @@ describe('memory LRU（统一 confidence 档位）', () => {
 		expect(await store.listEntries('project')).toHaveLength(1);
 	});
 
-	it('稀疏偏好（一年才提一次）不会被"晋升需重复 vs 生存期太短"互相削弱', async () => {
+	it('稀疏偏好（一年才提一次）：闲置只降到 1，不会被清掉（R31）', async () => {
 		const now = new Date().toISOString();
 		const slug = await seed({ subject: 'sparse.pref', confidence: 1, activeDay: 95, lastUsedDay: 1, uses: 1 });
 		const setDay = (d: number) => store.setState('project', { activeDayCount: d, lastActiveDate: now.slice(0, 10) });
 
-		// 95 → 195：闲置 94 > decay(90) → 降到 0（待销毁），但还没到销毁期限
-		await setDay(195);
-		expect((await store.reconcile('project')).demoted).toEqual([{ slug, from: 1, to: 0 }]);
-
-		// 200：用户又提到它 → 归纳代理写回 conf 1（"重新启用从 1 开始观察"）→ 不会被销毁
-		await setDay(200);
-		await store.write('project', { subject: 'sparse.pref', name: 'sparse.pref', description: 'd', confidence: 1, body: 'body-sparse.pref', slug });
-		const r = await store.reconcile('project');
-		expect(r.destroyed).toEqual([]);
+		// 1 档继续闲置很久：既不销毁，也不降级（1 已是"只是没人用"的下限）
+		for (const d of [200, 400, 800]) {
+			await setDay(d);
+			const r = await store.reconcile('project');
+			expect(r.destroyed).toEqual([]);
+			expect(r.demoted).toEqual([]);
+		}
 		expect((await store.readEntry('project', slug))!.confidence).toBe(1);
 
-		// 且此后继续被重申可正常升级（历史计数被降级消费过，但重新攒得起）
+		// 400 活动日后再提到它 → 重申累积到 2 次 → 升进清单（稀疏偏好的真正出路）
+		await setDay(800);
+		await store.write('project', { subject: 'sparse.pref', name: 'sparse.pref', description: 'd', confidence: 1, body: 'body-sparse.pref', slug });
 		await store.recordUse('project', slug);
 		expect((await store.reconcile('project')).promoted).toEqual([{ slug, from: 1, to: 2 }]);
+		expect(await store.listEntries('project')).toHaveLength(1);
 	});
 
 	it('退休条目的使用记录被清理（取代 + 遗忘都不在 state.json 里留垃圾）', async () => {

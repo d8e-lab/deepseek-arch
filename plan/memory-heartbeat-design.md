@@ -2,9 +2,9 @@
 
 > **版本说明**
 > - **v2（2026-09-13）**：与实现一致，是唯一的实施依据。§13 列出 v1 已废弃的方案及理由。
-> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；五轮评审（R1–R30）后改为
+> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；五轮评审（R1–R31）后改为
 >   「每主题 Markdown + 清单注入 system prompt + 落盘式变化提醒 + flash 召回」，
->   并删除了 reviewer（censor agent）；R25–R30 补齐了「过时记忆如何淘汰」「候选池如何升级」「活动日时钟 + 窗口」，并在 R30 把生命周期**统一到 confidence 档位**（0 = 待销毁，§4.1、§4.4）。
+>   并删除了 reviewer（censor agent）；R25–R30 补齐了「过时记忆如何淘汰」「候选池如何升级」「活动日时钟 + 窗口」，并在 R30 把生命周期**统一到 confidence 档位**（0 = 待销毁）、R31 明确**闲置不致死**（0 只由容量压力产生）（§4.1、§4.4）。
 >
 > **配套文件**
 > - 讲解版（用户视角）：`plan/memory-design-explained.md`
@@ -262,16 +262,21 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 不再有"换出队列 / 销毁倒计时 / 复活"那一套独立机制：
 
 ```
-  conf 3 ──闲置超期──▶ 2 ──闲置超期──▶ 1 ──闲置超期──▶ 0 ──闲置超期──▶ 销毁
-         ◀──升级(uses≥N)──       ◀──升级──       ◀──升级──   ◀──任何触达 = 回到 1 重新观察
+  conf 3 ──闲置超期──▶ 2 ──闲置超期──▶ 1 ──容量超限──▶ 0 ──闲置超期──▶ 销毁
+         ◀──升级(uses≥N)──       ◀──升级──       ◀──触达 = 回到 1 重新观察
 ```
+
+**两条边界（R31，用户拍板）**：
+- **闲置的最低档位是 1**：只是"没人用"（没有容量压力）不会把记忆推向销毁 —— 稀疏偏好永远安全；
+- **0 只由容量压力产生**：`totalLimit`（默认 400 = 可见 200 + 候选 200）超限时，
+  最久未用的**候选**降到 0（待销毁），再闲置 `destroyAfterDays` 才真的归档/删除。
 
 | conf | 含义 | master 可见 |
 |:--|:--|:--|
 | **3** | 用户明确陈述 | ✅ |
 | **2** | 否决/纠正、确认 | ✅ |
-| **1** | **待观察**（模糊，等被印证） | ❌ |
-| **0** | **待销毁**（长期无人使用；销毁期限一到即归档/删除） | ❌ |
+| **1** | **待观察**（模糊，或曾可见但久未用；等被印证） | ❌ |
+| **0** | **待销毁**（**只在容量装不下时产生**；销毁期限一到即归档/删除） | ❌ |
 
 **时间单位是「活动日」，不是日历天**
 
@@ -301,7 +306,8 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | 1b | conf **0** 且闲置活动日 > `lru_destroy_after_days` | **销毁**（默认归档 `legacy/archive/`，可配 `delete`） |
 | 2a | `uses ≥ lru_promote_uses`（默认 2）且最近有使用（闲置 ≤ decay）且 conf < 3 | **升级** conf+1，`uses` 清零 |
 | 2b | 属于"超出 `windowSize` 的最久未用者"（且 conf > 1） | **窗口换出** → conf 1（观察区，不是判死刑） |
-| 2c | 闲置活动日 > `lru_decay_active_days`（默认 90） | **降级** conf−1（3→2→1→0） |
+| 2c | 属于"超出 `totalLimit` 的最久未用**候选**" | **容量淘汰** → conf 0（待销毁；这是 0 的唯一来源） |
+| 2d | 闲置活动日 > `lru_decay_active_days`（默认 90）且 conf > 1 | **降级** conf−1（3→2→1，**下限 1**） |
 
 - **一次结算每条只走一步**：`lastStepDay` 保证同一活动日内重复结算（两次会话启动 / 手动 gc）不会连降两级。
 - **换出顺序**（窗口）：`lastUsedAt` 升序 → `uses` 升序 → slug（确定性、可测）。
@@ -398,7 +404,8 @@ lastPromotedAt/lastDemotedAt/lastDemotedDay` 字段**不再被读取**（本轮�
 | 3 | 无真实使用记录的条目用 `updated` 起算 | 迁移兼容；下一次触达即转正 |
 | 4 | `pinned` 免疫全部结算，且 pin 时**把等级拉到可见阈值** | pin = 用户显式"留住它"；pin 一个看不见且待销毁的条目没有意义 |
 | 5 | `superseded`（取代/遗忘的墓碑）**不参与**结算 | 演化记录永久保留；`forget`（墓碑）与销毁（归档/删除）终态不同 |
-| 6 | `master_min_confidence = 1` 会让候选区消失 | 边界说明：conf 1/0 都变可见（不可见判据失效）→ **建议保持默认 2** |
+| 6 | **闲置不致死**（R31）：闲置降级下限是 1，conf 0 只由 `totalLimit` 超限产生 | 理由：没有容量压力时**没有销毁的理由** —— 候选区成本≈0（不注入、不进上下文）；而"只是没人提"恰恰是稀疏偏好的常态（一年才提一次）。这条同时让"候选 TTL 调参"类问题从根上消失 |
+| 7 | `master_min_confidence = 1` 会让候选区消失 | 边界说明：conf 1/0 都变可见（不可见判据失效）→ **建议保持默认 2** |
 
 > 一句话：**档位表就是状态机** —— 3/2 可见 → 1 待观察 → 0 待销毁 → 销毁，中间只有"闲置超期"与"被触达"两种转移。
 
@@ -590,6 +597,7 @@ lastPromotedAt/lastDemotedAt/lastDemotedDay` 字段**不再被读取**（本轮�
 | `lru_decay_active_days` | `90` | 闲置超过该**活动日**数 → 置信度降一级（活动日 = 程序被使用的天数，缺席不老化） |
 | `lru_promote_uses` | `2` | 累计使用次数达标且最近有使用 → 升一级 |
 | `lru_window_size` | `200` | memory window：master 可见条目上限，超出按 LRU 把最久未用者降到 conf 1 |
+| `lru_total_limit` | `400` | 记忆总量上限（可见 + 候选）；超限时把最久未用的候选降到 conf 0（**0 的唯一来源**） |
 | `lru_destroy_after_days` | `180` | **conf 0（待销毁）的销毁期限**（活动日）；期间被触达即回到观察区(1) |
 | `lru_destroy_mode` | `"archive"` | 销毁方式：`archive`（移入 `legacy/archive/`）或 `delete`（物理删除） |
 
@@ -635,7 +643,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 ## 12. 实现状态与测试映射
 
-截至 2026-09-13：**全量 611 测试通过**（54 个测试文件），`tsc` 无错。
+截至 2026-09-13：**全量 614 测试通过**（54 个测试文件），`tsc` 无错。
 
 | 模块 | 文件 | 测试 | 用例数 |
 |:--|:--|:--|:--|
@@ -645,7 +653,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 | 服务装配 | `src/core/memory-service.ts` | 经工具测试覆盖 | — |
 | 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts` | 11 |
 | 淘汰工具 | `src/tools/memory-forget.ts` | `tests/tools/memory-forget.test.ts` | 6 |
-| LRU 维护（统一档位 + 活动日 + 窗口 + 触达）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`recordTouch`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 17 |
+| LRU 维护（统一档位 + 活动日 + 窗口/容量 + 触达）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`recordTouch`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 20 |
 | 归纳代理（索引前置 + 相关性初筛） | `src/core/memory-agent.ts`（`renderMemoryIndex`/`pickRelated`）、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 17 |
 | 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts` | +4 |
 | CLI（含 `--no-memory`、`--prompt`） | `src/cli/index.ts` | `tests/cli/prompt.test.ts` | 7 |
