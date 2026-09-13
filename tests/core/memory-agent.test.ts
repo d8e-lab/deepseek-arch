@@ -238,4 +238,72 @@ describe('MemoryAgent', () => {
 		expect(seen[0]).toContain('user-2');
 		expect(seen[0]).toContain('user-3');
 	});
+
+	// ── 淘汰（memory_forget）：归纳时顺带清理过时记忆 ──────────────────────
+
+	async function seed(scope: 'project' | 'global', subject: string, confidence: number) {
+		return store.write(scope, {
+			subject, name: `主题-${subject}`, description: 'd', type: 'user', confidence, body: 'b',
+		});
+	}
+
+	it('memory_forget：淘汰低置信条目并记录 action=forget', async () => {
+		const w = await seed('project', 'topic.a', 2);
+		expect(await store.listEntries('project')).toHaveLength(1); // 前置：在可见清单里
+		const provider = makeProvider([
+			{ toolCalls: [{ id: 'c1', name: 'memory_forget', args: { slug: w.slug, reason: '话题已结束' } }] },
+			{ content: '清理 1 条。' },
+		]);
+		const agent = makeAgent(provider, store);
+
+		const r = await agent.run({ turns: [{ user: 'u', assistant: 'a', turnId: 't1' }], currentUser: 'u' });
+
+		expect(r.status).toBe('done');
+		expect(r.writes).toEqual([{ slug: w.slug, action: 'forget' }]);
+		expect(await store.listEntries('project')).toHaveLength(0);
+		expect((await store.readEntry('project', w.slug))?.status).toBe('superseded');
+	});
+
+	it('memory_forget：confidence 3 被拒绝，条目保留（代理无法删除用户显式偏好）', async () => {
+		const w = await seed('project', 'topic.b', 3);
+		const results: string[] = [];
+		const provider = makeProvider(
+			[
+				{ toolCalls: [{ id: 'c1', name: 'memory_forget', args: { slug: w.slug } }] },
+				{ content: '放弃清理。' },
+			],
+			(messages) => {
+				const last = messages[messages.length - 1] as { content?: unknown };
+				if (typeof last?.content === 'string') results.push(last.content);
+			},
+		);
+		const agent = makeAgent(provider, store);
+
+		const r = await agent.run({ turns: [{ user: 'u', assistant: 'a', turnId: 't1' }], currentUser: 'u' });
+
+		expect(r.writes).toEqual([]); // 未淘汰 → 不记写
+		expect(results.join('\n')).toContain('Refused');
+		expect(await store.listEntries('project')).toHaveLength(1);
+	});
+
+	it('memory_forget：每轮硬淘汰上限 3 条（不计入写入配额，但受独立上限约束）', async () => {
+		const slugs: string[] = [];
+		for (const s of ['topic.c', 'topic.d', 'topic.e', 'topic.f']) {
+			slugs.push((await seed('project', s, 2)).slug);
+		}
+		const provider = makeProvider([
+			...slugs.map((slug, i) => ({
+				toolCalls: [{ id: `c${i}`, name: 'memory_forget', args: { slug } }],
+			})),
+			{ content: 'done' },
+		]);
+		const agent = makeAgent(provider, store, { maxToolCalls: 20 });
+
+		const r = await agent.run({ turns: [{ user: 'u', assistant: 'a', turnId: 't1' }], currentUser: 'u' });
+
+		expect(r.writes.filter((w) => w.action === 'forget')).toHaveLength(3); // 上限 3
+		const statuses = await Promise.all(slugs.map(async (s) => (await store.readEntry('project', s))?.status));
+		expect(statuses.filter((s) => s === 'superseded')).toHaveLength(3);
+		expect(statuses.filter((s) => s === 'active')).toHaveLength(1); // 第 4 条保留
+	});
 });

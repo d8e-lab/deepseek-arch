@@ -37,6 +37,7 @@ export { subagentTraceTool, formatSubagentTrace } from './subagent-trace.js';
 export type { TraceableSubagent } from './subagent-trace.js';
 export { memoryReadTool } from './memory-read.js';
 export { memoryWriteTool } from './memory-write.js';
+export { memoryForgetTool, forgetMemoryEntry } from './memory-forget.js';
 export { tuiCaptureTool, setCaptureFn } from './tui-capture.js';
 export type { CaptureFn } from './tui-capture.js';
 export { tuiRenderPreviewTool } from './tui-render-preview.js';

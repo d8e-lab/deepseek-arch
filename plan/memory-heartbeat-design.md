@@ -2,8 +2,9 @@
 
 > **版本说明**
 > - **v2（2026-09-13）**：与实现一致，是唯一的实施依据。§13 列出 v1 已废弃的方案及理由。
-> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；四轮评审（R1–R24）后改为
->   「每主题 Markdown + 清单注入 system prompt + 落盘式变化提醒 + flash 召回」，并删除了 reviewer（censor agent）。
+> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；五轮评审（R1–R25）后改为
+>   「每主题 Markdown + 清单注入 system prompt + 落盘式变化提醒 + flash 召回」，
+>   并删除了 reviewer（censor agent）；R25 补齐了「过时记忆如何淘汰」（§4）。
 >
 > **配套文件**
 > - 讲解版（用户视角）：`plan/memory-design-explained.md`
@@ -47,7 +48,7 @@
 | 2 | 第三层「用户个人偏好」 | 与全局层边界不清，用户未想好 |
 | 3 | `memory_search` 工具 | 清单已提供发现通道；全局层由 `memory_read` 覆盖（§13-B2） |
 | 4 | 相似度阈值去重、确定性打分公式 | 清单前置 + 模型判断 + 三条等值规则（§5） |
-| 5 | 折叠（fold）/容量清理 | 每主题一个文件后不再需要压缩日志（§13-B1） |
+| 5 | 连续数值衰减公式（半衰期）、fold 折叠、容量清理 | 半衰期带来不可解释的可见性漂移；fold 在"每主题一文件"后无对象。淘汰改走**离散档位 + agent 顺带清理**（§4）；确定性 GC 见 A3b |
 | 6 | reviewer（censor agent）/ YOLO 审查自动续答 | 用户决定删除（§13-B5） |
 | 7 | 常驻 daemon | 心跳走外部 cron/systemd + TUI 定时器（§11） |
 | 8 | 记忆参与 compact 摘要生成 | 职责分离：摘要管上下文，记忆管偏好；compact 只做**重注入** |
@@ -214,8 +215,26 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | 候选池 | `confidence < 门槛` 的条目进 `candidates.md`：**不注入、master 不可见**，由 memory agent 独占管理 |
 | 升级 | 同义再现 → merge 时置信度取 max（封顶 3）；升到门槛以上时由 `rebuildIndex` 自动进入正式索引 |
 | 取代 | 同 subject 冲突 → 旧条目 `status=superseded`，退出索引但保留文件（演化记录） |
-| 衰减 / LRU 淘汰 | **本期不做**（无消费者，见 `docs/todo/memory-open-items.md` A3）；只保留 `updated` 用于时效显示 |
+| 软淘汰 | 归纳代理对某条 `memory_write` 传同 slug + `confidence: 1` → 掉回候选池（`candidates.md`），**master 不再看到**，仍可恢复 |
+| 硬淘汰 | `memory_forget`（**仅 memory agent 可用**，每轮上限 3 条，不计入写入配额）：写墓碑 + 退出索引；**`confidence: 3` 拒绝**（只能取代或用户本人 `/memory forget`） |
+| 静默失效的治理 | 归纳代理每轮读清单（含 `updated N days ago`）→ 顺带清理与本轮话题相关且明显过时的条目；配合 `confidence` 的**离散档位**（3→2→1→候选池→superseded），不做连续数值衰减 |
+| 衰减 / LRU（确定性 GC） | **本期不做**，设计要点见 `docs/todo/memory-open-items.md` A3b |
 | 到期提醒 | `remindAt` 到期的条目（**含候选条目**）在下一轮注入 `<memory-due>`，发出后清空 `remindAt`（一次性） |
+
+**淘汰路径（R25：过时记忆如何消失）**
+
+"过时"分两类，机制不同：
+
+| 类型 | 表现 | 机制 |
+|:--|:--|:--|
+| **被推翻**（有矛盾证据） | 同 subject 出现新说法 | 取代：旧条目 `superseded`、退出索引（代码自动，确定性） |
+| **被判断无意义** | 话题早结束、内容再无价值 | agent 软淘汰（`confidence: 1` → 候选池）或硬淘汰（`memory_forget`） |
+| **静默失效**（没人再提、也没被推翻） | `updated` 越来越旧 | 归纳时按「时效 + 本轮话题相关性」顺带处理；**不做半衰期公式** |
+| **用户显式偏好过时** | `confidence: 3` 但你判断它老了 | 代码层**拒绝删除**（`forbidden`）→ 只能由新说法取代，或用户 `/memory forget` |
+
+为什么不用连续衰减：可见性随日期漂移无法向用户解释（"昨天还在，今天怎么没了"），
+而"离散档位（3→2→1→候选池→superseded）+ 由归纳代理在读到相关对话时决定"既可控又可审计（每次动作都落 `audit.jsonl`）。
+清单预算 ≤800 tokens 是安全阀：即使滞留条目存在，它们也只能挤占预算、不会撑爆上下文。
 
 ---
 
@@ -301,12 +320,17 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 
 ### 8.3 工具集（有意收紧）
 
-只有两个：`memory_read`（读清单/条目，含候选池文件）+ `memory_write`（写入）。
+只有三个：`memory_read`（读清单/条目，含候选池文件）、`memory_write`（写入）、`memory_forget`（淘汰）。
 - 不给文件/搜索工具 → 从根上避免它去"核实技术细节"（也就省掉了白名单与路径限制逻辑）。
 - **写入配额在工具层强制**：包装后的 `memory_write` 超过 `agent_max_writes_per_run`（默认 3）返回错误文本，
   让 agent 自然收尾（而不是中断运行）。
+- **淘汰配额独立**：`memory_forget` 每轮上限 3 条（常量 `MAX_FORGETS_PER_RUN`），**不占用写入配额**
+  （否则"写满了就没法清理"）；`confidence: 3` 直接拒绝。
+- **清理是硬职责**：提示词含"时效与清理"表 —— 相关话题下矛盾 → 取代；无意义 → `confidence: 1` 软淘汰；
+  事实错误且无替代 → `memory_forget`。判断依据只有「清单里的 `updated` 时效」+「本轮对话」，
+  且要求"每轮最多处理 3 条、优先相关且明显过时的"，禁止为清理而批量淘汰无关条目。
 - 提示词在 `src/core/memory-agent-prompt.ts`：信号 A–F 判定表、置信度取值、"不该记什么"清单、
-  同 subject 复用要求、正文结构、工具说明。
+  同 subject 复用要求、正文结构、时效与清理规则、工具说明。
 
 ### 8.4 主/后台互斥
 
@@ -361,7 +385,8 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | `memory_read { path }` | 读条目全文。`path` 可为 `reply-format.md`（自动定位层）/ `global:x.md` / `project:x.md` / 绝对路径；返回正文 + 元信息（confidence/updated/subject）。**core 内直接 `node:fs`，绕过 `checkPath`** → 全局层唯一通道 |
 | `memory_write { scope, subject, body, name?, description?, type?, tags?, paths?, confidence?, slug?, remindAt?, supersedes? }` | 写入/更新/取代（见 §3.4）；写后自动重建索引 + 审计。描述里写明"不该记什么"，提醒模型宁少勿滥 |
 
-子代理 `SUBAGENT_TOOLS` **不含**记忆工具。
+子代理 `SUBAGENT_TOOLS` **不含**记忆工具；`memory_forget` **不进 `ALL_TOOLS`**，只挂在归纳代理的工具集里
+（master 想淘汰只能走 `confidence: 1` 软降级，或用户 `/memory forget`）。
 
 ---
 
@@ -428,7 +453,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 ## 12. 实现状态与测试映射
 
-截至 2026-09-13：**全量 575 测试通过**（52 个测试文件），`tsc` 无错。
+截至 2026-09-13：**全量 584 测试通过**（53 个测试文件），`tsc` 无错。
 
 | 模块 | 文件 | 测试 | 用例数 |
 |:--|:--|:--|:--|
@@ -437,7 +462,8 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 | 注入 | `src/core/memory-inject.ts` | `tests/core/memory-inject.test.ts` | 10 |
 | 服务装配 | `src/core/memory-service.ts` | 经工具测试覆盖 | — |
 | 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts` | 10 |
-| 归纳代理 | `src/core/memory-agent.ts`、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 11 |
+| 淘汰工具 | `src/tools/memory-forget.ts` | `tests/tools/memory-forget.test.ts` | 6 |
+| 归纳代理 | `src/core/memory-agent.ts`、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 14 |
 | 会话接线 | `src/core/session.ts` | `tests/core/memory-session.test.ts` | 8 |
 | 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts` | +4 |
 | CLI（含 `--no-memory`、`--prompt`） | `src/cli/index.ts` | `tests/cli/prompt.test.ts` | 7 |
@@ -445,7 +471,8 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 关键实现选择（与评审稿的差异以此为准）：
 
 1. **游标用轮次序号**（`"1"`/`"2"`…）而非消息 uuid —— 简单、跨进程稳定。
-2. **agent 工具只有 read+write** —— 从根上避免"去核实技术细节"。
+2. **agent 工具只有 read+write+forget** —— 从根上避免"去核实技术细节"。淘汰不走「打分公式」而走
+   「离散档位 + 由 agent 顺带判断」（§4 末三行、§8.3）。
 3. **配额在工具层强制**（返回错误文本给模型）而非中断运行。
 4. **watchdog 中止不推进游标**（可重试），`no_input`/`master_wrote` 推进游标（避免空转）。
 5. **注入块与子代理通知共用"落盘为一条 user 消息"形态**；并修掉了**无工具轮丢弃注入块**的 bug
@@ -475,5 +502,5 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 | 组 | 内容 |
 |:--|:--|
-| **A** | A2 事件化提示、A3 衰减/LRU/会话内出示、A4 `logs/` 写入、A5 CLI 面（`--memory-scope`/`--quiet`/`pin`/`show --audit`）、A6 `--prompt` 契约对齐、A7 跨层去重分层、A8 `agent_max_tokens` 字段 |
+| **A** | A2 事件化提示、A3b 确定性 GC（衰减/LRU 归档）、A4 `logs/` 写入、A5 CLI 面（`--memory-scope`/`--quiet`/`pin`/`show --audit`）、A6 `--prompt` 契约对齐、A7 跨层去重分层、A8 `agent_max_tokens` 字段 |
 | **C** | 心跳载体契约、cron/systemd 细节、无人值守时的到期提醒呈现 |

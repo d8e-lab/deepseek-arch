@@ -1,8 +1,9 @@
 # Memory 未做项 / 挂起项（TODO）
 
 > 来源：`plan/memory-heartbeat-design.md` 评审 A1–A8 与实现收尾（2026-09-13）。
-> 状态约定：**挂起** = 已决定暂不做（不阻塞当前工作）；**待定** = 需要用户决策后再做。
+> 状态约定：**挂起** = 已决定暂不做（不阻塞当前工作）；**待定** = 需要用户决策后再做；**已做** = 直接从表中可见（保留行以存档判断依据）。
 > 实现现状见设计稿 v2 §12；每条都标了设计依据与落地位置，可直接开工。
+> A3 已按"淘汰过时记忆"的缺口拆为 A3a（已做）/ A3b（可选 GC）/ A3c（不做：连续衰减）/ A3d（不做：主动出示）。
 
 ---
 
@@ -11,7 +12,10 @@
 | ID | 事项 | 现状（已实现） | 挂起原因 | 落地位置 / 工作量 |
 |:--|:--|:--|:--|:--|
 | **A2** | 写入提示通道：StreamEvent `memory_updated` | 用 `SessionManager.setMemoryNoticeCallback` + TUI 一行 dim + headless stderr | 回调方案更简单且已够用；事件化的收益（外部订阅）当前无消费者 | `types/chat.ts` + `session.ts` 事件泵；S |
-| **A3** | 衰减 / LRU 淘汰 / 折叠(fold) / 容量清理 / 会话内"主动出示条目全文" | 只做了置信度升级（merge 取 max）与到期提醒 | **衰减与淘汰在当前架构下没有消费者**：选择已交给 flash（R20），淘汰原本挂在 fold 上而 fold 已不需要（每主题一个文件）。"主动出示全文"每轮增加一次 LLM 调用或引入打分噪声，收益边际 | 若恢复确定性打分：`memory-store.ts` 加 `effectiveConfidence()`；出示：`memory-inject.ts` + `memory-recall.ts`；M–L |
+| **A3a** | ✅ **已做（2026-09-13）**：淘汰过时记忆 —— 归纳代理 `memory_forget` 工具 + 软淘汰（`confidence: 1`）+ 提示词"时效与清理"规则 | `src/tools/memory-forget.ts`（`confidence: 3` 拒绝、每轮上限 3 条、不计写入配额）、`memory-agent.ts` 工具集与配额、`memory-agent-prompt.ts` 规则表；测试 `tests/tools/memory-forget.test.ts`(6) + `tests/core/memory-agent.test.ts`(+3) | 起因：**"静默失效"（没人再提且未被推翻）原本无任何淘汰路径** —— 先前判"无消费者"不准确：原设计的消费者（打分 + fold）被废弃了，而淘汰本身需要有落点，落点就在"归纳时顺带判断" | — |
+| **A3b** | 确定性 GC：`/memory gc` 归档「长期未 `memory_read`、注入多次仍未被读、confidence ≤2」的条目到 `legacy/archive/` | 无使用追踪（`markRead`/`surfaced` 只在内存里） | 需要把「最后被读时间 / 读次数」持久化进 `state.json`（信号已有：`session.ts` 的 `collectReadMemorySlugs()` 会扫 turn 里的 `memory_read` 调用），再加低频执行时机（会话创建时或手动命令）。**当前不做**：A3a 已覆盖主观清理，GC 属"无人管时的兜底" | `memory-store.ts`（state 扩展 + `archive()`）、`memory-inject.ts`（写回）、`tui-app.ts`（`/memory gc`）；M |
+| **A3c** | 连续数值衰减（半衰期 `0.5^(Δdays/180)`） | 未实现 | **不做**：可见性随日期漂移无法解释、无用户可感知收益；改用离散档位（3→2→1→候选池→superseded），每次动作落 `audit.jsonl` 可审计 | — |
+| **A3d** | 会话内"主动出示条目全文" | 未实现（只出示清单与变化提醒） | 每轮多一次 LLM 调用或引入打分噪声，收益边际；`memory_read` 已提供按需通道 | `memory-inject.ts` + `memory-recall.ts`；M–L |
 | **A4** | `logs/yyyy/mm/dd.md` 每日日志写入 | `MemoryStore.appendLog()` 已实现但**无调用方** | 归纳的可审计性已由 `audit.jsonl` 的 `agent_run.notes` 承担；再写一份原始日志属重复 | `memory-agent.ts` 在 run 结束追加；S |
 | **A5** | CLI/命令面缺口：`--memory-scope`、`--memory-model`、`--quiet`、`/memory show --scope\|--limit\|--audit`、`/memory agent on\|off`、`/memory pin\|unpin` | 未实现 | 多数是调试/便利功能；`--quiet`/`--json` 与实际心跳契约绑定（见 A6） | `cli/index.ts`、`tui-app.ts`、`memory-store.ts`（pin 需加字段）；S–M |
 | **A6** | `chat --prompt` 契约不一致：文档写 `--json`、退出码 0/1/2/3、`--session <name>`、`--timeout`、工具白名单 | 实现：stdout 纯文本、退出码 0/1、`--resume`、yolo 直接放行 | 心跳未开工，契约等心跳一起定更省事（见 §心跳） | `cli/index.ts` `runPromptOnce`；M |

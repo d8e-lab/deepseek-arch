@@ -19,7 +19,11 @@ import { runSubagentLoop } from './subagent.js';
 import { MEMORY_AGENT_PROMPT } from './memory-agent-prompt.js';
 import { memoryReadTool, readMemoryEntry } from '../tools/memory-read.js';
 import { memoryWriteTool, writeMemoryEntry } from '../tools/memory-write.js';
+import { memoryForgetTool, forgetMemoryEntry } from '../tools/memory-forget.js';
 import { estimateTokens, type MemoryStore } from './memory-store.js';
+
+/** 每轮归纳最多硬淘汰几条（独立于 maxWritesPerRun，防误删；软降级走 memory_write confidence=1） */
+const MAX_FORGETS_PER_RUN = 3;
 
 export interface MemoryAgentOptions {
 	provider: ModelProvider;
@@ -211,10 +215,17 @@ export class MemoryAgent {
 		return kept;
 	}
 
-	/** 工具集：记忆读写（绑定本 agent 的 store）+ 写入配额包装（超配额返回错误提示，不抛） */
+	/**
+	 * 工具集：记忆读 / 写 / 淘汰（绑定本 agent 的 store）。
+	 * 配额包装：超配额返回错误提示（不抛），让 agent 自己收敛。
+	 *
+	 * 淘汰不计入 `maxWritesPerRun`（否则"写满了就没法清理"），但有独立的每轮上限
+	 * `MAX_FORGETS_PER_RUN`，防误删。硬淘汰只对 confidence ≤ 2 开放（见 memory-forget.ts）。
+	 */
 	private buildTools(writes: MemoryAgentResult['writes']): Tool[] {
 		const quota = this.opts.maxWritesPerRun;
 		const store = this.opts.store;
+		let forgets = 0;
 		const readTool: Tool = {
 			...memoryReadTool,
 			execute: (params) => readMemoryEntry(store, String(params.path ?? '')),
@@ -241,7 +252,22 @@ export class MemoryAgent {
 				return result;
 			},
 		};
-		return [readTool, writeTool];
+		const forgetTool: Tool = {
+			...memoryForgetTool,
+			async execute(params) {
+				if (forgets >= MAX_FORGETS_PER_RUN) {
+					return {
+						content: `memory_forget limit reached (max ${MAX_FORGETS_PER_RUN} per run). Prefer confidence 1 (soft retire) for the rest.`,
+						error: 'quota_exceeded',
+					};
+				}
+				forgets++;
+				const result = await forgetMemoryEntry(store, params);
+				if (!result.error) writes.push({ slug: String(params.slug ?? '?'), action: 'forget' });
+				return result;
+			},
+		};
+		return [readTool, writeTool, forgetTool];
 	}
 
 	private async advanceCursor(nextCursor?: string): Promise<void> {
