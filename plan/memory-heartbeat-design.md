@@ -281,6 +281,8 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 
 - 为什么"升级"还要求最近有使用：一条三年前被读爆、此后无人问津的条目不该因为历史计数高而升级。
 - 为什么一次只动一级：避免长眠后条目"一次掉到候选"，让每一步都可解释、可回退。
+- **闲置时钟 = `max(lastUsedAt, lastDemotedAt)`**：降级本身也算"结算过"，否则同一分钟内连跑两次
+  （两次会话启动 / 手动 gc）就会 3→1 连降两级，"每 `decay_days` 降一级"形同虚设（真进程烟测发现并修复）。
 - **可逆**：任何降级都能通过再次被读到/被重申逐步回升（候选池 → 正式清单的路径因此存在）。
 - 闲置时钟的起点：有使用记录用 `lastUsedAt`；没有（本机制上线前写入的条目）以 `updated` 起算。
 
@@ -519,7 +521,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 ## 12. 实现状态与测试映射
 
-截至 2026-09-13：**全量 601 测试通过**（54 个测试文件），`tsc` 无错。
+截至 2026-09-13：**全量 603 测试通过**（54 个测试文件），`tsc` 无错。
 
 | 模块 | 文件 | 测试 | 用例数 |
 |:--|:--|:--|:--|
@@ -529,7 +531,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 | 服务装配 | `src/core/memory-service.ts` | 经工具测试覆盖 | — |
 | 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts` | 10 |
 | 淘汰工具 | `src/tools/memory-forget.ts` | `tests/tools/memory-forget.test.ts` | 6 |
-| LRU 维护 | `src/core/memory-store.ts`（`reconcile` / `recordUse` / `setPinned`） | `tests/core/memory-lru.test.ts` | 11 |
+| LRU 维护 | `src/core/memory-store.ts`（`reconcile` / `recordUse` / `setPinned`） | `tests/core/memory-lru.test.ts` | 13 |
 | 归纳代理 | `src/core/memory-agent.ts`、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 14 |
 | 会话接线（含 LRU 结算时机） | `src/core/session.ts` | `tests/core/memory-session.test.ts` | 9 |
 | 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts` | +4 |
