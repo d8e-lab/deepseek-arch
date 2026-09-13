@@ -367,6 +367,13 @@ describe('ConfigManager', () => {
       expect(mgr.get<string>('memory.agent_model')).toBe('deepseek-v4-flash');
       expect(mgr.get<number>('memory.max_inject_tokens')).toBe(800);
       expect(mgr.getResolved()!.memory.agent_timeout_ms).toBe(90_000);
+      // LRU 一组（窗口 + 倒计时 + 活动日）同样有兜底，且键名与语义一致
+      expect(mgr.get<boolean>('memory.lru_enabled')).toBe(true);
+      expect(mgr.get<number>('memory.lru_decay_active_days')).toBe(90);
+      expect(mgr.get<number>('memory.lru_promote_uses')).toBe(2);
+      expect(mgr.get<number>('memory.lru_window_size')).toBe(200);
+      expect(mgr.get<number>('memory.lru_destroy_after_days')).toBe(30);
+      expect(mgr.get<string>('memory.lru_destroy_mode')).toBe('archive');
     });
 
     it('set("memory.enabled", false) 写回 config.toml 且重新加载后生效', async () => {
