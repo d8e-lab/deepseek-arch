@@ -28,6 +28,7 @@ import { loadSkills, buildSkillListing } from '../core/skill.js';
 import { configureBrowser } from '../tools/browser-state.js';
 import { startApiMonitor } from '../core/api-monitor.js';
 import { getApiRequestsDir } from '../core/workspace-paths.js';
+import { setMemoryStore } from '../core/memory-service.js';
 import { existsSync, statSync } from 'node:fs';
 import { turnAssistantContent } from '../utils/turn-utils.js';
 
@@ -103,6 +104,29 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 
 	// 设置子代理异步模式
 	sessionMgr.setSubagentAsync(asyncMode);
+
+	// 记忆机制：按 [memory] 段装配（默认开启；CLI --no-memory 会在创建后覆盖为关闭）
+	sessionMgr.configureMemory({
+		enabled: cfg.get<boolean>('memory.enabled') ?? true,
+		inject: cfg.get<boolean>('memory.inject') ?? true,
+		maxInjectTokens: cfg.get<number>('memory.max_inject_tokens') ?? 800,
+		deltaInjectTokens: cfg.get<number>('memory.delta_inject_tokens') ?? 200,
+		masterMinConfidence: cfg.get<number>('memory.master_min_confidence') ?? 2,
+		recallModel: cfg.get<string>('memory.recall_model') ?? 'deepseek-v4-flash',
+		agentModel: cfg.get<string>('memory.agent_model') ?? 'deepseek-v4-flash',
+		agentOnTurnEnd: cfg.get<boolean>('memory.agent_on_turn_end') ?? true,
+		agentMinIntervalSec: cfg.get<number>('memory.agent_min_interval_sec') ?? 30,
+		agentMaxWritesPerRun: cfg.get<number>('memory.agent_max_writes_per_run') ?? 3,
+		agentMaxInputTurns: cfg.get<number>('memory.agent_max_input_turns') ?? 3,
+		agentMaxInputTokens: cfg.get<number>('memory.agent_max_input_tokens') ?? 6000,
+		agentTimeoutMs: cfg.get<number>('memory.agent_timeout_ms') ?? 90_000,
+		notifyReadUpdates: cfg.get<boolean>('memory.notify_read_updates') ?? true,
+	});
+	// 记忆工具（memory_read/write）与「已更新记忆」提示：与工作区/阈值保持一致
+	setMemoryStore(sessionMgr.getMemory()?.store ?? null);
+	sessionMgr.setMemoryNoticeCallback((count) => {
+		process.stderr.write(`[memory] updated ${count}\n`);
+	});
 
 	// 设置 system prompt
 	// 来源：system-prompt.toml 模板（ConfigManager.load() 启动时已保证存在——
@@ -230,8 +254,9 @@ program
 	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
 	.option('--workspace <dir>', 'workspace root for tools & runtime files (default: current directory)')
+	.option('--no-memory', 'disable long-term memory entirely (no injection, no extraction, no memory tools)')
 	.option('-p, --prompt <content>', 'run a single non-interactive turn and print the reply to stdout (yolo; combines with --resume)')
-	.action(async (options: { resume?: string; prompt?: string; workspace?: string; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.action(async (options: { resume?: string; prompt?: string; workspace?: string; noMemory?: boolean; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			// 加载配置（幂等）——必须先于 cfg.get，否则 defaults/display 读不到
 			const cfg = ConfigManager.getInstance();
@@ -266,9 +291,21 @@ program
 			}
 
 			// 主代理工具集（debug 模式才含 tui_capture / tui_render_preview）
-			const tools = loadMasterTools(debug, options.selfInteraction);
+			const tools = loadMasterTools(debug, options.selfInteraction)
+				.filter((t) => !(options.noMemory && (t.name === 'memory_read' || t.name === 'memory_write')));
 
 			const sessionMgr = await createSessionManager(tuiConfig, tools, asyncMode, monitorUrl, options.mock);
+
+			// --no-memory：完全关闭（不注入、不归纳、工具已在上方剔除）
+			if (options.noMemory) {
+				sessionMgr.configureMemory({ enabled: false });
+				setMemoryStore(null);
+			}
+			// resume 命令的 --no-memory
+			if (options?.noMemory) {
+				sessionMgr.configureMemory({ enabled: false });
+				setMemoryStore(null);
+			}
 
 			// 非交互单轮（headless）：不进 TUI，跑完一轮直接退出
 			if (options.prompt !== undefined) {
@@ -392,13 +429,15 @@ program
 	.option('--mock', 'use MockProvider instead of real API (for testing)')
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
 	.option('--workspace <dir>', 'workspace root for tools & runtime files (default: current directory)')
-	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; workspace?: string; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
+	.option('--no-memory', 'disable long-term memory entirely (no injection, no extraction, no memory tools)')
+	.action(async (id?: string, options?: { browser?: boolean; cdp?: string; workspace?: string; noMemory?: boolean; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			await ConfigManager.getInstance().load();
 			// 工作区覆盖必须在创建 SessionManager 之前（构造时锁定会话 cwd）
 			if (options?.workspace && !applyWorkspace(options.workspace)) {
 				process.exit(1);
 			}
+			// --no-memory：工具剔除在 createSessionManager 之后统一处理（见下方 sessionMgr 创建处）
 			const sessionsDir = ConfigManager.getInstance().getSessionsDir();
 			const storage = new Storage(sessionsDir);
 			const monitorUrl = options?.monitor ?? process.env.DEEPSEEK_API_MONITOR_URL;

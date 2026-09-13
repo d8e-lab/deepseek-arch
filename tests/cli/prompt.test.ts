@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -137,6 +137,24 @@ describe('chat --prompt（非交互单轮，e2e）', () => {
 			expect(meta.turnCount).toBe(2);
 		} finally {
 			cleanup();
+		}
+	});
+
+	it('--no-memory：不注入、不跑归纳、不注册记忆工具', () => {
+		const { home, cleanup } = makeHome('deepseek-arch-prompt-nomem-');
+		const ws = mkdtempSync(join(tmpdir(), 'deepseek-arch-nomem-ws-'));
+		try {
+			const { stdout, status } = runWithEnv(
+				['chat', '--mock', '--prompt', '测试', '--workspace', ws, '--no-memory'],
+				{ HOME: home },
+			);
+			expect(status).toBe(0);
+			expect(stdout).toContain('测试通过');
+			// 记忆 runtime 目录不应被创建（既不注入也不归纳）
+			expect(existsSync(join(ws, '.deepseek-arch', 'memory', 'audit.jsonl'))).toBe(false);
+		} finally {
+			cleanup();
+			rmSync(ws, { recursive: true, force: true });
 		}
 	});
 

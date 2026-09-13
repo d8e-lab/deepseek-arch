@@ -61,7 +61,7 @@ import type { ViewInputResult } from './views/types.js';
 const FALLBACK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
 
 /** 可用命令列表 */
-const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/review_model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/compact', '/exit'];
+const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/review_model', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/memory', '/compact', '/exit'];
 
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
@@ -171,6 +171,12 @@ export class TuiApp {
 			isStreamActive: () => this.abortController !== null,
 			getSize: () => getTermSize(),
 		});
+		// 记忆：后台归纳写入后给一行提示（不打断流式、不弹层）
+		// 可选调用：测试里的 sessionMgr 替身可能没有该方法
+		this.sessionMgr.setMemoryNoticeCallback?.((count: number) => {
+			this.writeOutputLine(dim(`[memory] 已更新 ${count} 条（/memory show 查看）`));
+		});
+
 		this.overlay = new OverlayPane(this.out, {
 			getHandler: () => this.stdinHandler,
 			setHandler: (h) => { this.stdinHandler = h; },
@@ -646,6 +652,10 @@ export class TuiApp {
 			return await this.toggleAsync();
 		}
 
+		if (content.startsWith('/memory')) {
+			return await this.handleMemoryCommand(content.slice('/memory'.length).trim());
+		}
+
 		if (content.startsWith('/subagent_cancel')) {
 			// 注意：必须以 /subagent_cancel 精确前缀匹配，且放在 /subagent 之前（二者同前缀）
 			return await this.cancelSubagentInteractive();
@@ -796,6 +806,7 @@ export class TuiApp {
 			['/system [name]', 'List/switch system prompt template'],
 			['/review_model [name]', 'Show/set YOLO review model'],
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
+			['/memory',        'Long-term memory: /memory [show|candidates|forget <slug>|on|off|refresh]'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
 			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
 			['/subagent_cancel','Cancel subagent(s) via interactive list'],
@@ -926,8 +937,116 @@ export class TuiApp {
 		return true;
 	}
 
-	/** /subagent_cancel — 交互式选择要取消的子代理（含"全部取消"选项） */
-	private async cancelSubagentInteractive(): Promise<true> {
+	/**
+	 * /memory —— 记忆机制命令族。
+	 *   /memory                      状态摘要
+	 *   /memory show [kw]            列出正式条目（可选关键词过滤）
+	 *   /memory candidates           列出模糊条目（confidence 1，仅 memory agent 管理）
+	 *   /memory forget <slug>        遗忘某条（写墓碑 + 退出索引）
+	 *   /memory on | off             开关（写回 config.toml 的 memory.enabled）
+	 *   /memory refresh              重建 system prompt 里的清单并重写会话快照
+	 */
+	private async handleMemoryCommand(arg: string): Promise<boolean> {
+		const mem = this.sessionMgr.getMemory?.() ?? null;
+		if (!mem) {
+			this.cmdOut(dim('[memory] 未启用（config.toml 的 [memory] enabled=false，或 --no-memory）'));
+			return true;
+		}
+		const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
+		const store = mem.store;
+
+		switch (sub) {
+			case undefined:
+			case 'status': {
+				const entries = await store.listEntries('project');
+				const global = await store.listEntries('global');
+				const candidates = await store.listCandidates('project');
+				this.cmdOut(green('[memory] enabled') + dim(`  project=${entries.length} 条  global=${global.length} 条  candidates(模糊)=${candidates.length} 条`));
+				this.cmdOut(dim(`  注入预算 ${mem.config.maxInjectTokens} tokens · 召回/归纳模型 ${mem.config.recallModel}/${mem.config.agentModel}`));
+				this.cmdOut(dim(`  项目层目录 ${store.dirOf('project')}`));
+				this.cmdOut(dim('  子命令：show [kw] | candidates | forget <slug> | on | off | refresh'));
+				return true;
+			}
+			case 'show': {
+				const kw = rest.join(' ').trim().toLowerCase();
+				const entries = [...(await store.listEntries('project')), ...(await store.listEntries('global'))];
+				const filtered = kw
+					? entries.filter((e) => `${e.slug} ${e.subject} ${e.name} ${e.description} ${e.body}`.toLowerCase().includes(kw))
+					: entries;
+				if (filtered.length === 0) {
+					this.cmdOut(dim('(无匹配条目)'));
+					return true;
+				}
+				for (const e of filtered.slice(0, 20)) {
+					this.cmdOut(dim(`  ${e.slug}  conf=${e.confidence}  ${e.scope}  ${e.updated.slice(0, 10)}  ${e.description}`));
+				}
+				if (filtered.length > 20) this.cmdOut(dim(`  …(${filtered.length - 20} more)`));
+				return true;
+			}
+			case 'candidates': {
+				const candidates = await store.listCandidates('project');
+				if (candidates.length === 0) {
+					this.cmdOut(dim('(无模糊条目)'));
+					return true;
+				}
+				this.cmdOut(dim('模糊条目（confidence<2，不注入、由 memory agent 管理）：'));
+				for (const e of candidates.slice(0, 20)) {
+					this.cmdOut(dim(`  ${e.slug}  conf=${e.confidence}  ${e.description}`));
+				}
+				return true;
+			}
+			case 'forget': {
+				const slug = rest[0];
+				if (!slug) {
+					this.cmdOut(red('用法：/memory forget <slug>'));
+					return true;
+				}
+				const scope = (await store.readEntry('project', slug)) ? 'project' : 'global';
+				const ok = await store.forget(scope, slug, 'user requested via /memory forget');
+				await store.rebuildIndex(scope);
+				this.cmdOut(ok ? green(`[memory] 已遗忘 ${slug}`) : red(`[memory] 未找到条目 ${slug}`));
+				return true;
+			}
+			case 'on':
+			case 'off': {
+				const enabled = sub === 'on';
+				if (this.configMgr) {
+					try {
+						await this.configMgr.set('memory.enabled', enabled);
+					} catch { /* 写回失败不阻塞 */ }
+				}
+				// 立即生效：重新装配（关闭时后续不再注入/归纳；开启时按配置装配）
+				if (!enabled) {
+					this.sessionMgr.configureMemory({ enabled: false });
+				} else {
+					const cfg = this.configMgr;
+					this.sessionMgr.configureMemory({
+						enabled: true,
+						maxInjectTokens: cfg?.get<number>('memory.max_inject_tokens') ?? undefined,
+						deltaInjectTokens: cfg?.get<number>('memory.delta_inject_tokens') ?? undefined,
+						masterMinConfidence: cfg?.get<number>('memory.master_min_confidence') ?? undefined,
+						recallModel: cfg?.get<string>('memory.recall_model') ?? undefined,
+						agentModel: cfg?.get<string>('memory.agent_model') ?? undefined,
+						agentOnTurnEnd: cfg?.get<boolean>('memory.agent_on_turn_end') ?? undefined,
+					});
+				}
+				this.cmdOut(green(`[memory: ${enabled ? 'ON' : 'OFF'}]`) + dim(enabled ? '  下次发言起生效' : '  不再注入/归纳（已存在的记忆保留）'));
+				return true;
+			}
+			case 'refresh': {
+				const changed = await this.sessionMgr.refreshMemoryPrompt();
+				this.cmdOut(changed
+					? green('[memory] system prompt 已重建（含最新清单），会话快照已同步')
+					: dim('[memory] 清单无变化（或当前无会话）'));
+				return true;
+			}
+			default:
+				this.cmdOut(red(`未知子命令：${sub}`) + dim('  可用：show | candidates | forget | on | off | refresh'));
+				return true;
+		}
+	}
+
+	/** /subagent_cancel — 交互式选择要取消的子代理（含"全部取消"选项） */	private async cancelSubagentInteractive(): Promise<true> {
 		const subs = this.sessionMgr.listSubagents();
 		if (subs.length === 0) {
 			this.cmdOut(dim('No subagents to cancel.'));
@@ -1798,6 +1917,10 @@ export class TuiApp {
 							flush(true);
 
 							this.finalizeThinkCollapse(); // think 结束：定稿折叠行
+							// 记忆写入：额外给一行 dim 提示（「已更新记忆」不打扰）
+							if (event.toolName === 'memory_write' && !event.error) {
+								this.writeOutputLine(dim('[memory] 已写入/更新 1 条（/memory show 查看）'));
+							}
 							if (event.toolDenied) {
 								this.writeOutputLine(red('[Denied]'));
 								break;

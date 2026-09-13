@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { Storage } from './storage.js';
 import type { ModelProvider, ChatOptions } from './model-provider.js';
 import { yieldEventLoop } from '../utils/event-loop.js';
-import { turnUserContent } from '../utils/turn-utils.js';
+import { turnUserContent, turnAssistantContent } from '../utils/turn-utils.js';
 import { appendCacheLog } from './cache-log.js';
 import { reviewConversation } from './reviewer.js';
 import type {
@@ -37,6 +37,11 @@ import type { Tool, ToolCallRecord } from '../tools/types.js';
 import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
 import { formatSubagentTrace } from '../tools/subagent-trace.js';
+import { MemoryStore } from './memory-store.js';
+import { MemoryRecall } from './memory-recall.js';
+import { MemoryInjector, MEMORY_LISTING_TAG } from './memory-inject.js';
+import { MemoryAgent } from './memory-agent.js';
+import { createMemoryStore } from './memory-service.js';
 import { activateSkillsForPaths, extractPathsFromToolCall } from './skill.js';
 import {
 	MAX_RESTORE_FILES,
@@ -45,6 +50,7 @@ import {
 	buildFileRestoreBlock,
 	buildPlanBlock,
 	buildSkillsBlock,
+	estimateTokens,
 	extractReadFiles,
 	generateSummary,
 } from './compact.js';
@@ -108,6 +114,39 @@ interface SubagentNotice {
 	at: number;
 }
 
+/** `[memory]` 配置在会话层的投影（由 CLI 从 config.toml 读取后注入） */
+export interface MemorySessionConfig {
+	enabled?: boolean;
+	inject?: boolean;
+	maxInjectTokens?: number;
+	deltaInjectTokens?: number;
+	masterMinConfidence?: number;
+	recallModel?: string;
+	agentModel?: string;
+	agentOnTurnEnd?: boolean;
+	agentMinIntervalSec?: number;
+	agentMaxWritesPerRun?: number;
+	agentMaxInputTurns?: number;
+	agentMaxInputTokens?: number;
+	agentTimeoutMs?: number;
+	notifyReadUpdates?: boolean;
+	/** 显式注入存储（测试用；省略时按当前工作区构造） */
+	store?: MemoryStore;
+}
+
+/** 记忆运行时（store + 注入器 + 后台归纳代理） */
+export interface MemoryRuntime {
+	store: MemoryStore;
+	injector: MemoryInjector;
+	agent: MemoryAgent;
+	config: Required<Omit<MemorySessionConfig, 'store'>>;
+}
+
+function stripMemoryListing(content: string): string {
+	const re = new RegExp(`\\n*<${MEMORY_LISTING_TAG}>[\\s\\S]*?</${MEMORY_LISTING_TAG}>\\n*`, 'g');
+	return content.replace(re, '').trimEnd();
+}
+
 export class SessionManager {
 	private storage: Storage;
 	private provider: ModelProvider;
@@ -137,6 +176,10 @@ export class SessionManager {
 	private chatDefaults: ChatOptions = {};
 	/** 子代理落盘串行链（同一子代理的写入按序执行，避免并发写坏文件） */
 	private subagentWriteChain = new Map<string, Promise<void>>();
+	/** 记忆运行时（未配置时为 null → 完全不介入，测试与旧行为不受影响） */
+	private memory: MemoryRuntime | null = null;
+	/** 「已更新 N 条记忆」提示回调（TUI 注册；headless 走 stderr） */
+	private memoryNoticeCallback: ((count: number, slugs: string[]) => void) | null = null;
 	/** 自动 compact 配置：上下文超阈值时自动压缩（默认开启，70% of 1M tokens） */
 	private autoCompact = {
 		enabled: true,
@@ -172,6 +215,17 @@ export class SessionManager {
 		// 关联会话 ID 到 provider（请求镜像监听用）
 		this.provider.setSessionId?.(meta.id);
 
+		// 记忆清单注入 system prompt（只在会话创建时做一次：system prompt 在会话内冻结 → 零缓存代价，
+		// 代价只是"可能过期"，由会话内的变化提醒补齐）
+		if (this.memory && this.memory.config.inject && this.systemPrompt?.content) {
+			try {
+				const { block } = await this.memory.injector.buildListingBlock();
+				if (block) {
+					this.systemPrompt = { role: 'system', content: `${this.systemPrompt.content}\n\n${block}` };
+				}
+			} catch { /* 清单构建失败不阻塞建会话 */ }
+		}
+
 		// 将完整 system prompt 写入会话目录，方便调试 kv-cache 命中率
 		if (this.systemPrompt?.content) {
 			const dir = this.storage.sessionDir(meta.id);
@@ -192,6 +246,8 @@ export class SessionManager {
 		if (session.systemPrompt) {
 			this.systemPrompt = { role: 'system', content: session.systemPrompt };
 		}
+		// 快照里的清单就是模型当前看到的那份 → 播种"已见"集合，之后只提醒差异（避免"全部新增"误报）
+		this.memory?.injector.seedFromSystemPrompt(session.systemPrompt);
 
 		// 恢复子代理会话（方案 B：磁盘记录 → SubagentSession，可继续查看/交互）
 		await this.restoreSubagents(session.meta.id);
@@ -270,6 +326,90 @@ export class SessionManager {
 	/** 获取子代理异步模式 */
 	getSubagentAsync(): boolean {
 		return this._subagentAsync;
+	}
+
+	/**
+	 * 配置记忆机制（由 CLI 从 config.toml 的 `[memory]` 段读取后调用）。
+	 * 不调用 = 记忆完全不介入（测试与旧行为不受影响）。
+	 */
+	configureMemory(cfg: MemorySessionConfig): void {
+		const config = {
+			enabled: cfg.enabled ?? true,
+			inject: cfg.inject ?? true,
+			maxInjectTokens: cfg.maxInjectTokens ?? 800,
+			deltaInjectTokens: cfg.deltaInjectTokens ?? 200,
+			masterMinConfidence: cfg.masterMinConfidence ?? 2,
+			recallModel: cfg.recallModel ?? 'deepseek-v4-flash',
+			agentModel: cfg.agentModel ?? 'deepseek-v4-flash',
+			agentOnTurnEnd: cfg.agentOnTurnEnd ?? true,
+			agentMinIntervalSec: cfg.agentMinIntervalSec ?? 30,
+			agentMaxWritesPerRun: cfg.agentMaxWritesPerRun ?? 3,
+			agentMaxInputTurns: cfg.agentMaxInputTurns ?? 3,
+			agentMaxInputTokens: cfg.agentMaxInputTokens ?? 6000,
+			agentTimeoutMs: cfg.agentTimeoutMs ?? 90_000,
+			notifyReadUpdates: cfg.notifyReadUpdates ?? true,
+		};
+		if (!config.enabled) {
+			this.memory = null;
+			return;
+		}
+		const store = cfg.store ?? createMemoryStore({ masterMinConfidence: config.masterMinConfidence });
+		const recall = new MemoryRecall({ provider: this.provider, model: config.recallModel });
+		this.memory = {
+			store,
+			injector: new MemoryInjector({
+				store,
+				recall,
+				maxInjectTokens: config.maxInjectTokens,
+				deltaInjectTokens: config.deltaInjectTokens,
+			}),
+			agent: new MemoryAgent({
+				provider: this.provider,
+				store,
+				model: config.agentModel,
+				maxInputTurns: config.agentMaxInputTurns,
+				maxInputTokens: config.agentMaxInputTokens,
+				maxWritesPerRun: config.agentMaxWritesPerRun,
+				maxToolCalls: 8,
+				timeoutMs: config.agentTimeoutMs,
+				minIntervalSec: config.agentMinIntervalSec,
+				sessionId: this.session?.meta.id,
+			}),
+			config,
+		};
+	}
+
+	/** 记忆运行时（未启用返回 null） */
+	getMemory(): MemoryRuntime | null {
+		return this.memory;
+	}
+
+	/** 「已更新记忆」提示回调（TUI / headless 注册） */
+	setMemoryNoticeCallback(cb: ((count: number, slugs: string[]) => void) | null): void {
+		this.memoryNoticeCallback = cb;
+	}
+
+	/**
+	 * 重建 system prompt 里的记忆清单并同步重写会话快照（`/memory refresh` 与 compact 后调用）。
+	 * 必须在"前缀本来就要变"的时刻调用（新会话 / compact / 用户显式刷新），否则会作废整段历史前缀。
+	 * @returns 是否发生了变化
+	 */
+	async refreshMemoryPrompt(): Promise<boolean> {
+		const mem = this.memory;
+		if (!mem || !this.session || !this.systemPrompt) return false;
+		const base = stripMemoryListing(this.systemPrompt.content);
+		const { block } = await mem.injector.buildListingBlock();
+		const content = block ? `${base}\n\n${block}` : base;
+		if (content === this.systemPrompt.content) return false;
+		this.systemPrompt = { role: 'system', content };
+		try {
+			await writeFile(
+				join(this.storage.sessionDir(this.session.meta.id), 'system-prompt.txt'),
+				content,
+				'utf-8',
+			);
+		} catch { /* 快照写失败不影响本轮（resume 时会回退旧文本） */ }
+		return true;
 	}
 
 	/** 获取子代理会话列表（TUI 详情/实时视图用） */
@@ -369,6 +509,10 @@ export class SessionManager {
 		this.session.meta.turnCount = this.session.turns.length;
 		this.session.meta.totalCost = this.session.turns.reduce((s, t) => s + t.cost_rmb, 0);
 		this.session.meta.currentGen = gen;
+
+		// R7/R11：compact 是"前缀本来就要变"的时刻 → 顺便重建 system prompt 里的记忆清单并重写快照
+		// （否则清单会一直停留在会话创建时的状态）
+		await this.refreshMemoryPrompt().catch(() => { /* 失败不阻塞 compact */ });
 
 		return {
 			gen,
@@ -524,6 +668,84 @@ export class SessionManager {
 			blocks.join('\n\n'),
 			'</subagent-notification>',
 		].join('\n');
+	}
+
+	// ─── 记忆（memory）────────────────────────────────
+
+	/**
+	 * 本轮的记忆变化提醒（落盘进 agentMessages）：
+	 *  ① 模型读过的条目被更新 ② 清单发生变化（新增/更新/移除）
+	 * 落盘的原因：成为历史的一部分 → 下一轮前缀不断（不落盘会重算上一轮内容）。
+	 */
+	private async injectMemoryUpdates(agentMessages: Message[]): Promise<void> {
+		const mem = this.memory;
+		if (!mem || !this.session) return;
+		try {
+			const blocks: string[] = [];
+			if (mem.config.notifyReadUpdates) {
+				const readBlock = await mem.injector.buildReadUpdateBlock(this.collectReadMemorySlugs());
+				if (readBlock) blocks.push(readBlock);
+			}
+			const updateBlock = await mem.injector.buildUpdateBlock();
+			if (updateBlock) blocks.push(updateBlock);
+			if (blocks.length === 0) return;
+
+			const content = blocks.join('\n\n');
+			agentMessages.push({ role: 'user', content });
+			await mem.store.audit({
+				kind: 'inject',
+				at: new Date().toISOString(),
+				scope: 'project',
+				sid: this.session.meta.id,
+				mode: 'delta',
+				tokens: estimateTokens(content),
+			});
+		} catch { /* 注入失败不阻塞本轮 */ }
+	}
+
+	/** 上一轮（全部历史）里 memory_read 读过的条目 slug（用于"读过的条目被更新"提醒） */
+	private collectReadMemorySlugs(): string[] {
+		const slugs = new Set<string>();
+		const turns = this.session?.allTurns ?? this.session?.turns ?? [];
+		for (const turn of turns) {
+			for (const tc of turn.tool_calls ?? []) {
+				if (tc.name !== 'memory_read') continue;
+				const raw = String((tc.arguments as Record<string, unknown> | undefined)?.path ?? '').trim();
+				if (!raw) continue;
+				const name = raw.replace(/^(global|project):/, '').split('/').pop() ?? '';
+				if (name.endsWith('.md')) slugs.add(name.replace(/\.md$/, ''));
+			}
+		}
+		return [...slugs];
+	}
+
+	/**
+	 * 后台记忆归纳（与主 agent 本轮并发，不阻塞、异常不打扰）：
+	 * 输入 = 游标之后的「用户消息 + 助手最终回复」+ 本轮用户消息；游标成功后推进。
+	 */
+	private async maybeRunMemoryAgent(currentUser: string): Promise<void> {
+		const mem = this.memory;
+		if (!mem || !mem.config.agentOnTurnEnd || !this.session) return;
+		try {
+			const state = await mem.store.getState('project');
+			const cursor = Number(state.lastExtractedTurnId ?? '0') || 0;
+			const all = this.session.allTurns ?? this.session.turns;
+			const window = all.slice(cursor).map((t, i) => ({
+				user: turnUserContent(t),
+				assistant: turnAssistantContent(t),
+				turnId: String(cursor + i + 1),
+			}));
+			const masterWrote = (all[all.length - 1]?.tool_calls ?? []).some((tc) => tc.name === 'memory_write');
+			const result = await mem.agent.run({
+				turns: window,
+				currentUser,
+				masterWrote,
+				nextCursor: String(all.length),
+			});
+			if (result.status === 'done' && result.writes.length > 0) {
+				this.memoryNoticeCallback?.(result.writes.length, result.writes.map((w) => w.slug));
+			}
+		} catch { /* agent 内部已记审计；此处只保证不打扰主流程 */ }
 	}
 
 	/**
@@ -1007,6 +1229,12 @@ export class SessionManager {
 				agentMessages.push({ role: 'user', content: noticeAtTurnStart });
 			}
 
+			// 记忆变化提醒（同样落盘：落盘后历史字节稳定 → 前缀缓存不断）
+			await this.injectMemoryUpdates(agentMessages);
+
+			// 后台记忆归纳：与主 agent 本轮**并发**（不阻塞、不影响本轮上下文）
+			void this.maybeRunMemoryAgent(userContent);
+
 			for (let round = 0; !userDenied; round++) {
 				// M-2：异步模式状态块拼到 roundMessages 末尾（不写 agentMessages——kv-cache 前缀稳定）
 				const statusBlock = buildStatusBlock();
@@ -1471,7 +1699,10 @@ export class SessionManager {
 					costRmb,
 					false,
 					undefined,
-					undefined,
+					// 有注入块（子代理通知 / 记忆变化提醒 / [auto-continue]）时写入完整消息序列：
+					// 注入内容必须随 turn.messages 落盘，否则下一轮前缀在该位置断开、重算上一轮内容。
+					// 注意：无工具轮的 assistant 消息也已 push 进 agentMessages，此处不再重复追加。
+					agentMessages.length > 0 ? [userMsg, ...agentMessages] : undefined,
 					roundUsages.length > 0 ? roundUsages : undefined,
 					browserUrl,
 				);
