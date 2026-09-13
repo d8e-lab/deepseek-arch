@@ -46,7 +46,6 @@ export interface MemoryAgentOptions {
 	sessionId?: string;
 	/** 索引里"⏳待销毁(已 N/limit 活动日)"的分母（与 [memory] 配置保持一致） */
 	destroyAfterDays?: number;
-	candidateTtlDays?: number;
 }
 
 /** 一轮对话（已剥离工具轨迹与思维链） */
@@ -101,15 +100,15 @@ export async function renderMemoryIndex(
 	store: MemoryStore,
 	maxPerSection = 30,
 	taskText = '',
-	limits: { activeDay?: number; destroyAfterDays?: number; candidateTtlDays?: number } = {},
+	limits: { activeDay?: number; destroyAfterDays?: number } = {},
 ): Promise<string> {
 	const out: string[] = [];
-	const destroyAfter = limits.destroyAfterDays ?? 30;
-	const candidateTtl = limits.candidateTtlDays ?? 365;
+	const destroyAfter = limits.destroyAfterDays ?? 180;
 	const all: (MemoryEntry & { scopeLabel: string })[] = [];
 	for (const scope of ['project', 'global'] as const) {
 		const label = scope === 'project' ? '项目层' : '全局层';
 		const active = await store.listEntries(scope);
+		// 候选区 = conf < 阈值：1 = 待观察，0 = 待销毁（同一套 confidence 档位，不再有独立队列）
 		const candidates = await store.listCandidates(scope);
 		const state = await store.getState(scope);
 		const usage = state.usage ?? {};
@@ -125,24 +124,27 @@ export async function renderMemoryIndex(
 		if (active.length > maxPerSection) out.push(`- …(${active.length - maxPerSection} more)`);
 
 		out.push('');
-		out.push(`### ${label} — 候选池（confidence 1，**master 看不到**，需要你维护：被再次印证就升级，确认无价值才淘汰）`);
+		out.push('');
+		out.push(`### ${label} — 候选区（master 看不到，需要你维护）`);
 		if (candidates.length === 0) out.push('(无)');
 		for (const e of candidates.slice(0, maxPerSection)) {
 			const u = usage[e.slug];
 			const bits = [`共被使用 ${u?.uses ?? 0} 次`];
 			if (e.pinned) bits.push('📌用户已钉住(别淘汰它)');
-			if (u?.evictedAt !== undefined) {
-				// 让代理看到"离销毁还有多久"：它才能决定 救（升到 2）/ 放手（什么都不做）/ 立即淘汰
-				const start = Math.max(u.evictedDay ?? 0, u.lastSeenDay ?? 0);
+			if (e.confidence <= 0) {
+				// conf 0 = 待销毁：让代理看到"离销毁还有多久"，它才能决定 救（升到 1/2）还是放手
+				const start = Math.max(u?.lastUsedDay ?? 0, u?.lastStepDay ?? 0);
 				let elapsed: number;
 				if (start > 0 && day > 0) {
 					elapsed = Math.max(0, day - start);
 				} else {
 					// 老数据（无活动日记录）回退日历天
-					const ts = [Date.parse(u.evictedAt), Date.parse(u.lastSeenAt ?? '')].filter((t) => !Number.isNaN(t));
-					elapsed = ts.length > 0 ? Math.max(0, Math.floor((Date.now() - Math.max(...ts)) / 86_400_000)) : 0;
+					const ts = Date.parse(u?.lastUsedAt ?? '');
+					elapsed = Number.isNaN(ts) ? 0 : Math.max(0, Math.floor((Date.now() - ts) / 86_400_000));
 				}
-				bits.push(`⏳待销毁(已 ${elapsed}/${u.evictReason === 'candidate' ? candidateTtl : destroyAfter} 活动日)`);
+				bits.push(`⏳待销毁(已 ${elapsed}/${destroyAfter} 活动日)`);
+			} else {
+				bits.push('待观察(被再次印证才进清单)');
 			}
 			out.push(`${renderManifestLine(e).replace(/ \(confidence/, ` (${bits.join(', ')}, confidence`)}`);
 		}
@@ -248,7 +250,6 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 			const taskText = [...turns.map((t) => `${t.user}\n${t.assistant}`), input.currentUser].join('\n');
 			const index = await renderMemoryIndex(store, 30, taskText, {
 				destroyAfterDays: this.opts.destroyAfterDays,
-				candidateTtlDays: this.opts.candidateTtlDays,
 			}).catch(() => '');
 			const { messages } = await runSubagentLoop(
 				[

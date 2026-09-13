@@ -126,10 +126,8 @@ export interface MemoryConfig {
 	lru_promote_uses?: number;
 	/** memory window：master 可见条目上限（默认 200）；超出时按 LRU 换出最久未用者 */
 	lru_window_size?: number;
-	/** 换出后的销毁倒计时（**活动日**，默认 30）；期间被再次使用即复活 */
+	/** conf 0（待销毁）的销毁期限（**活动日**，默认 180）；期间被触达 → 回到 conf 1 重新观察 */
 	lru_destroy_after_days?: number;
-	/** 出生候选（从未进过清单）的销毁期限（活动日，默认 365）；候选池成本≈0，留时间给"低频偏好" */
-	lru_candidate_ttl_days?: number;
 	/** 销毁方式："archive"（默认，移到 legacy/archive/）或 "delete"（物理删除） */
 	lru_destroy_mode?: string;
 }

@@ -128,35 +128,18 @@ export interface MemoryManifest {
  *   2. 被写入/合并重申（`write` / `merge`，写入即一次使用）。
  */
 export interface MemoryUsage {
-	/** 累计使用次数（升级判定用；升级后清零，要求"重新积累证据"） */
+	/** 累计使用次数（升级判定用；升级/降级后清零，要求"重新积累证据"） */
 	uses: number;
-	/** 最近一次使用时间（ISO；审计/展示用） */
+	/** 最近一次**使用**的时间（ISO）——LRU 排序键（窗口换出用；代理的"看到"不刷新它） */
 	lastUsedAt: string;
 	/**
-	 * 最近一次使用时的**活动日序号**（见 MemoryState.activeDayCount）。
-	 * 老化按"活动日"计：程序没启动的日子不算 —— 用户长期不启动程序回来时，不会被一次性清空。
+	 * 最近一次**触达**（使用或代理"看到"）时的**活动日序号**（见 MemoryState.activeDayCount）。
+	 * 老化按活动日计：程序没启动的日子不算 —— 用户长期不启动程序回来时不会被一次性清空。
 	 * 缺失时（本机制上线前的条目）回退为按日历天估算。
 	 */
 	lastUsedDay?: number;
-	/** 被换出可见清单的时间（ISO）——**销毁倒计时的起点** */
-	evictedAt?: string;
-	/** 被换出时的活动日序号（倒计时按活动日推进） */
-	evictedDay?: number;
-	/**
-	 * 最近一次被「看到」的时间/活动日 —— 与 `uses` 无关的**弱信号**，只用于
-	 * **推迟销毁倒计时**（归纳代理为了查重读了它 = "这个话题又出现了"）。
-	 * 不参与升级判定（那是 master 真读全文 / 重申的专属证据）。
-	 */
-	lastSeenAt?: string;
-	lastSeenDay?: number;
-	/** 换出原因（审计：decay / window / candidate） */
-	evictReason?: string;
-	/** 最近一次因使用而升级（审计） */
-	lastPromotedAt?: string;
-	/** 最近一次因闲置而降级（审计） */
-	lastDemotedAt?: string;
-	/** 最近一次因闲置而降级的**活动日**（降级本身重置老化起点，"每 N 活动日降一级"才成立） */
-	lastDemotedDay?: number;
+	/** 最近一次**结算**（升降级）的活动日：防止同一活动日内连跑两次结算连降两级 */
+	lastStepDay?: number;
 }
 
 /** 持久化状态（state.json） */
@@ -179,29 +162,31 @@ export interface MemoryState {
 /**
  * LRU 维护参数（来自 `[memory]` 配置段）。
  *
- * 模型（对齐 CPU 的 working set / LRU 换出）：
- *   memory window（可见清单容量）→ 超容量的条目被**换出** → 换出后进入**销毁倒计时**
- *   （期间再被使用 → 复活）→ 倒计时到期才**销毁**（默认归档，可配物理删除）。
- * 时间为**活动日**，不是日历天。
+ * **统一模型（R30）：只靠 confidence 档位表达生命周期，不再有独立的"换出队列"。**
+ *
+ * ```
+ *   conf 3 ──闲置超期──▶ 2 ──闲置超期──▶ 1 ──闲置超期──▶ 0 ──闲置超期──▶ 销毁
+ *          ◀──升级(uses≥N)──        ◀──升级──        ◀──升级──   ◀──任何触达(=回到 1 重新观察)
+ * ```
+ * | conf | 含义 | master 可见 |
+ * |:--|:--|:--|
+ * | 3 / 2 | 正式记忆（明确陈述 / 确认） | ✅ |
+ * | 1 | **待观察**（模糊，等待被印证） | ❌ |
+ * | 0 | **待销毁**（长期无人使用；销毁期限一到即归档/删除） | ❌ |
+ *
+ * 时间为**活动日**（程序实际被使用的天数），不是日历天。
  */
 export interface MemoryLruOptions {
 	/** 总开关（默认 true） */
 	enabled?: boolean;
-	/** 闲置超过该**活动日**数 → 降一级（默认 90） */
+	/** 闲置超过该**活动日**数 → 降一级（默认 90；1 → 0 也走这一步） */
 	decayActiveDays?: number;
 	/** 累计使用达到该次数且最近有使用 → 升一级（默认 2） */
 	promoteUses?: number;
-	/** memory window：master 可见条目上限（默认 200）；超出时按 LRU 换出 */
+	/** memory window：master 可见条目上限（默认 200）；超出时按 LRU 把最久未用者降到 conf 1 */
 	windowSize?: number;
-	/** 换出后的销毁倒计时（**活动日**，默认 30）；期间被使用即复活 */
+	/** **conf 0 的销毁期限**（活动日，默认 180）：期间被触达 → 回到 conf 1 重新观察 */
 	destroyAfterDays?: number;
-	/**
-	 * **出生候选**（从未进过可见清单）的销毁期限（活动日，默认 365）。
-	 *
-	 * 为什么与上面分开：候选池的成本≈0（不注入、不进 master 上下文），而"晋升"要求**重复出现**——
-	 * 若也给 30 活动日，"一年只提一次"的有效偏好会在两次出现之间被销毁 → 永远升不上来（churn）。
-	 */
-	candidateTtlDays?: number;
 	/** 销毁方式：archive = 移到 legacy/archive/（默认）；delete = 物理删除 */
 	destroyMode?: 'archive' | 'delete';
 }
@@ -209,15 +194,15 @@ export interface MemoryLruOptions {
 /** 一次 LRU 维护的结算结果（供 UI 打印与审计） */
 export interface MemoryMaintenanceResult {
 	scope: MemoryScope;
-	/** 提升的条目（含前后置信度） */
+	/** 升级的条目（含前后 confidence） */
 	promoted: { slug: string; from: number; to: number }[];
-	/** 降级的条目 */
+	/** 降级的条目（含 1 → 0） */
 	demoted: { slug: string; from: number; to: number }[];
-	/** 被换出可见清单（进入销毁倒计时） */
-	evicted: { slug: string; reason: 'decay' | 'window' | 'candidate' }[];
-	/** 倒计时中复活（重新被使用） */
+	/** 因超出 memory window 被降到 conf 1 的条目（观察区） */
+	windowEvicted: string[];
+	/** conf 0 → 1：被再次触达，回到观察区重新开始 */
 	revived: string[];
-	/** 倒计时到期被销毁 */
+	/** conf 0 且超过销毁期限 → 销毁（归档/删除） */
 	destroyed: string[];
 	/** 跳过的（pinned 免疫） */
 	pinned: string[];
@@ -628,6 +613,9 @@ export class MemoryStore {
 	/**
 	 * 把被取代条目的使用计数转给新条目并清理旧记录。
 	 * 返回转出的次数（调用方把它叠加到新条目上）。
+	 *
+	 * 为什么必须转：同主题"反复出现"是候选条目升级的唯一确定性证据（§4.2 通道 2），
+	 * 清零会让"一年才提一次"的偏好永远攒不够证据。
 	 */
 	private async inheritUsage(scope: MemoryScope, fromSlugs: string[], toSlug: string): Promise<number> {
 		const state = await this.getState(scope);
@@ -645,7 +633,6 @@ export class MemoryStore {
 		}
 		if (lastUsedAt) {
 			const cur = usage[toSlug] ?? { uses: 0, lastUsedAt };
-			// 复现视为新证据：**不继承销毁倒计时**（evictedAt），只继承"这个话题被重申过几次"
 			usage[toSlug] = {
 				...cur,
 				lastUsedAt: cur.lastUsedAt > lastUsedAt ? cur.lastUsedAt : lastUsedAt,
@@ -672,29 +659,29 @@ export class MemoryStore {
 	}
 
 	/**
-	 * 记录一次**弱信号「看到」**：只刷新 `lastSeenAt/lastSeenDay`，**不增 uses、不动 lastUsedAt**。
-	 * 用途单一：归纳代理为了查重读了某条（说明"这个话题又出现了"）→ **推迟它的销毁倒计时**。
-	 * 它不能复活条目、也不参与升级判定（升级只认 master 的读全文与重申）。
+	 * 记录一次**弱信号「看到」**（归纳代理为了查重读了某条）：**刷新老化时钟**，但
+	 * **不增 `uses`、不动 `lastUsedAt`**。
+	 *
+	 * 语义：这个话题又出现了 → 它不该因为"长期闲置"被降级/销毁；
+	 * 但"代理看过"不足以作为升级证据（升级只认 master 读全文 / 写入重申），
+	 * 也不影响 LRU 排序（窗口换出仍按真实使用时间）。
 	 */
 	async recordTouch(scope: MemoryScope, slug: string, now: string = new Date().toISOString()): Promise<void> {
 		const state = await this.getState(scope);
 		const usage = { ...(state.usage ?? {}) };
 		const cur = usage[slug] ?? { uses: 0, lastUsedAt: now };
-		usage[slug] = { ...cur, lastSeenAt: now, lastSeenDay: state.activeDayCount ?? 0 };
+		usage[slug] = { ...cur, lastUsedDay: state.activeDayCount ?? 0 };
 		await this.setState(scope, { usage });
-		await this.audit({ kind: 'use', at: now, scope, slug, touch: true, activeDay: usage[slug].lastSeenDay });
+		await this.audit({ kind: 'use', at: now, scope, slug, touch: true, activeDay: usage[slug].lastUsedDay });
 	}
 
 	/**
 	 * 钉住 / 取消钉住。
 	 *
-	 * 钉住 = 用户显式"留住它"，因此：
-	 *   ① **移出销毁队列**（清 `evictedAt/evictedDay/evictReason`）—— 否则界面仍会显示"⏳待销毁"
-	 *      而 `reconcile` 又会跳过 pinned，形成"显示要销毁、实际永不销毁"的矛盾；
-	 *   ② **等级拉到可见阈值**（不低于原值）—— pin 一条 master 看不见的候选没有意义；
-	 *      想升到 3 仍要靠"被反复使用"或用户显式写入（不在这里凭空加证据）。
-	 *
-	 * 取消钉住只影响"免疫"，不回退等级；若仍长期闲置，下次结算会重新进入销毁队列。
+	 * 钉住 = 用户显式"留住它"：**把等级拉到可见阈值**（不低于原值）——
+	 * pin 一条 master 看不见的条目（conf 0/1）没有意义，而且 conf 0 本身就是"待销毁"。
+	 * 想升到 3 仍要靠"被反复使用"或用户显式写入（不在这里凭空加证据）。
+	 * `reconcile` 会跳过 pinned（免疫自动升降级与销毁）；取消钉住后重新参与维护。
 	 */
 	async setPinned(scope: MemoryScope, slug: string, pinned: boolean): Promise<boolean> {
 		const entry = await this.readEntry(scope, slug);
@@ -707,41 +694,32 @@ export class MemoryStore {
 			confidence,
 			status: deriveStatus(entry.status, confidence, this.masterMinConfidence),
 		});
-		if (pinned) {
-			// 退出销毁队列（usage 里只保留使用统计）
-			const state = await this.getState(scope);
-			const usage = { ...(state.usage ?? {}) };
-			const u = usage[slug];
-			if (u) {
-				usage[slug] = { ...u, evictedAt: undefined, evictedDay: undefined, evictReason: undefined };
-				await this.setState(scope, { usage });
-			}
-		}
 		await this.audit({ kind: 'pin', at: now, scope, slug, pinned, confidence });
 		await this.syncIndex(scope);
 		return true;
 	}
 
 	/**
-	 * LRU 维护（**memory window + 销毁倒计时 + 活动日时钟**）。幂等、确定性、可预览、全程审计。
+	 * LRU 维护（**统一 confidence 档位**：3/2 可见 → 1 待观察 → 0 待销毁 → 销毁）。
+	 * 幂等、确定性、可预览、全程审计；**没有独立的"换出队列"** —— 生命周期全部由 confidence 表达。
 	 *
 	 * 时间单位是**活动日**（`state.activeDayCount`，只在"新的一天且程序确实被使用"时 +1）——
 	 * 用户长期不启动程序时老化**不推进**，因此不会出现"半年没开，回来一次全清"。
 	 *
 	 * 一次结算的判定顺序（每条只命中一个分支）：
-	 *   0. `pinned` → 跳过（免疫）
-	 *   1. 已在**销毁倒计时**中：
-	 *      a. 倒计时内被使用过 → **复活**（清倒计时；conf 拉回可见阈值 → 重回清单）
-	 *      b. 倒计时（活动日）> `destroyAfterDays` → **销毁**（默认归档 `legacy/archive/`，可配物理删除）
-	 *      c. 否则：倒计时继续走
-	 *   2. 不在倒计时中：
-	 *      a. **升级**：`uses ≥ promoteUses` 且最近有使用（闲置活动日 ≤ decayActiveDays）且 conf < 3 → +1，uses 清零
-	 *      b. **窗口换出**：属于"超出 `windowSize` 的最久未用者" → conf 降到候选池 + **开始销毁倒计时**（reason=window）
-	 *      c. **闲置降级**：闲置活动日 > decayActiveDays 且 conf > 阈值 → −1；若因此离开可见清单 → 开始倒计时（reason=decay）
-	 *      d. **出生候选**：本来就在候选池且闲置 > decayActiveDays → 开始倒计时（reason=candidate）
+	 *   0. `pinned` → 跳过（免疫自动升降级与销毁）
+	 *   1. **conf 0（待销毁）**：
+	 *      a. 最近一个 decay 周期内被触达过（master 读全文/写入，或归纳代理查重读到）→ **回到 conf 1 重新观察**
+	 *      b. 否则闲置活动日 > `destroyAfterDays` → **销毁**（默认归档 `legacy/archive/`，可配物理删除）
+	 *   2. **conf ≥ 1**：
+	 *      a. **升级**：`uses ≥ promoteUses` 且最近有使用（闲置 ≤ decay）且 conf < 3 → +1，uses 清零
+	 *      b. **窗口换出**：属于"超出 `windowSize` 的最久未用者" → 直接降到 conf 1（观察区，不是判死刑）
+	 *      c. **闲置降级**：闲置活动日 > decay → −1（3→2→1→0）
 	 *
-	 * 不变量：**离开"可见清单"的条目一定会进入销毁倒计时**（否则候选池会成为无限期坟场）；
-	 * 只有"被再次使用"或 `pinned` 能打断倒计时。
+	 * 不变量：
+	 *   - **一次结算每条只走一步**（`lastStepDay` 保证同一活动日内重复结算不连降）；
+	 *   - conf 0 是**唯一**的"待销毁"状态；被任何触达即回到 **1**（不直接回 2：重新启用要重新观察）；
+	 *   - 触达只刷新老化时钟，**LRU 排序键仍是真实使用时间**（代理的"看到"不会让它显得更"常用"）。
 	 *
 	 * @param dryRun true 时只返回计划、不落盘（`/memory gc --dry-run`）
 	 */
@@ -751,7 +729,7 @@ export class MemoryStore {
 		dryRun = false,
 	): Promise<MemoryMaintenanceResult> {
 		const result: MemoryMaintenanceResult = {
-			scope, promoted: [], demoted: [], evicted: [], revived: [], destroyed: [],
+			scope, promoted: [], demoted: [], windowEvicted: [], revived: [], destroyed: [],
 			pinned: [], dryRun: dryRun || undefined,
 		};
 		if (opts.enabled === false) return result;
@@ -759,8 +737,7 @@ export class MemoryStore {
 		const decayDays = opts.decayActiveDays ?? 90;
 		const promoteUses = opts.promoteUses ?? 2;
 		const windowSize = opts.windowSize ?? 200;
-		const destroyAfter = opts.destroyAfterDays ?? 30;
-		const candidateTtl = opts.candidateTtlDays ?? 365;
+		const destroyAfter = opts.destroyAfterDays ?? 180;
 		const destroyMode = opts.destroyMode ?? 'archive';
 		const DAY = 86_400_000;
 		const nowMs = Date.now();
@@ -770,7 +747,7 @@ export class MemoryStore {
 		const dir = await this.ensureDir(scope);
 		const state = await this.getState(scope);
 
-		// ── 活动时钟：每个"新的一天"至多 +1（缺席不推进）──────────────
+		// ── 活动时钟：每个"新的一天"至多 +1（缺席不推进）──────────
 		const today = new Date(nowMs).toISOString().slice(0, 10);
 		const advanced = state.lastActiveDate !== today;
 		const activeDay = (state.activeDayCount ?? 0) + (advanced ? 1 : 0);
@@ -780,33 +757,23 @@ export class MemoryStore {
 		const live = entries.filter((e) => e.status !== 'superseded');
 		const usage = { ...(state.usage ?? {}) };
 
-		/** 老化起点 = max(最近使用, 最近降级)——降级本身也算"结算过"，否则同一活动日内
-		 *  连跑两次（两次会话启动 / 手动 gc）会 3→1 连降两级 */
+		/** 老化起点 = max(最近触达, 最近结算)——结算本身也算"走过一步"，防同一活动日连降 */
 		const idleOf = (entry: MemoryEntry, u: MemoryUsage): number => {
 			if (u.lastUsedDay !== undefined) {
-				return Math.max(0, activeDay - Math.max(u.lastUsedDay, u.lastDemotedDay ?? 0));
+				return Math.max(0, activeDay - Math.max(u.lastUsedDay, u.lastStepDay ?? 0));
 			}
 			// 老数据（无活动日记录）回退为日历天估算
-			return Math.floor((nowMs - Date.parse(latestIso(u.lastUsedAt || entry.updated, u.lastDemotedAt))) / DAY);
+			return Math.floor((nowMs - Date.parse(u.lastUsedAt || entry.updated)) / DAY);
 		};
-		const isEvicted = (slug: string): boolean => usage[slug]?.evictedAt !== undefined;
+		/** 是否在最近一个 decay 周期内被触达过（conf 0 → 1 的"重新观察"判据） */
+		const touchedRecently = (entry: MemoryEntry, u: MemoryUsage): boolean =>
+			u.lastUsedDay !== undefined
+				? activeDay - u.lastUsedDay <= decayDays
+				: Math.floor((nowMs - Date.parse(u.lastUsedAt || entry.updated)) / DAY) <= decayDays;
 
-		/**
-		 * 倒计时已推进多少（活动日）：起点取 `max(evictedDay, lastSeenDay)` ——
-		 * 归纳代理的"看到"（查重读）可以**推迟**销毁，但不能复活。
-		 */
-		const countdownOf = (u: MemoryUsage): number => {
-			const startDay = Math.max(u.evictedDay ?? 0, u.lastSeenDay ?? 0);
-			if (startDay > 0) return Math.max(0, activeDay - startDay);
-			const from = u.evictedDay !== undefined
-				? Date.parse(latestIso(u.evictedAt!, u.lastSeenAt))
-				: Date.parse(latestIso(u.lastSeenAt ?? '', u.evictedAt ?? ''));
-			return Number.isNaN(from) ? 0 : Math.floor((nowMs - from) / DAY);
-		};
-
-		// ── 窗口：可见集合超容量 → 最久未用者先被换出（LRU 序：lastUsedAt → uses → slug）──
+		// 窗口：可见集合超容量 → 最久未用者（LRU 序：lastUsedAt → uses → slug）降到观察区
 		const visible = live
-			.filter((e) => !e.pinned && !isEvicted(e.slug) && e.confidence >= minConf)
+			.filter((e) => !e.pinned && e.confidence >= minConf)
 			.sort((a, b) => {
 				const ua = usage[a.slug] ?? { uses: 0, lastUsedAt: a.updated };
 				const ub = usage[b.slug] ?? { uses: 0, lastUsedAt: b.updated };
@@ -820,14 +787,7 @@ export class MemoryStore {
 		const windowEvict = new Set(visible.slice(0, over).map((e) => e.slug));
 
 		/** 先算完整计划（纯计算），再统一落盘 —— dry-run 因此零副作用 */
-		const plan: {
-			slug: string; confidence: number; status: MemoryStatus;
-			usage?: MemoryUsage; destroy?: boolean;
-		}[] = [];
-		const touch = (slug: string, patch: Partial<MemoryUsage>): void => {
-			const cur = usage[slug] ?? { uses: 0, lastUsedAt: nowIso };
-			plan.push({ slug, confidence: -1, status: 'active', usage: { ...cur, ...patch } });
-		};
+		const plan: { slug: string; confidence: number; usage?: MemoryUsage; destroy?: boolean }[] = [];
 
 		for (const entry of live) {
 			if (entry.pinned) {
@@ -836,75 +796,41 @@ export class MemoryStore {
 			}
 			const u = usage[entry.slug] ?? { uses: 0, lastUsedAt: entry.updated };
 			const idle = idleOf(entry, u);
-			const evicted = u.evictedAt !== undefined;
+			const conf = entry.confidence;
 
-			// 1. 倒计时中：复活 / 销毁 / 继续
-			if (evicted) {
-				const usedSince = u.lastUsedAt > u.evictedAt!;
-				if (usedSince) {
-					const to = Math.max(entry.confidence, minConf);
+			// 1. conf 0 = 待销毁
+			if (conf <= 0) {
+				if (touchedRecently(entry, u)) {
+					// 被再次触达 → 回到 1 重新观察（不直接回 2：重新启用需要重新积累证据）
 					result.revived.push(entry.slug);
-					plan.push({
-						slug: entry.slug, confidence: to, status: deriveStatus(entry.status, to, minConf),
-						usage: { ...u, evictedAt: undefined, evictedDay: undefined, evictReason: undefined },
-					});
-					continue;
-				}
-				const inCountdown = countdownOf(u);
-				// 期限按"离场原因"区分：出生候选给更长的 TTL（否则稀疏偏好永远攒不到晋升证据）
-				const limit = u.evictReason === 'candidate' ? candidateTtl : destroyAfter;
-				if (inCountdown > limit) {
+					plan.push({ slug: entry.slug, confidence: 1, usage: { ...u, uses: 0, lastStepDay: activeDay } });
+				} else if (idle > destroyAfter) {
 					result.destroyed.push(entry.slug);
-					plan.push({ slug: entry.slug, confidence: entry.confidence, status: entry.status, destroy: true });
+					plan.push({ slug: entry.slug, confidence: conf, destroy: true });
 				}
-				continue;   // 倒计时继续走
-			}
-
-			// 2a. 升级（要求"最近有使用"，避免靠历史计数升级）
-			if (u.uses >= promoteUses && idle <= decayDays && entry.confidence < 3) {
-				const to = Math.min(3, entry.confidence + 1);
-				result.promoted.push({ slug: entry.slug, from: entry.confidence, to });
-				plan.push({
-					slug: entry.slug, confidence: to, status: deriveStatus(entry.status, to, minConf),
-					usage: { ...u, uses: 0, lastPromotedAt: nowIso },
-				});
 				continue;
 			}
 
-			// 2b. 窗口换出：把最久未用的挤出可见清单 → 进候选池 + 开始销毁倒计时
-			if (windowEvict.has(entry.slug)) {
-				const to = Math.min(entry.confidence, Math.max(1, minConf - 1));
-				result.evicted.push({ slug: entry.slug, reason: 'window' });
-				plan.push({
-					slug: entry.slug, confidence: to, status: deriveStatus(entry.status, to, minConf),
-					usage: { ...u, uses: 0, evictedAt: nowIso, evictedDay: activeDay, evictReason: 'window' },
-				});
+			// 2a. 升级（要求最近有使用，避免靠历史计数升级）
+			if (u.uses >= promoteUses && idle <= decayDays && conf < 3) {
+				const to = Math.min(3, conf + 1);
+				result.promoted.push({ slug: entry.slug, from: conf, to });
+				plan.push({ slug: entry.slug, confidence: to, usage: { ...u, uses: 0 } });
 				continue;
 			}
 
-			// 2c. 闲置降级（一次一级）
-			if (entry.confidence > 1 && idle > decayDays) {
-				const to = Math.max(1, entry.confidence - 1);
-				const leavesWindow = to < minConf;
-				result.demoted.push({ slug: entry.slug, from: entry.confidence, to });
-				if (leavesWindow) result.evicted.push({ slug: entry.slug, reason: 'decay' });
-				plan.push({
-					slug: entry.slug, confidence: to, status: deriveStatus(entry.status, to, minConf),
-					usage: {
-						...u, uses: 0, lastDemotedAt: nowIso, lastDemotedDay: activeDay,
-						...(leavesWindow ? { evictedAt: nowIso, evictedDay: activeDay, evictReason: 'decay' as const } : {}),
-					},
-				});
+			// 2b. 窗口换出 → 降到 conf 1（观察区）
+			if (conf > 1 && windowEvict.has(entry.slug)) {
+				result.windowEvicted.push(entry.slug);
+				plan.push({ slug: entry.slug, confidence: 1, usage: { ...u, uses: 0, lastStepDay: activeDay } });
 				continue;
 			}
 
-			// 2d. 出生即候选的条目长期无人问津 → 开始倒计时（否则候选池无限期堆积）
-			if (entry.confidence < minConf && idle > decayDays) {
-				result.evicted.push({ slug: entry.slug, reason: 'candidate' });
-				plan.push({
-					slug: entry.slug, confidence: entry.confidence, status: deriveStatus(entry.status, entry.confidence, minConf),
-					usage: { ...u, evictedAt: nowIso, evictedDay: activeDay, evictReason: 'candidate' },
-				});
+			// 2c. 闲置降级（一次一级：3→2→1→0）
+			if (idle > decayDays) {
+				const to = conf - 1;
+				result.demoted.push({ slug: entry.slug, from: conf, to });
+				plan.push({ slug: entry.slug, confidence: to, usage: { ...u, uses: 0, lastStepDay: activeDay } });
 			}
 		}
 
@@ -924,9 +850,9 @@ export class MemoryStore {
 				continue;
 			}
 			const entry = entries.find((e) => e.slug === p.slug)!;
-			const confidence = p.confidence >= 0 ? p.confidence : entry.confidence;
 			await this.writeEntry(dir, {
-				...entry, confidence, status: deriveStatus(entry.status, confidence, minConf), updated: entry.updated,
+				...entry, confidence: p.confidence,
+				status: deriveStatus(entry.status, p.confidence, minConf), updated: entry.updated,
 			});
 			if (p.usage) usage[p.slug] = p.usage;
 		}
@@ -935,7 +861,7 @@ export class MemoryStore {
 		await this.audit({
 			kind: 'lru', at: nowIso, scope, activeDay,
 			promoted: result.promoted, demoted: result.demoted,
-			evicted: result.evicted, revived: result.revived, destroyed: result.destroyed,
+			windowEvicted: result.windowEvicted, revived: result.revived, destroyed: result.destroyed,
 		});
 		return result;
 	}

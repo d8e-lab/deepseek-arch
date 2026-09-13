@@ -944,7 +944,7 @@ export class TuiApp {
 				this.cmdOut(dim(`  注入预算 ${mem.config.maxInjectTokens} tokens · 召回/归纳模型 ${mem.config.recallModel}/${mem.config.agentModel}`));
 				this.cmdOut(dim(`  项目层目录 ${store.dirOf('project')}`));
 				this.cmdOut(dim('  子命令：show [kw] | candidates | gc [--dry-run] | pin <slug> | unpin <slug> | forget <slug> | on | off | refresh'));
-				this.cmdOut(dim(`  LRU 维护：${mem.config.lruEnabled ? '开' : '关'} · 活动日闲置 ${mem.config.lruDecayActiveDays} 天降一级 · 使用满 ${mem.config.lruPromoteUses} 次升一级 · 窗口 ${mem.config.lruWindowSize} 条 · 换出后 ${mem.config.lruDestroyAfterDays} 活动日${mem.config.lruDestroyMode === 'delete' ? '删除' : '归档'} · 候选 ${mem.config.lruCandidateTtlDays} 活动日`));
+				this.cmdOut(dim(`  LRU 维护：${mem.config.lruEnabled ? '开' : '关'} · 活动日闲置 ${mem.config.lruDecayActiveDays} 天降一级 · 使用满 ${mem.config.lruPromoteUses} 次升一级 · 窗口 ${mem.config.lruWindowSize} 条 · conf0 ${mem.config.lruDestroyAfterDays} 活动日${mem.config.lruDestroyMode === 'delete' ? '删除' : '归档'}`));
 				return true;
 			}
 			case 'show': {
@@ -981,8 +981,8 @@ export class TuiApp {
 					const bits: string[] = [];
 					if (r.promoted.length) bits.push(`升级 ${r.promoted.map((p) => `${p.slug} ${p.from}→${p.to}`).join(', ')}`);
 					if (r.demoted.length) bits.push(`降级 ${r.demoted.map((p) => `${p.slug} ${p.from}→${p.to}`).join(', ')}`);
-					if (r.evicted.length) bits.push(`换出 ${r.evicted.map((e) => `${e.slug}(${e.reason})`).join(', ')}`);
-					if (r.revived.length) bits.push(`复活 ${r.revived.join(', ')}`);
+					if (r.windowEvicted.length) bits.push(`窗口换出 ${r.windowEvicted.join(', ')}`);
+					if (r.revived.length) bits.push(`回到观察区 ${r.revived.join(', ')}`);
 					if (r.destroyed.length) bits.push(`销毁 ${r.destroyed.join(', ')}`);
 					if (r.pinned.length) bits.push(dim(`免疫(pinned) ${r.pinned.length} 条`));
 					this.cmdOut(dim(`  ${r.scope}: ${bits.length ? bits.join(' · ') : '无变化'}${r.activeDay !== undefined ? dim(`  [活动日 ${r.activeDay}]`) : ''}`));
@@ -1010,25 +1010,23 @@ export class TuiApp {
 					this.cmdOut(dim('(无模糊条目)'));
 					return true;
 				}
-				// 同一状态（conf 1）承载两种意图：待晋升 / 待销毁 —— 分组显示，避免混成"一锅粥"
+				// 候选区 = conf < 阈值：1 = 待观察、0 = 待销毁（同一套 confidence 档位）
 				const usage = { ...((await store.getState('project')).usage ?? {}), ...((await store.getState('global')).usage ?? {}) };
 				const day = Math.max((await store.getState('project')).activeDayCount ?? 0, (await store.getState('global')).activeDayCount ?? 0);
-				const pending: typeof candidates = [];
-				const evicted: typeof candidates = [];
-				for (const e of candidates) (usage[e.slug]?.evictedAt !== undefined ? evicted : pending).push(e);
+				const pending = candidates.filter((e) => e.confidence >= 1);
+				const doomed = candidates.filter((e) => e.confidence <= 0);
 
 				if (pending.length > 0) {
 					this.cmdOut(dim(`待观察（confidence 1，不注入；被再次印证才升进清单） ${pending.length} 条：`));
-					for (const e of pending.slice(0, 20)) this.cmdOut(dim(`  ${e.slug}  uses=${usage[e.slug]?.uses ?? 0}  ${e.description}`));
+					for (const e of pending.slice(0, 20)) this.cmdOut(dim(`  ${e.slug}  uses=${usage[e.slug]?.uses ?? 0}  ${e.pinned ? '📌' : ''} ${e.description}`));
 				}
-				if (evicted.length > 0) {
-					this.cmdOut(yellow(`⏳ 待销毁（已离开可见清单；到期自动${mem.config.lruDestroyMode === 'delete' ? '删除' : '归档'}） ${evicted.length} 条：`));
-					for (const e of evicted.slice(0, 20)) {
-						const u = usage[e.slug]!;
-						const start = Math.max(u.evictedDay ?? 0, u.lastSeenDay ?? 0);
+				if (doomed.length > 0) {
+					this.cmdOut(yellow(`⏳ 待销毁（confidence 0；闲置到期自动${mem.config.lruDestroyMode === 'delete' ? '删除' : '归档'}，期间被用到会回到观察区） ${doomed.length} 条：`));
+					for (const e of doomed.slice(0, 20)) {
+						const u = usage[e.slug];
+						const start = Math.max(u?.lastUsedDay ?? 0, u?.lastStepDay ?? 0);
 						const elapsed = start > 0 && day > 0 ? Math.max(0, day - start) : 0;
-						const limit = u.evictReason === 'candidate' ? mem.config.lruCandidateTtlDays : mem.config.lruDestroyAfterDays;
-						this.cmdOut(dim(`  ${e.slug}  ${u.evictReason}  已 ${elapsed}/${limit} 活动日  ${e.description}`));
+						this.cmdOut(dim(`  ${e.slug}  已 ${elapsed}/${mem.config.lruDestroyAfterDays} 活动日  ${e.description}`));
 					}
 				}
 				this.cmdOut(dim('提示：/memory pin <slug> 可永久保留；/memory forget <slug> 立即淘汰'));
@@ -1071,7 +1069,6 @@ export class TuiApp {
 						lruPromoteUses: cfg?.get<number>('memory.lru_promote_uses') ?? undefined,
 						lruWindowSize: cfg?.get<number>('memory.lru_window_size') ?? undefined,
 						lruDestroyAfterDays: cfg?.get<number>('memory.lru_destroy_after_days') ?? undefined,
-						lruCandidateTtlDays: cfg?.get<number>('memory.lru_candidate_ttl_days') ?? undefined,
 						lruDestroyMode: (cfg?.get<string>('memory.lru_destroy_mode') === 'delete' ? 'delete' : undefined),
 					});
 				}

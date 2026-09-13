@@ -47,11 +47,12 @@
 - 本文件只登记**已明确暂缓**的事项；不要在此堆想法，想法放 `plan/`。
 - 任何一项开工前，先在 `plan/memory-heartbeat-design.md` 对应章节写清最终方案，再改代码（避免"文档与实现漂移"重演）。
 
-**R29 审计（2026-09-13）：「conf 1」与「待销毁」共用一个状态的一致性审查** —— 8 条结论
-（2 处修正 + 6 处刻意设计）见设计稿 **§4.4**；修正项是"出生候选 TTL 与晋升阈值互相削弱"
-（新增 `lru_candidate_ttl_days`，默认 365 活动日）。**遗留可选项**：`/memory candidates` 已分组，
-但 `listCandidates()` 仍是"两类混在一起"的单一视图 —— 若以后需要程序化区分（如容量统计、GC 报表），
-建议在 store 层加 `listEvicted()`/`listPending()` 两个方法（当前只有渲染层在意，故未加）。
+**R30 收敛（2026-09-13，用户决定）：生命周期统一到 confidence 档位** —— 取消独立的"换出队列"
+（`evictedAt/evictedDay/evictReason` + 销毁倒计时 + 复活分支 + `lastSeen*` + 候选 TTL），
+改为 **`confidence 0 = 待销毁`**、`1 = 待观察`、`2/3 = 可见`；`state.json` 的 usage 从 11 字段收敛到
+**4 个**（`uses / lastUsedAt / lastUsedDay / lastStepDay`）；销毁期限统一为 `lru_destroy_after_days`（默认 180 活动日）。
+`/memory candidates` 按档位分组（1 = 待观察，0 = ⏳待销毁）。**遗留可选项**：`listCandidates()` 仍是单一视图
+（含 0/1 两档）—— 若以后需要程序化区分（容量统计、GC 报表），再在 store 层加 `listDoomed()`（当前只有渲染层在意）。
 
 **另一处已修的静默 bug（2026-09-13，R28）**：`--no-memory` 一直**没生效** ——
 commander 对 `--no-*` 生成的是 `options.memory = false`，而代码读的是 `options.noMemory`（恒 undefined）；

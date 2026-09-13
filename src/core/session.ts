@@ -136,10 +136,8 @@ export interface MemorySessionConfig {
 	lruPromoteUses?: number;
 	/** memory window：master 可见条目上限（默认 200），超出按 LRU 换出 */
 	lruWindowSize?: number;
-	/** 换出后的销毁倒计时（活动日，默认 30）；期间被使用即复活 */
+	/** conf 0（待销毁）的销毁期限（活动日，默认 180）；期间被触达 → 回到 conf 1 重新观察 */
 	lruDestroyAfterDays?: number;
-	/** 出生候选的销毁期限（活动日，默认 365）—— 候选池成本≈0，给"低频偏好"留出被再次印证的机会 */
-	lruCandidateTtlDays?: number;
 	/** 销毁方式：archive（默认）/ delete */
 	lruDestroyMode?: 'archive' | 'delete';
 	/** 显式注入存储（测试用；省略时按当前工作区构造） */
@@ -368,8 +366,7 @@ export class SessionManager {
 			lruDecayActiveDays: cfg.lruDecayActiveDays ?? 90,
 			lruPromoteUses: cfg.lruPromoteUses ?? 2,
 			lruWindowSize: cfg.lruWindowSize ?? 200,
-			lruDestroyAfterDays: cfg.lruDestroyAfterDays ?? 30,
-			lruCandidateTtlDays: cfg.lruCandidateTtlDays ?? 365,
+			lruDestroyAfterDays: cfg.lruDestroyAfterDays ?? 180,
 			lruDestroyMode: cfg.lruDestroyMode ?? 'archive',
 		};
 		if (!config.enabled) {
@@ -398,7 +395,6 @@ export class SessionManager {
 				minIntervalSec: config.agentMinIntervalSec,
 				sessionId: this.session?.meta.id,
 				destroyAfterDays: config.lruDestroyAfterDays,
-				candidateTtlDays: config.lruCandidateTtlDays,
 			}),
 			config,
 		};
@@ -426,7 +422,6 @@ export class SessionManager {
 			promoteUses: mem.config.lruPromoteUses,
 			windowSize: mem.config.lruWindowSize,
 			destroyAfterDays: mem.config.lruDestroyAfterDays,
-			candidateTtlDays: mem.config.lruCandidateTtlDays,
 			destroyMode: mem.config.lruDestroyMode,
 		};
 		const out: MemoryMaintenanceResult[] = [];

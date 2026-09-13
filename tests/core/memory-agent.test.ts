@@ -241,7 +241,7 @@ describe('MemoryAgent', () => {
 
 	// ── 记忆索引前置（含候选池）：agent 的升级/去重判断依据 ──────────────────
 
-	it('输入前置现有记忆索引：正式条目 + 候选池（conf 1 只有 agent 看得到）', async () => {
+	it('输入前置现有记忆索引：正式条目 + 候选区（conf 1 只有 agent 看得到）', async () => {
 		await store.write('project', { subject: 'reply.format', name: '正式条', description: '可见', confidence: 3, body: 'b1' });
 		const cand = await store.write('project', { subject: 'style.tone', name: '候选条', description: '模糊', confidence: 1, body: 'b2' });
 		await store.recordUse('project', cand.slug);   // 加两次使用
@@ -258,7 +258,8 @@ describe('MemoryAgent', () => {
 		expect(input).toContain('现有记忆');
 		expect(input).toContain('正式条目');          // 段标题
 		expect(input).toContain('正式条');            // 正式条目内容
-		expect(input).toContain('候选池');            // 段标题（master 不可见的那批）
+		expect(input).toContain('候选区');            // 段标题（master 不可见的那批）
+		expect(input).toContain('待观察');            // conf 1 = 待观察
 		expect(input).toContain(cand.slug);          // 候选条目（拿得到 slug 才能升级）
 		expect(input).toContain('共被使用 3 次');     // 升级判断依据
 		expect(input.indexOf('现有记忆')).toBeLessThan(input.indexOf('需要归纳的对话片段'));  // 清单前置

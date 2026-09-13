@@ -2,9 +2,9 @@
 
 > **版本说明**
 > - **v2（2026-09-13）**：与实现一致，是唯一的实施依据。§13 列出 v1 已废弃的方案及理由。
-> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；五轮评审（R1–R29）后改为
+> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；五轮评审（R1–R30）后改为
 >   「每主题 Markdown + 清单注入 system prompt + 落盘式变化提醒 + flash 召回」，
->   并删除了 reviewer（censor agent）；R25–R28 补齐了「过时记忆如何淘汰」「候选池如何升级」「活动日时钟 + 窗口 + 销毁倒计时」（§4、§4.1、§4.2）。
+>   并删除了 reviewer（censor agent）；R25–R30 补齐了「过时记忆如何淘汰」「候选池如何升级」「活动日时钟 + 窗口」，并在 R30 把生命周期**统一到 confidence 档位**（0 = 待销毁，§4.1、§4.4）。
 >
 > **配套文件**
 > - 讲解版（用户视角）：`plan/memory-design-explained.md`
@@ -218,7 +218,7 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | 软淘汰 | 归纳代理对某条 `memory_write` 传同 slug + `confidence: 1` → 掉回候选池（`candidates.md`），**master 不再看到**，仍可恢复 |
 | 硬淘汰 | `memory_forget`（**仅 memory agent 可用**，每轮上限 3 条，不计入写入配额）：写墓碑 + 退出索引；**`confidence: 3` 拒绝**（只能取代或用户本人 `/memory forget`） |
 | 静默失效的治理 | 归纳代理每轮读清单（含 `updated N days ago`）→ 顺带清理与本轮话题相关且明显过时的条目；配合 `confidence` 的**离散档位**（3→2→1→候选池→superseded），不做连续数值衰减 |
-| **LRU 主动维护** | R26/R28 起已实现（§4.1）：活动日时钟（缺席不老化）+ memory window 换出 + 销毁倒计时；`pinned` 免疫、可 `--dry-run` 预览、可复活 |
+| **LRU 主动维护** | R26–R30 起已实现（§4.1）：**统一 confidence 档位**（3/2 可见 → 1 待观察 → 0 待销毁 → 销毁）+ 活动日时钟（缺席不老化）+ memory window；`pinned` 免疫、可 `--dry-run` 预览、可回到 1 重新观察 |
 | 到期提醒 | `remindAt` 到期的条目（**含候选条目**）在下一轮注入 `<memory-due>`，发出后清空 `remindAt`（一次性） |
 
 **淘汰路径（R25：过时记忆如何消失）**
@@ -255,96 +255,71 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 > 并加了单测：merge 不降级、显式降级可逆、superseded 终态、阈值可配 `masterMinConfidence=3`）。
 > 提示词与工具描述同步加了"更新已有条目时沿用原 confidence，别在改写措辞时降级"。
 
-### 4.1 LRU 主动维护（R26/R28：活动日时钟 + memory window + 销毁倒计时）
+### 4.1 LRU 主动维护（R26/R28/R30：**统一 confidence 档位 + 活动日时钟**）
 
 上面两条路都要求"有人在相关话题里提到它"。**静默失效**若永远无人提及，就一直没有出口 ——
-所以补一套**确定性的 LRU 维护**（对齐体系结构的 working set / LRU 换出，而不是时间衰减公式）。
+所以补一套确定性的 LRU 维护。R30 起**生命周期完全由 confidence 档位表达**，
+不再有"换出队列 / 销毁倒计时 / 复活"那一套独立机制：
 
-**时间单位是「活动日」，不是日历天（R28 的关键修正）**
+```
+  conf 3 ──闲置超期──▶ 2 ──闲置超期──▶ 1 ──闲置超期──▶ 0 ──闲置超期──▶ 销毁
+         ◀──升级(uses≥N)──       ◀──升级──       ◀──升级──   ◀──任何触达 = 回到 1 重新观察
+```
 
-`state.activeDayCount` 只在「出现新的一天 **且程序确实被使用**」时 +1（每次 `reconcile` 至多 +1）。
-条目记下"第几个活动日用的"（`usage.lastUsedDay`），老化 = `activeDayCount − lastUsedDay`。
-
-> 为什么必须这样：如果用日历天，**用户半年不开程序，回来后所有条目同时"过期 90 天"** →
-> 一次结算就把记忆清空（大屠杀）。活动日时钟下"缺席不老化"，只有"你一直在用、但这条一直没被用到"
-> 才会老化 —— 这既符合直觉，也是 LRU 的本意。
-> 老数据（无 `lastUsedDay`）回退用日历天估算，下一次被使用即转为活动日。
-
-**什么算"使用"（只有两种）**
-
-| 信号 | 来源 | 为什么 |
+| conf | 含义 | master 可见 |
 |:--|:--|:--|
-| **读全文** | master 调 `memory_read` 命中该条（`readMemoryEntry(..., recordUse=true)`） | 清单只给一行摘要；真去读全文说明它确实被用上 |
-| **被重申** | `write` / `merge`（写入即一次使用；取代时计数跨条目延续） | 内容被再次确认 → 语义仍有效 |
+| **3** | 用户明确陈述 | ✅ |
+| **2** | 否决/纠正、确认 | ✅ |
+| **1** | **待观察**（模糊，等被印证） | ❌ |
+| **0** | **待销毁**（长期无人使用；销毁期限一到即归档/删除） | ❌ |
 
-> **注入不算使用**：出现在清单里是"曝光"，不是"使用"。若把曝光计入，就会变成"越注入越升级"的正反馈。
-> 归纳代理自己的 `memory_read`（查重用）也不算。
+**时间单位是「活动日」，不是日历天**
 
-**三层结构（R28：窗口 → 换出 → 销毁倒计时）**
+`state.activeDayCount` 只在「出现新的一天 **且程序确实被使用**」时 +1（每次 `reconcile` 至多 +1）；
+条目记 `usage.lastUsedDay`（最近触达）与 `lastStepDay`（最近结算），
+**老化 = `activeDay − max(lastUsedDay, lastStepDay)`**。
 
-```
-            ┌─────────────── memory window（lru_window_size，默认 200 条）───────────────┐
-  出生 ──▶  │  可见清单（confidence ≥ master_min_confidence，会注入给 master）          │
-            └───────────────────────────────┬───────────────────────────────────────────┘
-                             闲置 > decay_active_days      │      超出窗口容量（LRU 挤出）
-                                                            ▼
-                                   候选池（confidence 1，master 不可见）
-                                   + 销毁倒计时起点 evictedAt / evictedDay
-                                                            │
-        倒计时内被再次使用 → 复活（conf 拉回阈值，重回清单）  │  倒计时（活动日）> destroy_after_days
-                                                            ▼
-                                    销毁：archive（默认，移入 legacy/archive/）或 delete
-```
+> 为什么：用日历天的话，用户半年不开程序，回来所有条目同时"过期 90 天"→ 一次清空（大屠杀）。
+> 活动日时钟下"缺席不老化"，只有"你一直在用、但这条一直没被用到"才会老化。
+> 老数据（无活动日记录）回退日历天估算，下次触达即转正。
 
-**判定规则（一次结算，每条只命中一个分支；幂等、确定性）**
+**两种触达（信号强度不同）**
+
+| 信号 | 谁触发 | 效果 |
+|:--|:--|:--|
+| **使用** `recordUse` | master 真读全文（`memory_read`）／任何写入与重申 | `uses+1`、刷新老化时钟、在 conf 0 时触发"回到 1" |
+| **看到** `recordTouch` | **归纳代理**为查重而 `memory_read` | 只刷新老化时钟（"这个话题又出现了"）；**不增 uses、不影响 LRU 排序** |
+
+> **注入不算触达**：出现在清单里是"曝光"，不是"使用"——否则会变成"越注入越升级"的正反馈。
+
+**判定规则（一次结算，每条只命中一个分支；幂等、确定性、可预览）**
 
 | # | 条件 | 动作 |
 |:--|:--|:--|
-| 0 | `pinned: true` | 跳过（不升不降不换出不销毁；用户想留住就用 `/memory pin`） |
-| 1a | 在倒计时中 **且** 倒计时开始后被使用过 | **复活**：清 `evictedAt`，conf 拉回 `master_min_confidence` → 重回可见清单 |
-| 1b | 在倒计时中 且 倒计时（活动日）> `lru_destroy_after_days`（默认 30） | **销毁**（archive / delete），条目文件按配置处理，`usage` 清理 |
-| 1c | 在倒计时中，未超期 | 不动（等它被用或到期） |
-| 2a | `uses ≥ lru_promote_uses`（默认 2）**且**最近有使用（闲置活动日 ≤ decay）且 conf < 3 | **升级** conf+1，`uses` 清零 |
-| 2b | 属于"超出窗口的最久未用者" | **换出**：conf 降到候选池 + 开始倒计时（reason=`window`） |
-| 2c | 闲置活动日 > `lru_decay_active_days`（默认 90）且 conf > 1 | **降级** conf−1；若因此跌破可见阈值 → 顺带开始倒计时（reason=`decay`） |
-| 2d | 本来就在候选池（出生即 conf 1）且闲置 > decay | 开始倒计时（reason=`candidate`）—— 否则候选池会成为无限期坟场 |
+| 0 | `pinned: true` | 跳过（免疫自动升降级与销毁） |
+| 1a | conf **0** 且最近一个 decay 周期内被触达过 | **回到 conf 1 重新观察**（不直接回 2） |
+| 1b | conf **0** 且闲置活动日 > `lru_destroy_after_days` | **销毁**（默认归档 `legacy/archive/`，可配 `delete`） |
+| 2a | `uses ≥ lru_promote_uses`（默认 2）且最近有使用（闲置 ≤ decay）且 conf < 3 | **升级** conf+1，`uses` 清零 |
+| 2b | 属于"超出 `windowSize` 的最久未用者"（且 conf > 1） | **窗口换出** → conf 1（观察区，不是判死刑） |
+| 2c | 闲置活动日 > `lru_decay_active_days`（默认 90） | **降级** conf−1（3→2→1→0） |
 
-- 为什么"升级"还要求最近有使用：一条三年前被读爆、此后无人问津的条目不该因为历史计数高而升级。
-- 为什么一次只动一级：避免长眠后条目"一次掉到候选"，让每一步都可解释、可回退。
-- **降级重置老化起点**（`lastDemotedDay`）：否则同一活动日内连跑两次结算（两次会话启动 / 手动 gc）
-  就会 3→1 连降两级，"每 decay 活动日降一级"形同虚设。
-- **不变量**：离开"可见清单"的条目**一定**进入销毁倒计时；只有"被再次使用"或 `pinned` 能打断它。
-- **可逆**：倒计时内被读到/被重申即复活；升级路径让候选池能回到清单（§4.2）。
-- 换出顺序（LRU 序）：`lastUsedAt` 升序 → `uses` 升序 → slug（确定性，可测）。
-
-**谁能救它？触达语义（三种信号，效果不同）**
-
-| 信号 | 谁触发 | 作用 | 为什么这样定 |
-|:--|:--|:--|:--|
-| **使用** `recordUse` | master 真读全文（`memory_read` 工具）／任何写入与重申 | `uses+1`、刷新 `lastUsedDay` → **推动升级、刷新老化、在倒计时中即复活** | "确实被用上"的最强证据 |
-| **看到** `recordTouch` | **归纳代理**为查重而 `memory_read` | 只刷新 `lastSeenAt/lastSeenDay` → **推迟销毁倒计时**（起点取 `max(evictedDay, lastSeenDay)`），不增 uses、**不复活** | "这个话题又出现了"是弱信号：值得缓刑，但不值得直接拉回清单 |
-| **写入升级** `write(conf ≥ 阈值)` | 归纳代理按 §4.2 职责升级 | 回到可见清单；下次结算走复活分支 | 代理是唯一能主动救候选条目的角色（master 看不见它） |
-
-由此回答"代理还会不会更新/救活待销毁的条目"：
-- **会**：候选池（含倒计时中的）就列在它的输入索引里，且带 `⏳待销毁(已 N 活动日)`；
-  确认仍有效 → 带 slug 写 `confidence: 2` → **用后即复活**（`usedSince` 判定优先于销毁，不会先被杀掉）；
-- **只读不写** → 只推迟、不复活（到期仍销毁）；
-- **什么都不做** → 到期销毁（默认归档到 `legacy/archive/`）；确认无用可 `memory_forget` 立即淘汰。
+- **一次结算每条只走一步**：`lastStepDay` 保证同一活动日内重复结算（两次会话启动 / 手动 gc）不会连降两级。
+- **换出顺序**（窗口）：`lastUsedAt` 升序 → `uses` 升序 → slug（确定性、可测）。
+- **可逆且不越级**：任何降级/销毁都由"再次被使用"拉回 **1**（重新观察）；想回 2/3 要继续被使用。
+- **"使用"与"看到"分离**的原因：代理查重读很频繁，若计入 `uses` 会让所有被查过的条目集体升级。
 
 **触发时机与可见性**
 
 | 时机 | 说明 |
 |:--|:--|
-| **会话创建时**（`startNewSession`） | 在**构建清单之前**同步跑一次（两层）→ 注入的清单就是结算后的结果；异常只记审计（不打扰） |
-| `/memory gc [--dry-run]` | 手动触发；`--dry-run` 只返回计划、零副作用（预览会降/换出/销毁哪些条） |
-| 审计 | 每次结算落一条 `{kind:'lru', activeDay, promoted[], demoted[], evicted[], revived[], destroyed[]}` |
-| 透明度 | `/memory show` 每行显示 `uses=N last-used=Nd ago pinned`，另 `/memory status` 显示参数 |
+| **会话创建时**（`startNewSession`） | 在**构建清单之前**同步跑一次（两层）→ 注入的清单就是结算后的结果；异常只记审计 |
+| `/memory gc [--dry-run]` | 手动触发；`--dry-run` 只返回计划、零副作用 |
+| 审计 | `{kind:'lru', activeDay, promoted[], demoted[], windowEvicted[], revived[], destroyed[]}` |
+| 透明度 | `/memory show` 每行显示 `uses=N last-used=Nd ago pinned`；`/memory candidates` 分「待观察(1) / ⏳待销毁(0)」；索引行带 `⏳待销毁(已 N/期限 活动日)` 与 `📌` |
 
-**用户控制面**：`lru_enabled`（总开关）、阈值可配、`pin` 永久免疫、`/memory forget` 立即遗忘、
-`lru_destroy_mode = "delete"` 才物理删除（默认归档）。
-**明确不做**：半衰期/连续数值衰减（可见性随日期漂移无法解释）、按打分公式排序（召回已交给 flash）。
-
----
+**用户控制面**：`lru_enabled`、三个阈值、`pin`（免疫 + 拉回可见）、`/memory forget`（立即墓碑）、
+`lru_destroy_mode = "delete"`（默认归档）。
+**明确不做**：半衰期/连续数值衰减、按打分公式排序。
 
 ### 4.2 候选池（conf 1）怎么升上来（R27：三条通道，缺一不可）
 
@@ -364,7 +339,7 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
   代理才知道 slug、才知道该升级谁。此前设计稿 §5 声称做了"清单前置"，实际**没实现**（代理只有对话片段、
   看不见任何条目）—— 这既是重复条目的来源，也让通道 1 与 §4 的清理规则无从落地。
 - `pinned` 的候选条目同样免疫 LRU，但**通道 1 仍可把它升到 2**（pin 只免疫自动结算，不禁止显式升级）。
-- 候选条目长期无人问津时由 §4.1 的**销毁倒计时**接管（reason=`candidate`），不会无限期占据候选池。
+- 候选条目长期无人问津时由 §4.1 的档位阶梯接管（1 → 0 → 销毁），不会无限期占据候选区。
 
 ### 4.3 换出/销毁到底由什么控制（现状：recency + 容量，不是"滑动窗口频率"）
 
@@ -392,44 +367,40 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 
 ---
 
-### 4.4 「confidence 1」与「待销毁」的重叠审计（R29）
+### 4.4 「待观察」与「待销毁」的关系（R30：**已经不是两套机制**）
 
-两个机制**共用同一个状态**（`status='candidate'` + `confidence=1`），必须逐条对齐语义。
-一次专门审计的结论（8 条，2 处修正 + 6 处刻意设计）：
+**R29 的问题**：当时"待销毁"是一条独立的**换出队列**（`state.json` 的 `evictedAt/evictedDay/evictReason`
+＋销毁倒计时＋复活分支＋代理"看到"弱信号），与 confidence 档位**并行**；于是出现三处别扭：
+① 同一状态（conf 1）承载两种意图，磁盘上两者**完全同形**、只能靠 `state.json` 区分（丢 state.json 就"忘记"语义）；
+② 晋升要求"重复出现"，而队列只给出生候选 30/365 活动日 → 稀疏偏好被系统性拒绝（churn）；
+③ pin 与队列交互时出现"显示待销毁、实际永不销毁"。
 
-| # | 发现 | 结论 / 处理 |
+**R30 的收敛**：**不再有独立队列** —— "待销毁"就是 **confidence 0**，倒计时由"0 档 + 闲置活动日"表达。
+
+| R29 的问题 | R30 之后 |
+|:--|:--|
+| 待销毁只在 `state.json`，`.md` 里看不出来 | **`confidence: 0` 直接写在条目 frontmatter 里**（可 grep、可迁移、内容自带语义） |
+| 同一 conf 1 两种意图 | 档位即意图：`1` 待观察 / `0` 待销毁 / `2·3` 可见 |
+| 晋升 vs 生存期互相削弱 | 生存期只有一条链：`1 →(闲置)→ 0 →(闲置 > 180 活动日)→ 销毁`；期间任何触达都回到 1。稀疏偏好（如"一年提一次"）不会在两次出现之间被清掉（要连续 180 活动日无人提及才销毁） |
+| 复活后直接回可见清单（且等级跳变） | **统一回到 conf 1 重新观察**（用户 R30 明确要求），不越级 |
+| `evictedAt/evictedDay/evictReason/lastSeenAt/lastSeenDay/lastPromotedAt/lastDemotedAt/lastDemotedDay` 8 个字段 | 收敛为 **`uses / lastUsedAt / lastUsedDay / lastStepDay`** 4 个字段 |
+
+**迁移（老 state.json）**：R29 及之前的 `evictedAt/evictedDay/evictReason/lastSeenAt/lastSeenDay/
+lastPromotedAt/lastDemotedAt/lastDemotedDay` 字段**不再被读取**（本轮同日发布，实际影响≈0）：
+等价于把那些条目放回"待观察"、倒计时从当下重新起算 —— **fail-safe 方向**（宁可留着，不会误删）。
+
+**仍然刻意保留的设计**（不是遗漏）：
+
+| # | 设计 | 理由 |
 |:--|:--|:--|
-| 1 | **语义重载**：conf 1 同时表示"待晋升"与"待销毁" | 判据是 `usage.evictedAt` 是否存在（数据层无第三种状态）；渲染层已区分（索引标 `⏳`，`/memory candidates` 分组为「待观察 / ⏳待销毁」） |
-| 2 | **晋升阈值与存活期互相削弱**（真冲突，已修） | 晋升要 `uses ≥ lru_promote_uses`(2)（＝"重复出现"），而出生候选原本只有 `decay(90)+destroy(30)` 活动日寿命 → "一年才提一次"的有效偏好**在第二次出现前就被销毁**，历史计数随之丢失，下次只能重建（churn，且**永远升不进清单**）。修法：**销毁期限按离场原因区分** —— 出生候选 `lru_candidate_ttl_days`（默认 **365** 活动日），曾进过清单的仍是 `lru_destroy_after_days`（默认 30）。依据：候选池成本≈0（不注入、不进上下文），没必要急着清 |
-| 3 | **复活阈值 ≠ 晋升阈值**（刻意） | 离场条目**1 次真实使用即复活**（撤销判决：判决依据本就是"长期无人使用"）；出生候选要 **2 次**才算晋升（需要"重复出现"来排除偶然）。两者都使 conf 1 → 2 进清单，但审计可区分（`revived` vs `promoted`） |
-| 4 | 复活**只回到门槛**（2），不回原等级（3） | 刻意：等级反映证据强度。复活 = 回到"可用"；再往上要靠继续被使用（promote 仍生效）→ 避免"偶然读一次就恢复最高等级" |
-| 5 | 倒计时中**不会走 promote 分支**（`evicted` 判定在前） | 刻意：离场条目只有两条出路（复活 / 销毁）。副作用：它即使 `uses` 达标也不会 promote；但因为"1 次使用即复活"，不会锁死。`uses` 在复活时**不清零** → 复活后仍可继续升到 3 |
-| 6 | `master_min_confidence = 1` 会让两套语义失效 | 边界说明：conf 1 直接变 `active` → 可见清单里就有它、`listCandidates` 为空（代理索引的候选池段消失、倒计时队列暴露给 master）。**建议保持默认 2** |
-| 7 | 审计里同一 slug 可能同时出现在 `demoted` 与 `evicted` | 刻意（两个不同事实：等级下降 / 离开可见清单，由 `reason=decay` 关联）。不是重复计数 |
-| 8 | `superseded`（取代/遗忘的墓碑）**不会被销毁**；`forget` 与销毁的终态不同 | 刻意：reconcile 只处理 `status !== 'superseded'` → 演化记录永久保留；`forget` = 墓碑（文件留在层目录），销毁 = 归档到 `legacy/archive/` 或删除。两者并存不冲突 |
-| 9 | `pinned` 条目若已在销毁队列中（先被换出、后 pin） | **已修**：pin 时清掉 `evictedAt/evictedDay/evictReason`（退出队列）并把等级拉到可见阈值（pin 一条 master 看不见的记忆没有意义）。此前会出现"界面显示 ⏳待销毁、但 reconcile 跳过 pinned → 永不销毁"的自相矛盾；取消 pin 后重新参与维护（下次结算重新入队） |
+| 1 | 窗口换出只降到 **1**（不是 0） | "太挤了先下线"≠"它有问题"；档位 1 正好是"不可见但保留观察" |
+| 2 | conf 0 被**任何触达**（含代理"看到"）拉回 1 | "这个话题又出现了"就是证据；但只回 1，不越级 |
+| 3 | 无真实使用记录的条目用 `updated` 起算 | 迁移兼容；下一次触达即转正 |
+| 4 | `pinned` 免疫全部结算，且 pin 时**把等级拉到可见阈值** | pin = 用户显式"留住它"；pin 一个看不见且待销毁的条目没有意义 |
+| 5 | `superseded`（取代/遗忘的墓碑）**不参与**结算 | 演化记录永久保留；`forget`（墓碑）与销毁（归档/删除）终态不同 |
+| 6 | `master_min_confidence = 1` 会让候选区消失 | 边界说明：conf 1/0 都变可见（不可见判据失效）→ **建议保持默认 2** |
 
-**「待销毁」到底怎么标识的（单一判据）**
-
-| 载体 | 内容 | 是否含"待销毁" |
-|:--|:--|:--|
-| 条目文件 `<slug>.md` | frontmatter 只有内容与证据等级：`confidence: 1` + `status: candidate` | ❌ **看不出来** |
-| `state.json` → `usage[slug]` | `evictedAt` / `evictedDay` / `evictReason`（`window` 或 `decay` 或 `candidate`） | ✅ **唯一判据** |
-
-即："待观察"与"待销毁"在**条目文件里完全同形**（都只写 `confidence: 1` + `status: candidate`），
-区别只存在于该层 `state.json` 的 usage 记录：
-
-- **为什么不做成 frontmatter 字段**：窗口位置/倒计时是**运行时统计**，不是记忆内容；两处都写会产生
-  "双份真相"并可能漂移（.md 与 state.json 不一致时以谁为准？）；
-- **代价（明示）**：删掉/损坏 `state.json`（或只拷 `memory/` 下的 `.md` 迁移）→ 所有倒计时标记消失，
-  那些条目回到"待观察"语义（**不销毁、不被 ⏳ 标记**）。这是 **fail-safe 方向**（宁可留着），
-  但它确实不是"内容自带"的状态；
-- **可自查**：`/memory candidates` 按「待观察 / ⏳待销毁（带 `已N/期限 活动日` 与离场原因）」分组；
-  归纳代理索引行带 `⏳待销毁(已 N/期限 活动日)`，钉住的标 `📌`；`audit.jsonl` 的 `kind:'lru'`
-  记录每次 `evicted/revived/destroyed`（含 reason）。
-
-> 一句话总结：**"待晋升"是入口（staging），"待销毁"是出口（eviction queue）**，
-> 共用 conf 1 只是"master 不可见"这一个共同点；用 `evictedAt` 区分意图、用 `reason` 区分期限与理由。
+> 一句话：**档位表就是状态机** —— 3/2 可见 → 1 待观察 → 0 待销毁 → 销毁，中间只有"闲置超期"与"被触达"两种转移。
 
 ---
 
@@ -571,7 +542,7 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | `/memory show [kw]` | 列出条目（`slug  conf  scope  updated  description`，≤20 行；带 kw 时按关键词过滤） |
 | `/memory candidates` | 列出候选池（模糊条目，仅 memory agent 管理） |
 | `/memory forget <slug>` | 遗忘：写墓碑 + 退出索引（文件保留）；自动判断条目在哪一层 |
-| `/memory gc [--dry-run]` | 手动跑一次 LRU 维护（升降级 + 窗口换出 + 销毁倒计时）；`--dry-run` 只预览不落盘 |
+| `/memory gc [--dry-run]` | 手动跑一次 LRU 维护（升降级 + 窗口换出 + 销毁）；`--dry-run` 只预览不落盘 |
 | `/memory pin <slug>` / `unpin <slug>` | 钉住/取消钉住：免疫 LRU 升降级与归档（写 `pinned: true` 到 frontmatter） |
 | `/memory on` / `off` | 开关；写回 `memory.enabled`；关闭立即生效（不再注入/归纳，已有记忆保留） |
 | `/memory refresh` | 重建 system prompt 里的清单并同步重写会话快照（前缀会作废一次，故做成手动） |
@@ -615,12 +586,11 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | `agent_max_input_tokens` | `6000` | 归纳输入 token 预算（同时决定 watchdog 的 token 上限 = ×3） |
 | `agent_timeout_ms` | `90000` | 单次归纳最长时长 |
 | `notify_read_updates` | `true` | 「你读过的条目被更新」是否提醒 |
-| `lru_enabled` | `true` | LRU 主动维护总开关（升降级 + 窗口换出 + 销毁倒计时） |
+| `lru_enabled` | `true` | LRU 主动维护总开关（档位升降级 + 窗口换出 + 销毁） |
 | `lru_decay_active_days` | `90` | 闲置超过该**活动日**数 → 置信度降一级（活动日 = 程序被使用的天数，缺席不老化） |
 | `lru_promote_uses` | `2` | 累计使用次数达标且最近有使用 → 升一级 |
-| `lru_window_size` | `200` | memory window：master 可见条目上限，超出按 LRU 换出最久未用者 |
-| `lru_destroy_after_days` | `30` | 换出后的销毁倒计时（**活动日**）；期间被再次使用即复活（曾进过清单的条目） |
-| `lru_candidate_ttl_days` | `365` | **出生候选**（从未进过清单）的销毁期限（活动日）—— 候选池成本≈0，给"低频偏好"留出被再次印证的机会 |
+| `lru_window_size` | `200` | memory window：master 可见条目上限，超出按 LRU 把最久未用者降到 conf 1 |
+| `lru_destroy_after_days` | `180` | **conf 0（待销毁）的销毁期限**（活动日）；期间被触达即回到观察区(1) |
 | `lru_destroy_mode` | `"archive"` | 销毁方式：`archive`（移入 `legacy/archive/`）或 `delete`（物理删除） |
 
 ### 10.2 必须同步的 5 处（约束 C）
@@ -665,7 +635,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 ## 12. 实现状态与测试映射
 
-截至 2026-09-13：**全量 616 测试通过**（54 个测试文件），`tsc` 无错。
+截至 2026-09-13：**全量 611 测试通过**（54 个测试文件），`tsc` 无错。
 
 | 模块 | 文件 | 测试 | 用例数 |
 |:--|:--|:--|:--|
@@ -675,7 +645,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 | 服务装配 | `src/core/memory-service.ts` | 经工具测试覆盖 | — |
 | 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts` | 11 |
 | 淘汰工具 | `src/tools/memory-forget.ts` | `tests/tools/memory-forget.test.ts` | 6 |
-| LRU 维护（窗口/倒计时/活动日/触达语义/候选 TTL）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`recordTouch`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 22 |
+| LRU 维护（统一档位 + 活动日 + 窗口 + 触达）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`recordTouch`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 17 |
 | 归纳代理（索引前置 + 相关性初筛） | `src/core/memory-agent.ts`（`renderMemoryIndex`/`pickRelated`）、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 17 |
 | 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts` | +4 |
 | CLI（含 `--no-memory`、`--prompt`） | `src/cli/index.ts` | `tests/cli/prompt.test.ts` | 7 |
