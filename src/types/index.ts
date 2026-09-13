@@ -34,6 +34,7 @@ export type {
 	SystemPromptConfig,
 	ConfigPaths,
 	ConfigDefaults,
+	MemoryConfig,
 	AppConfig,
 	ResolvedConfig,
 } from './config.js';

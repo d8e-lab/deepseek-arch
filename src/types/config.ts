@@ -90,12 +90,46 @@ export interface DisplayConfig {
 	overrides?: Partial<Record<'short' | 'normal' | 'detail', DisplayOverrideConfig>>;
 }
 
+/** [memory] 段：记忆机制（跨会话偏好/约定） */
+export interface MemoryConfig {
+	/** 总开关（默认 true） */
+	enabled?: boolean;
+	/** 会话创建/resume 首轮是否把记忆清单注入 system prompt（默认 true） */
+	inject?: boolean;
+	/** 清单注入预算（tokens，默认 800；超出时用 recall_model 挑选相关行） */
+	max_inject_tokens?: number;
+	/** 会话内变化提醒预算（tokens，默认 200） */
+	delta_inject_tokens?: number;
+	/** master 可见的最低置信度（默认 2；1 = 模糊条目，仅 memory agent 管理） */
+	master_min_confidence?: number;
+	/** 召回选择使用的模型（默认 deepseek-v4-flash） */
+	recall_model?: string;
+	/** 后台归纳代理使用的模型（默认 deepseek-v4-flash） */
+	agent_model?: string;
+	/** 是否在每轮用户消息后异步归纳（默认 true） */
+	agent_on_turn_end?: boolean;
+	/** 同会话两次归纳最小间隔（秒，默认 30） */
+	agent_min_interval_sec?: number;
+	/** 单次归纳最多写入条数（默认 3） */
+	agent_max_writes_per_run?: number;
+	/** 归纳输入最多轮数（游标之后的保护上限，默认 3） */
+	agent_max_input_turns?: number;
+	/** 归纳输入 token 预算（默认 6000） */
+	agent_max_input_tokens?: number;
+	/** 单次归纳最长时长（毫秒，默认 90000） */
+	agent_timeout_ms?: number;
+	/** 「你读过的记忆被更新」是否提醒（默认 true） */
+	notify_read_updates?: boolean;
+}
+
 /** 主配置（config.toml） */
 export interface AppConfig {
 	paths: ConfigPaths;
 	defaults: ConfigDefaults;
 	/** [display] 段（可选） */
 	display?: DisplayConfig;
+	/** [memory] 段（可选） */
+	memory?: MemoryConfig;
 }
 
 /** 完整有效配置（合并所有引用文件后） */
@@ -107,4 +141,6 @@ export interface ResolvedConfig {
 	systemPrompts: SystemPromptConfig;
 	/** [display] 段（可选；缺失时用内置默认档 normal） */
 	display?: DisplayConfig;
+	/** [memory] 段（已合并代码默认值；缺失的键回退默认） */
+	memory: MemoryConfig;
 }

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ConfigManager, DEFAULT_CONFIG_DIR, parseTokenSize } from '../../src/core/config.js';
@@ -342,6 +342,51 @@ describe('ConfigManager', () => {
       expect(parseTokenSize(undefined)).toBeUndefined();
       expect(parseTokenSize('abc')).toBeUndefined();
       expect(parseTokenSize('')).toBeUndefined();
+    });
+  });
+
+  describe('[memory] 段（约束 C：五处同步）', () => {
+    it('默认模板包含 [memory] 段与关键默认值', async () => {
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+      const raw = await readFile(join(testDir, 'config.toml'), 'utf-8');
+      expect(raw).toContain('[memory]');
+      expect(raw).toContain('master_min_confidence = 2');
+      expect(raw).toContain('recall_model = "deepseek-v4-flash"');
+      expect(raw).toContain('agent_model = "deepseek-v4-flash"');
+    });
+
+    it('cfg.get("memory.*") 有值（老配置无该段时走代码默认兜底）', async () => {
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+      // 去掉 [memory] 段，模拟老版本配置后重新加载
+      const raw = await readFile(join(testDir, 'config.toml'), 'utf-8');
+      await writeFile(join(testDir, 'config.toml'), raw.split('# ── 记忆（memory）')[0], 'utf-8');
+      await mgr.reload();
+
+      expect(mgr.get<boolean>('memory.enabled')).toBe(true);
+      expect(mgr.get<number>('memory.master_min_confidence')).toBe(2);
+      expect(mgr.get<string>('memory.agent_model')).toBe('deepseek-v4-flash');
+      expect(mgr.get<number>('memory.max_inject_tokens')).toBe(800);
+      expect(mgr.getResolved()!.memory.agent_timeout_ms).toBe(90_000);
+    });
+
+    it('set("memory.enabled", false) 写回 config.toml 且重新加载后生效', async () => {
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+      await mgr.set('memory.enabled', false);
+
+      const raw = await readFile(join(testDir, 'config.toml'), 'utf-8');
+      expect(raw).toMatch(/\[memory\][\s\S]*enabled = false/);
+
+      await mgr.reload();
+      expect(mgr.get<boolean>('memory.enabled')).toBe(false);
+    });
+
+    it('未知配置段仍被拒绝（白名单未被放宽）', async () => {
+      const mgr = ConfigManager.getInstance(testDir);
+      await mgr.load();
+      await expect(mgr.set('unknown.key', 1)).rejects.toThrow(/不支持的配置段/);
     });
   });
 });

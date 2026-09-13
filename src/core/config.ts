@@ -26,6 +26,7 @@ import type {
 	PricingConfig,
 	SystemPromptConfig,
 	ConfigDefaults,
+	MemoryConfig,
 } from '../types/index.js';
 
 /** 配置目录（默认 ~/.deepseek-arch） */
@@ -91,6 +92,26 @@ mode = "normal"         # 默认展示模式：short / normal / detail
 # tool_result_max_lines = 8
 # [display.overrides.detail]
 # show_live_tool_output = true
+
+# ── 记忆（memory）──────────────────────────────────────
+# 让 agent 跨会话记住你的偏好/约定/边界；写入由后台 memory agent 完成。
+# 存储位置（均不入版本控制）：
+#   项目层 {workspace}/.deepseek-arch/memory/   全局层 ~/.deepseek-arch/memory/
+[memory]
+enabled = true                 # 总开关（/memory off 写回此处）
+inject = true                  # 会话创建/resume 首轮把记忆清单注入 system prompt
+max_inject_tokens = 800        # 清单注入预算（超出时用 recall_model 挑选相关行）
+delta_inject_tokens = 200      # 会话内变化提醒的预算
+master_min_confidence = 2      # 主代理可见的最低置信度（1 = 模糊条目，仅 memory agent 管理）
+recall_model = "deepseek-v4-flash"   # 召回选择用模型
+agent_model = "deepseek-v4-flash"    # 后台归纳代理用模型
+agent_on_turn_end = true       # 每轮用户消息后异步归纳
+agent_min_interval_sec = 30    # 同会话两次归纳最小间隔（秒）
+agent_max_writes_per_run = 3   # 单次归纳最多写入条数
+agent_max_input_turns = 3      # 归纳输入最多轮数（游标之后的保护上限）
+agent_max_input_tokens = 6000  # 归纳输入 token 预算
+agent_timeout_ms = 90000       # 单次归纳最长时长（毫秒）
+notify_read_updates = true     # 「你读过的记忆被更新」是否提醒
 `;
 
 const DEFAULT_PROVIDERS: ProvidersConfig = {
@@ -115,6 +136,27 @@ const DEFAULT_PRICING: PricingConfig = {
 			currency: 'CNY',
 		},
 	},
+};
+
+/**
+ * [memory] 段代码默认值（与模板/DEFAULT_MAIN_CONFIG 保持一致）。
+ * 既有安装的 config.toml 不含该段时，靠这里兜底 —— 保证 cfg.get('memory.*') 始终有值。
+ */
+const MEMORY_DEFAULTS: Required<MemoryConfig> = {
+	enabled: true,
+	inject: true,
+	max_inject_tokens: 800,
+	delta_inject_tokens: 200,
+	master_min_confidence: 2,
+	recall_model: 'deepseek-v4-flash',
+	agent_model: 'deepseek-v4-flash',
+	agent_on_turn_end: true,
+	agent_min_interval_sec: 30,
+	agent_max_writes_per_run: 3,
+	agent_max_input_turns: 3,
+	agent_max_input_tokens: 6000,
+	agent_timeout_ms: 90_000,
+	notify_read_updates: true,
 };
 
 /**
@@ -366,6 +408,8 @@ export class ConfigManager {
 			pricing: pricing ?? {},
 			systemPrompts: systemPrompts ?? {},
 			display: appConfig.display,
+			// [memory]：代码默认值兜底（既有安装的 config.toml 没有该段也能正常工作）
+			memory: { ...MEMORY_DEFAULTS, ...(appConfig.memory ?? {}) },
 		};
 
 		this.loaded = true;
@@ -493,6 +537,7 @@ export class ConfigManager {
 			providers: { file: this.resolved.paths.providers, stripRoot: true },
 			pricing: { file: this.resolved.paths.pricing, stripRoot: true },
 			systemPrompts: { file: this.resolved.paths.system_prompt, stripRoot: true },
+			memory: { file: 'config.toml', stripRoot: false },
 		};
 
 		const entry = fileMap[root];
