@@ -97,10 +97,11 @@ describe('extractReadFiles', () => {
     expect(files.map((f) => f.path)).toEqual(['new.ts', 'mid.ts', 'old.ts']);
   });
 
-  it('排除 plan（.plans/）与 memory 路径', () => {
+  it('排除 runtime 目录（.deepseek-arch/）与 memory 路径', () => {
     const turns = [
       makeTurn('q1', 'a1', [
-        { name: 'read_file', args: { path: '.plans/compact.md' } },
+        { name: 'read_file', args: { path: '.deepseek-arch/plan/compact.md' } },
+        { name: 'read_file', args: { path: '.deepseek-arch/memory/notes.md' } },
         { name: 'read_file', args: { path: 'memory/notes.md' } },
         { name: 'read_file', args: { path: 'src/main.ts' } },
       ], '2026-01-01T00:00:00Z'),

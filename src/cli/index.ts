@@ -27,6 +27,7 @@ import { buildSystemPromptContext } from '../core/system-info.js';
 import { loadSkills, buildSkillListing } from '../core/skill.js';
 import { configureBrowser } from '../tools/browser-state.js';
 import { startApiMonitor } from '../core/api-monitor.js';
+import { getApiRequestsDir } from '../core/workspace-paths.js';
 
 /** 获取主代理工具集（含 subagent_spawn/wait/list_subagents） */
 function loadMasterTools(debug = false, selfInteraction = false) {
@@ -468,17 +469,17 @@ program
 	.command('api-monitor')
 	.description('Start an API request monitor server (saves mirrored API requests for debugging)')
 	.option('-p, --port <port>', 'listen port (default 8899)', '8899')
-	.option('-o, --out <dir>', 'output directory (default ./api-requests)', 'api-requests')
+	.option('-o, --out <dir>', 'output directory (default {workspace}/.deepseek-arch/api-requests)')
 	.action((options: { port?: string; out?: string }) => {
 		const port = parseInt(options.port ?? '8899', 10);
-		const outDir = options.out ?? 'api-requests';
+		const outDir = options.out;
 		const server = startApiMonitor({ port, outDir });
 
 		const addr = server.address();
 		const actualPort = typeof addr === 'object' && addr ? addr.port : port;
 
 		console.log(`API monitor listening on http://127.0.0.1:${actualPort}`);
-		console.log(`Saving mirrored requests to: ${resolve(outDir)}`);
+		console.log(`Saving mirrored requests to: ${resolve(outDir ?? getApiRequestsDir())}`);
 		console.log('');
 		console.log('In another terminal, mirror requests to this monitor:');
 		console.log(`  deepseek-arch chat --monitor http://127.0.0.1:${actualPort}`);

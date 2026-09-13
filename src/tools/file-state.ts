@@ -7,12 +7,13 @@
  *   3. 如果文件自上次 read 后被修改，返回 [STALE] 错误
  *   4. 工具自身的成功写入也会 update() 刷新状态
  *
- * 状态文件位置: <sessionCwd>/.agent-file-state.json
+ * 状态文件位置: {workspace}/.deepseek-arch/agent-file-state.json
  * 仅记录相对路径，跨 turn 持久化。
  */
 
-import { readFile, writeFile, stat } from 'node:fs/promises';
-import { relative } from 'node:path';
+import { readFile, writeFile, stat, mkdir } from 'node:fs/promises';
+import { relative, dirname } from 'node:path';
+import { getFileStatePath } from '../core/workspace-paths.js';
 
 interface FileRecord {
 	/** mtime 毫秒时间戳 */
@@ -30,7 +31,7 @@ export class FileStateManager {
 
 	constructor(sessionCwd: string) {
 		this.baseDir = sessionCwd;
-		this.statePath = `${sessionCwd}/.agent-file-state.json`;
+		this.statePath = getFileStatePath(sessionCwd);
 	}
 
 	/** 从磁盘加载状态 */
@@ -43,8 +44,9 @@ export class FileStateManager {
 		}
 	}
 
-	/** 持久化到磁盘 */
+	/** 持久化到磁盘（runtime 目录按需创建） */
 	private async save(): Promise<void> {
+		await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 });
 		await writeFile(this.statePath, JSON.stringify(this.store, null, 2), { mode: 0o600 });
 	}
 

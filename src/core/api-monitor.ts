@@ -16,6 +16,7 @@
 import { createServer, type Server } from 'node:http';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { getApiRequestsDir } from './workspace-paths.js';
 
 export interface ApiMonitorOptions {
 	/** 监听端口，默认 8899；传 0 表示随机端口（测试用） */
@@ -84,7 +85,7 @@ export async function saveApiRequest(
  */
 export function startApiMonitor(options: ApiMonitorOptions = {}): Server {
 	const port = options.port ?? 8899;
-	const outDir = options.outDir ?? 'api-requests';
+	const outDir = options.outDir ?? getApiRequestsDir();
 
 	const server = createServer(async (req, res) => {
 		if (req.method !== 'POST' || req.url !== '/') {

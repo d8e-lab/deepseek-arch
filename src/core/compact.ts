@@ -18,6 +18,7 @@ import type { ModelProvider } from './model-provider.js';
 import type { TurnRecord, Message } from '../types/index.js';
 import type { ToolCallRecord } from '../tools/types.js';
 import { turnUserContent, turnAssistantContent } from '../utils/turn-utils.js';
+import { getPlanDir } from './workspace-paths.js';
 
 // ─── 常量（后续可配置化）───────────────────────────
 
@@ -36,8 +37,8 @@ export const SKILLS_TOKEN_BUDGET = 25_000;
 /** plan 文件截断上限（tokens） */
 export const PLAN_MAX_TOKENS = 5_000;
 
-/** 排除路径前缀：plan 文件 / memory 预留（后续 memory 机制接入） */
-const EXCLUDED_PREFIXES = ['.plans/', 'memory/', '.memory/'];
+/** 排除路径前缀：runtime 目录（plan/memory 等）不参与文件重注入 */
+const EXCLUDED_PREFIXES = ['.deepseek-arch/', 'memory/', '.memory/'];
 
 /** 工具名 → skill 文件映射（旧版兼容：plan_on 工具） */
 const SKILL_MAP: Record<string, string> = {
@@ -266,17 +267,18 @@ export function extractPlanNames(turns: TurnRecord[]): string[] {
 	return names;
 }
 
-/** 构建 plan 重注入块（读 .plans/<name>.md 最新内容，截断 PLAN_MAX_TOKENS） */
+/** 构建 plan 重注入块（读 {workspace}/.deepseek-arch/plan/<name>.md 最新内容，截断 PLAN_MAX_TOKENS） */
 export async function buildPlanBlock(
 	turns: TurnRecord[],
 	sessionCwd: string,
 ): Promise<{ text: string; tokenCount: number }> {
 	const names = extractPlanNames(turns);
+	const planDir = getPlanDir(sessionCwd);
 	const parts: string[] = [];
 	let total = 0;
 	for (const name of names) {
 		const safe = name.replace(/[^a-zA-Z0-9_-]/g, '_');
-		const filePath = join(sessionCwd, '.plans', `${safe}.md`);
+		const filePath = join(planDir, `${safe}.md`);
 		try {
 			const content = await readFile(filePath, 'utf-8');
 			const truncated = truncateTokens(content, PLAN_MAX_TOKENS);
