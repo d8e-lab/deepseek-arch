@@ -685,13 +685,39 @@ export class MemoryStore {
 		await this.audit({ kind: 'use', at: now, scope, slug, touch: true, activeDay: usage[slug].lastSeenDay });
 	}
 
-	/** 钉住 / 取消钉住（免疫 LRU 升降级与归档；不改 `updated`，不影响内容时效显示） */
+	/**
+	 * 钉住 / 取消钉住。
+	 *
+	 * 钉住 = 用户显式"留住它"，因此：
+	 *   ① **移出销毁队列**（清 `evictedAt/evictedDay/evictReason`）—— 否则界面仍会显示"⏳待销毁"
+	 *      而 `reconcile` 又会跳过 pinned，形成"显示要销毁、实际永不销毁"的矛盾；
+	 *   ② **等级拉到可见阈值**（不低于原值）—— pin 一条 master 看不见的候选没有意义；
+	 *      想升到 3 仍要靠"被反复使用"或用户显式写入（不在这里凭空加证据）。
+	 *
+	 * 取消钉住只影响"免疫"，不回退等级；若仍长期闲置，下次结算会重新进入销毁队列。
+	 */
 	async setPinned(scope: MemoryScope, slug: string, pinned: boolean): Promise<boolean> {
 		const entry = await this.readEntry(scope, slug);
 		if (!entry) return false;
 		const now = new Date().toISOString();
-		await this.writeEntry(this.dirs[scope], { ...entry, pinned: pinned || undefined });
-		await this.audit({ kind: 'pin', at: now, scope, slug, pinned });
+		const confidence = pinned ? Math.max(entry.confidence, this.masterMinConfidence) : entry.confidence;
+		await this.writeEntry(this.dirs[scope], {
+			...entry,
+			pinned: pinned || undefined,
+			confidence,
+			status: deriveStatus(entry.status, confidence, this.masterMinConfidence),
+		});
+		if (pinned) {
+			// 退出销毁队列（usage 里只保留使用统计）
+			const state = await this.getState(scope);
+			const usage = { ...(state.usage ?? {}) };
+			const u = usage[slug];
+			if (u) {
+				usage[slug] = { ...u, evictedAt: undefined, evictedDay: undefined, evictReason: undefined };
+				await this.setState(scope, { usage });
+			}
+		}
+		await this.audit({ kind: 'pin', at: now, scope, slug, pinned, confidence });
 		await this.syncIndex(scope);
 		return true;
 	}

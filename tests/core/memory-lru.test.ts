@@ -255,6 +255,10 @@ describe('memory LRU（活动日 + 窗口 + 销毁倒计时）', () => {
 
 		expect(index).toContain('⏳待销毁(已 30/30 活动日)');    // 曾进过清单：30 活动日缓刑
 		expect(index).toContain('⏳待销毁(已 30/365 活动日)');   // 出生候选：365 活动日 TTL
+
+		// 钉住的条目：正式条目段标 📌（告诉代理"用户要留住它，别淘汰"）
+		await store.setPinned('project', decayed.slug, true);
+		expect(await renderMemoryIndex(store, 30, '')).toContain('📌用户已钉住(不要淘汰它)');
 	});
 
 	it('稀疏偏好（一年才提一次）不再被"晋升需重复 vs 存活仅 30 活动日"互相削弱', async () => {
@@ -299,27 +303,46 @@ describe('memory LRU（活动日 + 窗口 + 销毁倒计时）', () => {
 		expect((await store.getState('project')).usage![slug].evictedDay).toBe(300);
 	});
 
-	it('pinned 免疫：不升不降不换出不销毁', async () => {
+	it('pinned 免疫：不升不降不换出不销毁；且 pin 会把它移出销毁队列', async () => {
 		const slug = await seed({
-			subject: 'a.one', confidence: 3, activeDay: 400, lastUsedDay: 1, uses: 9,
-			evictedAt: new Date(Date.now() - 400 * DAY).toISOString(), evictedDay: 1,
+			subject: 'a.one', confidence: 2, activeDay: 400, lastUsedDay: 1, uses: 9,
+			evictedAt: new Date(Date.now() - 400 * DAY).toISOString(), evictedDay: 1, evictReason: 'window',
 		});
+
 		await store.setPinned('project', slug, true);
 
+		// pin 立刻把它移出销毁队列（否则界面显示 ⏳ 但实际永不销毁 = 自相矛盾），并拉到可见阈值
+		const usageAfterPin = (await store.getState('project')).usage![slug];
+		expect(usageAfterPin.evictedAt).toBeUndefined();
+		expect(usageAfterPin.evictReason).toBeUndefined();
+		expect(usageAfterPin.uses).toBe(9);                       // 使用统计保留
+		const pinnedEntry = (await store.readEntry('project', slug))!;
+		expect(pinnedEntry.pinned).toBe(true);
+		expect(pinnedEntry.confidence).toBe(2);                   // 不低于原值、也不凭空加证据
+		expect(pinnedEntry.status).toBe('active');
+
 		const r = await store.reconcile('project', { windowSize: 0 });
-
 		expect(r.pinned).toEqual([slug]);
-		expect({ ...r, pinned: [], activeDay: 0, scope: '', dryRun: undefined }).toEqual({
-			scope: '', promoted: [], demoted: [], evicted: [], revived: [], destroyed: [], pinned: [], activeDay: 0, dryRun: undefined,
-		});
-		const entry = (await store.readEntry('project', slug))!;
-		expect(entry.pinned).toBe(true);
-		expect(entry.confidence).toBe(3);
+		expect(r).toMatchObject({ promoted: [], demoted: [], evicted: [], revived: [], destroyed: [] });
 
-		// 取消钉住后恢复正常维护（该条本来就在倒计时中且已超期 → 被销毁）
+		// 取消钉住后重新参与维护（不再有倒计时 → 被窗口换出，进入新的倒计时）
 		await store.setPinned('project', slug, false);
 		const after = await store.reconcile('project', { windowSize: 0 });
-		expect(after.destroyed).toEqual([slug]);
+		expect(after.evicted).toEqual([{ slug, reason: 'window' }]);
+		expect(after.destroyed).toEqual([]);
+		expect((await store.readEntry('project', slug))!.pinned).toBeUndefined();
+	});
+
+	it('pin 一条 master 看不见的候选 → 拉到可见阈值（pin 看不见的东西没意义）', async () => {
+		const slug = await seed({ subject: 'cand.one', confidence: 1, activeDay: 10, lastUsedDay: 10 });
+		expect(await store.listEntries('project')).toHaveLength(0);
+
+		await store.setPinned('project', slug, true);
+
+		const entry = (await store.readEntry('project', slug))!;
+		expect(entry.confidence).toBe(2);
+		expect(entry.status).toBe('active');
+		expect(await store.listEntries('project')).toHaveLength(1);
 	});
 
 	it('dry-run：只返回计划，不动文件与状态', async () => {

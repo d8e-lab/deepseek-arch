@@ -119,7 +119,9 @@ export async function renderMemoryIndex(
 
 		out.push(`### ${label} — 正式条目（master 可见，已在清单里）`);
 		if (active.length === 0) out.push('(无)');
-		for (const e of active.slice(0, maxPerSection)) out.push(renderManifestLine(e));
+		for (const e of active.slice(0, maxPerSection)) {
+			out.push(e.pinned ? `${renderManifestLine(e)}  📌用户已钉住(不要淘汰它)` : renderManifestLine(e));
+		}
 		if (active.length > maxPerSection) out.push(`- …(${active.length - maxPerSection} more)`);
 
 		out.push('');
@@ -128,6 +130,7 @@ export async function renderMemoryIndex(
 		for (const e of candidates.slice(0, maxPerSection)) {
 			const u = usage[e.slug];
 			const bits = [`共被使用 ${u?.uses ?? 0} 次`];
+			if (e.pinned) bits.push('📌用户已钉住(别淘汰它)');
 			if (u?.evictedAt !== undefined) {
 				// 让代理看到"离销毁还有多久"：它才能决定 救（升到 2）/ 放手（什么都不做）/ 立即淘汰
 				const start = Math.max(u.evictedDay ?? 0, u.lastSeenDay ?? 0);

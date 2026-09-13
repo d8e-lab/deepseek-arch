@@ -407,6 +407,26 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | 6 | `master_min_confidence = 1` 会让两套语义失效 | 边界说明：conf 1 直接变 `active` → 可见清单里就有它、`listCandidates` 为空（代理索引的候选池段消失、倒计时队列暴露给 master）。**建议保持默认 2** |
 | 7 | 审计里同一 slug 可能同时出现在 `demoted` 与 `evicted` | 刻意（两个不同事实：等级下降 / 离开可见清单，由 `reason=decay` 关联）。不是重复计数 |
 | 8 | `superseded`（取代/遗忘的墓碑）**不会被销毁**；`forget` 与销毁的终态不同 | 刻意：reconcile 只处理 `status !== 'superseded'` → 演化记录永久保留；`forget` = 墓碑（文件留在层目录），销毁 = 归档到 `legacy/archive/` 或删除。两者并存不冲突 |
+| 9 | `pinned` 条目若已在销毁队列中（先被换出、后 pin） | **已修**：pin 时清掉 `evictedAt/evictedDay/evictReason`（退出队列）并把等级拉到可见阈值（pin 一条 master 看不见的记忆没有意义）。此前会出现"界面显示 ⏳待销毁、但 reconcile 跳过 pinned → 永不销毁"的自相矛盾；取消 pin 后重新参与维护（下次结算重新入队） |
+
+**「待销毁」到底怎么标识的（单一判据）**
+
+| 载体 | 内容 | 是否含"待销毁" |
+|:--|:--|:--|
+| 条目文件 `<slug>.md` | frontmatter 只有内容与证据等级：`confidence: 1` + `status: candidate` | ❌ **看不出来** |
+| `state.json` → `usage[slug]` | `evictedAt` / `evictedDay` / `evictReason`（`window` 或 `decay` 或 `candidate`） | ✅ **唯一判据** |
+
+即："待观察"与"待销毁"在**条目文件里完全同形**（都只写 `confidence: 1` + `status: candidate`），
+区别只存在于该层 `state.json` 的 usage 记录：
+
+- **为什么不做成 frontmatter 字段**：窗口位置/倒计时是**运行时统计**，不是记忆内容；两处都写会产生
+  "双份真相"并可能漂移（.md 与 state.json 不一致时以谁为准？）；
+- **代价（明示）**：删掉/损坏 `state.json`（或只拷 `memory/` 下的 `.md` 迁移）→ 所有倒计时标记消失，
+  那些条目回到"待观察"语义（**不销毁、不被 ⏳ 标记**）。这是 **fail-safe 方向**（宁可留着），
+  但它确实不是"内容自带"的状态；
+- **可自查**：`/memory candidates` 按「待观察 / ⏳待销毁（带 `已N/期限 活动日` 与离场原因）」分组；
+  归纳代理索引行带 `⏳待销毁(已 N/期限 活动日)`，钉住的标 `📌`；`audit.jsonl` 的 `kind:'lru'`
+  记录每次 `evicted/revived/destroyed`（含 reason）。
 
 > 一句话总结：**"待晋升"是入口（staging），"待销毁"是出口（eviction queue）**，
 > 共用 conf 1 只是"master 不可见"这一个共同点；用 `evictedAt` 区分意图、用 `reason` 区分期限与理由。
@@ -645,7 +665,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 ## 12. 实现状态与测试映射
 
-截至 2026-09-13：**全量 615 测试通过**（54 个测试文件），`tsc` 无错。
+截至 2026-09-13：**全量 616 测试通过**（54 个测试文件），`tsc` 无错。
 
 | 模块 | 文件 | 测试 | 用例数 |
 |:--|:--|:--|:--|
@@ -655,7 +675,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 | 服务装配 | `src/core/memory-service.ts` | 经工具测试覆盖 | — |
 | 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts` | 11 |
 | 淘汰工具 | `src/tools/memory-forget.ts` | `tests/tools/memory-forget.test.ts` | 6 |
-| LRU 维护（窗口/倒计时/活动日/触达语义/候选 TTL）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`recordTouch`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 21 |
+| LRU 维护（窗口/倒计时/活动日/触达语义/候选 TTL）+ 候选升级 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`recordTouch`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 22 |
 | 归纳代理（索引前置 + 相关性初筛） | `src/core/memory-agent.ts`（`renderMemoryIndex`/`pickRelated`）、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 17 |
 | 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts` | +4 |
 | CLI（含 `--no-memory`、`--prompt`） | `src/cli/index.ts` | `tests/cli/prompt.test.ts` | 7 |
