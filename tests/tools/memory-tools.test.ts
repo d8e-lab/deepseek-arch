@@ -87,6 +87,19 @@ describe('memory 工具', () => {
 		expect((await memoryWriteTool.execute({ subject: '', body: '' })).error).toBe('both "subject" and "body" are required');
 	});
 
+	it('memory_write：supersedes 显式指定被取代条目', async () => {
+		await memoryWriteTool.execute({ subject: 'old.topic', name: '旧主题', description: 'd', body: 'v1' });
+		// 显式取代：新 subject 不同，但指名取代 old-topic
+		const r = await memoryWriteTool.execute({
+			subject: 'new.topic', name: '新主题', description: 'd', body: 'v2', supersedes: 'old-topic',
+		});
+		expect(r.error).toBeUndefined();
+
+		const index = await readFile(join(projectDir, 'MEMORY.md'), 'utf-8');
+		expect(index).toContain('新主题');
+		expect(index).not.toContain('旧主题');
+	});
+
 	it('memory_read：自动定位层（项目层优先）并返回正文与元信息', async () => {
 		await memoryWriteTool.execute({ subject: 'a.b', name: 'A', description: 'd', confidence: 3, body: '项目层正文' });
 		const r = await memoryReadTool.execute({ path: 'a-b.md' });

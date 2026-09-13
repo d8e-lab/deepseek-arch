@@ -209,6 +209,36 @@ export class MemoryInjector {
 		return truncateToBudget(block, this.deltaInjectTokens);
 	}
 
+	/**
+	 * 到期提醒块（R6 的 K 职责）：`remindAt` 已到的条目 → `<memory-due>` 块。
+	 * 发出后清空该条目的 remindAt（一次性提醒）；包含候选条目（用户要求的提醒与可见性无关）。
+	 */
+	async buildDueBlock(now: Date = new Date()): Promise<{ block: string; slugs: string[] } | null> {
+		if (!this.enabled) return null;
+		const due = [
+			...(await this.store.listDue('project', now)),
+			...(await this.store.listDue('global', now)),
+		];
+		if (due.length === 0) return null;
+
+		const lines = due.slice(0, 5).map((e) => `- ${renderManifestLine(e)}`);
+		if (due.length > 5) lines.push(`- …(${due.length - 5} more)`);
+		const block = [
+			'<memory-due>',
+			'[Memory reminder due] The user asked to be reminded about the following',
+			'(deferred items / follow-ups). Surface them briefly and ask how to proceed:',
+			...lines,
+			'</memory-due>',
+		].join('\n');
+
+		const slugs = due.map((e) => e.slug);
+		// 一次性提醒：清空 remindAt（失败不影响注入）
+		for (const entry of due) {
+			await this.store.markReminded(entry.scope, entry.slug).catch(() => false);
+		}
+		return { block: truncateToBudget(block, this.deltaInjectTokens), slugs };
+	}
+
 	/** 标记"已出示"（会话内动态出示去重） */
 	markSurfaced(slugs: Iterable<string>): void {
 		for (const s of slugs) this.surfaced.add(s);

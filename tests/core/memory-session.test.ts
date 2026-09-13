@@ -145,6 +145,43 @@ describe('记忆与会话集成', () => {
 		expect(snapshot.match(/<memory_listing>/g)).toHaveLength(1);
 	});
 
+	it('到期提醒：条目的提醒块随本轮落盘，且触发 once 回调', async () => {
+		await store.write('project', {
+			subject: 'defer.a', name: '到期项', description: 'd', confidence: 3, body: 'b',
+			remindAt: '2020-01-01T00:00:00Z',
+		});
+		const meta = await mgr.startNewSession('到期提醒测试');
+		const dueSlugs: string[][] = [];
+		mgr.setMemoryDueCallback((slugs) => dueSlugs.push(slugs));
+
+		await mgr.sendMessageStream('你好', () => {});
+
+		const turns = await storage.getTurns(meta.id);
+		const allText = turns.flatMap((t) => t.messages ?? []).map((m) => String(m.content ?? '')).join('\n');
+		expect(allText).toContain('<memory-due>');
+		expect(allText).toContain('到期项');
+		expect(dueSlugs).toEqual([['defer-a']]);
+		// 一次性：条目仍在但 remindAt 已清空
+		expect((await store.readEntry('project', 'defer-a'))!.remindAt).toBeUndefined();
+	});
+
+	it('compact 后重建 system prompt：清单刷新 + 快照同步（R7/R11）', async () => {
+		await store.write('project', { subject: 'a.b', name: 'A', description: 'd', confidence: 3, body: 'x' });
+		const meta = await mgr.startNewSession('compact 刷新测试');
+		await mgr.sendMessageStream('第一轮', () => {});
+
+		// 会话内新增记忆（快照里还没有）
+		const before = await readFile(join(storage.sessionDir(meta.id), 'system-prompt.txt'), 'utf-8');
+		expect(before).not.toContain('compact 后新增');
+
+		await store.write('project', { subject: 'n.m', name: 'compact 后新增', description: 'd2', confidence: 3, body: 'y' });
+		await mgr.compactContext();
+
+		const after = await readFile(join(storage.sessionDir(meta.id), 'system-prompt.txt'), 'utf-8');
+		expect(after).toContain('compact 后新增');
+		expect(after.match(/<memory_listing>/g)).toHaveLength(1);
+	});
+
 	it('未配置记忆时完全不介入（旧行为不变）', async () => {
 		const plain = new SessionManager(storage, makeProvider());
 		plain.setSystemPrompt({ role: 'system', content: '你是助手。' });

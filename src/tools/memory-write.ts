@@ -50,6 +50,7 @@ export async function writeMemoryEntry(
 			paths: asStringArray(params.paths),
 			confidence: typeof params.confidence === 'number' ? params.confidence : undefined,
 			remindAt: typeof params.remindAt === 'string' ? params.remindAt : undefined,
+			supersedes: asStringArray(params.supersedes),
 			by: typeof params.by === 'string' ? params.by : 'master',
 		});
 		await store.rebuildIndex(scope);
@@ -101,6 +102,11 @@ export const memoryWriteTool: Tool = {
 			paths: { type: 'string', description: 'Comma-separated path globs this memory applies to (optional).' },
 			confidence: { type: 'number', description: '1 = uncertain, 2 = correction/confirmation, 3 = explicit user statement.' },
 			slug: { type: 'string', description: 'Existing entry slug to update (from the index). Omit to add/merge.' },
+			supersedes: {
+				type: 'string',
+				description:
+					'Comma-separated slugs this entry replaces (optional). Omit to let the store decide by subject.',
+			},
 			remindAt: { type: 'string', description: 'ISO 8601 time to remind about this entry (optional).' },
 		},
 		required: ['subject', 'body'],

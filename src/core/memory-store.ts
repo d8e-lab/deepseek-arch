@@ -227,6 +227,37 @@ export class MemoryStore {
 	}
 
 	/**
+	 * 到期待提醒的条目（`remindAt` ≤ now，且未被取代）。
+	 * **包含 confidence=1 的候选条目**：用户明确要求"到时候提醒我"，与"master 可见性"是两码事。
+	 */
+	async listDue(scope: MemoryScope, now: Date = new Date()): Promise<MemoryEntry[]> {
+		const { entries } = await this.scan(scope);
+		const ts = now.getTime();
+		return entries
+			.filter((e) => e.status !== 'superseded' && e.remindAt !== undefined)
+			.filter((e) => {
+				const t = Date.parse(e.remindAt!);
+				return !Number.isNaN(t) && t <= ts;
+			})
+			.sort((a, b) => (a.remindAt! < b.remindAt! ? -1 : 1));
+	}
+
+	/**
+	 * 提醒已发出：清空该条目的 `remindAt`（一次性提醒，避免每轮重复打扰）。
+	 * 条目本身保留（正文与置信度不变），只是不再带提醒时间。
+	 */
+	async markReminded(scope: MemoryScope, slug: string): Promise<boolean> {
+		const dir = await this.ensureDir(scope);
+		const entry = await this.readEntry(scope, slug);
+		if (!entry || entry.remindAt === undefined) return false;
+		const now = new Date().toISOString();
+		const next: MemoryEntry = { ...entry, remindAt: undefined, updated: now };
+		await this.writeEntry(dir, next);
+		await this.audit({ kind: 'remind_due', at: now, scope, slug, remindAt: entry.remindAt });
+		return true;
+	}
+
+	/**
 	 * 清单（注入用）：只含正式条目，按 updated 倒序，超预算按行截断。
 	 * 同集合字节稳定：行内不含「当前时间」，age 文字只在跨天时变化。
 	 */
@@ -320,10 +351,16 @@ export class MemoryStore {
 			}
 		}
 
-		// 2b. supercede（显式指定优先；否则同 subject 的第一条）
-		const supersedeTargets = (input.supersedes && input.supersedes.length > 0)
-			? sameSubject.filter((e) => input.supersedes!.includes(e.slug))
-			: sameSubject;
+		// 2b. supercede（显式指定优先 —— 可跨 subject 指名取代；否则用同 subject 的条目）
+		let supersedeTargets: MemoryEntry[] = [];
+		if (input.supersedes && input.supersedes.length > 0) {
+			const { entries } = await this.scan(scope);
+			supersedeTargets = entries.filter(
+				(e) => input.supersedes!.includes(e.slug) && e.status !== 'superseded',
+			);
+		} else {
+			supersedeTargets = sameSubject;
+		}
 		if (supersedeTargets.length > 0) {
 			const slug = await this.uniqueSlug(scope, slugify(input.subject || input.name || 'memory'));
 			const created: MemoryEntry = {

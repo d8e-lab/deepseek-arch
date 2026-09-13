@@ -193,6 +193,36 @@ describe('memory-store', () => {
 		expect(candidates).toContain('[候选](c-d.md)');
 	});
 
+	it('listDue / markReminded：到期条目（含候选）返回一次后清空 remindAt', async () => {
+		const now = new Date('2026-09-15T00:00:00Z');
+		await store.write('project', {
+			subject: 'defer.a', name: '到期项', description: 'd', confidence: 3, body: 'b',
+			remindAt: '2026-09-14T00:00:00Z',
+		});
+		// 候选条目（confidence=1）也应被提醒：这是用户明确要求的事
+		await store.write('project', {
+			subject: 'defer.b', name: '候选到期项', description: 'd', confidence: 1, body: 'b',
+			remindAt: '2026-09-14T12:00:00Z',
+		});
+		// 未到期的不返回
+		await store.write('project', {
+			subject: 'defer.c', name: '未到期', description: 'd', confidence: 3, body: 'b',
+			remindAt: '2026-10-01T00:00:00Z',
+		});
+
+		const due = await store.listDue('project', now);
+		expect(due.map((e) => e.slug)).toEqual(['defer-a', 'defer-b']);
+
+		expect(await store.markReminded('project', 'defer-a')).toBe(true);
+		expect(await store.markReminded('project', 'defer-a')).toBe(false); // 幂等：已无 remindAt
+		const after = (await store.readEntry('project', 'defer-a'))!;
+		expect(after.remindAt).toBeUndefined();
+		expect(after.body).toBe('b'); // 条目本身保留
+
+		const dueAgain = await store.listDue('project', now);
+		expect(dueAgain.map((e) => e.slug)).toEqual(['defer-b']);
+	});
+
 	it('scan：无 frontmatter 的手写笔记归入 legacy 且不成为条目', async () => {
 		await store.ensureDir('project');
 		await writeFile(join(projectDir, 'note.md'), '无 frontmatter 的笔记\n', 'utf-8');

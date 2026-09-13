@@ -178,6 +178,8 @@ export class SessionManager {
 	private memory: MemoryRuntime | null = null;
 	/** 「已更新 N 条记忆」提示回调（TUI 注册；headless 走 stderr） */
 	private memoryNoticeCallback: ((count: number, slugs: string[]) => void) | null = null;
+	/** 「到期提醒」提示回调（TUI 注册） */
+	private memoryDueCallback: ((slugs: string[]) => void) | null = null;
 	/** 自动 compact 配置：上下文超阈值时自动压缩（默认开启，70% of 1M tokens） */
 	private autoCompact = {
 		enabled: true,
@@ -385,6 +387,11 @@ export class SessionManager {
 	/** 「已更新记忆」提示回调（TUI / headless 注册） */
 	setMemoryNoticeCallback(cb: ((count: number, slugs: string[]) => void) | null): void {
 		this.memoryNoticeCallback = cb;
+	}
+
+	/** 「到期提醒」回调（TUI 注册；提醒块本身已注入给模型） */
+	setMemoryDueCallback(cb: ((slugs: string[]) => void) | null): void {
+		this.memoryDueCallback = cb;
 	}
 
 	/**
@@ -671,8 +678,8 @@ export class SessionManager {
 	// ─── 记忆（memory）────────────────────────────────
 
 	/**
-	 * 本轮的记忆变化提醒（落盘进 agentMessages）：
-	 *  ① 模型读过的条目被更新 ② 清单发生变化（新增/更新/移除）
+	 * 本轮的记忆注入（落盘进 agentMessages）：
+	 *  ① 到期提醒（remindAt 已到）② 模型读过的条目被更新 ③ 清单发生变化
 	 * 落盘的原因：成为历史的一部分 → 下一轮前缀不断（不落盘会重算上一轮内容）。
 	 */
 	private async injectMemoryUpdates(agentMessages: Message[]): Promise<void> {
@@ -680,12 +687,26 @@ export class SessionManager {
 		if (!mem || !this.session) return;
 		try {
 			const blocks: string[] = [];
+
+			// ① 到期提醒（一次性：发出后清空该条目的 remindAt）
+			const due = await mem.injector.buildDueBlock();
+			if (due) {
+				blocks.push(due.block);
+				try {
+					this.memoryDueCallback?.(due.slugs);
+				} catch { /* UI 回调失败不影响注入 */ }
+			}
+
+			// ② 读过的条目被更新
 			if (mem.config.notifyReadUpdates) {
 				const readBlock = await mem.injector.buildReadUpdateBlock(this.collectReadMemorySlugs());
 				if (readBlock) blocks.push(readBlock);
 			}
+
+			// ③ 清单变化（新增/更新/移除）
 			const updateBlock = await mem.injector.buildUpdateBlock();
 			if (updateBlock) blocks.push(updateBlock);
+
 			if (blocks.length === 0) return;
 
 			const content = blocks.join('\n\n');

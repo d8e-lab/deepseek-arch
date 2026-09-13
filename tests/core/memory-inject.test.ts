@@ -130,6 +130,26 @@ describe('memory-inject', () => {
 		expect(await injector.buildReadUpdateBlock(['not-exist'])).toBeNull();
 	});
 
+	it('buildDueBlock：到期条目渲染提醒块并清空 remindAt（一次性）', async () => {
+		await store.write('project', {
+			subject: 'defer.a', name: '到期项', description: 'd', confidence: 3, body: 'b',
+			remindAt: '2020-01-01T00:00:00Z',
+		});
+		const r = await injector.buildDueBlock();
+		expect(r).not.toBeNull();
+		expect(r!.block).toContain('<memory-due>');
+		expect(r!.block).toContain('到期项');
+		expect(r!.slugs).toEqual(['defer-a']);
+
+		// 一次性：再次调用不再有内容，且条目本身仍在
+		expect(await injector.buildDueBlock()).toBeNull();
+		expect((await store.readEntry('project', 'defer-a'))!.body).toBe('b');
+
+		// 未到期 / 无 remindAt → 无内容
+		await store.write('project', { subject: 'future.x', name: '未来', description: 'd', confidence: 3, body: 'b', remindAt: '2999-01-01T00:00:00Z' });
+		expect(await injector.buildDueBlock()).toBeNull();
+	});
+
 	it('markSurfaced / resetSurfaced：去重集合可重置（compact 后）', async () => {
 		await store.write('project', { subject: 'a.b', name: 'A', description: 'd', confidence: 3, body: 'x' });
 		injector.markSurfaced(['a-b']);

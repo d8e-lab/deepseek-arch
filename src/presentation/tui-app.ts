@@ -169,10 +169,13 @@ export class TuiApp {
 			isStreamActive: () => this.abortController !== null,
 			getSize: () => getTermSize(),
 		});
-		// 记忆：后台归纳写入后给一行提示（不打断流式、不弹层）
-		// 可选调用：测试里的 sessionMgr 替身可能没有该方法
+		// 记忆：后台归纳写入后给一行提示（不打断流式、不弹层）；到期提醒给一行提示
+		// 可选调用：测试里的 sessionMgr 替身可能没有这些方法
 		this.sessionMgr.setMemoryNoticeCallback?.((count: number) => {
 			this.writeOutputLine(dim(`[memory] 已更新 ${count} 条（/memory show 查看）`));
+		});
+		this.sessionMgr.setMemoryDueCallback?.((slugs: string[]) => {
+			this.writeOutputLine(dim(`[memory] 到期提醒：${slugs.join(', ')}（/memory show 查看）`));
 		});
 
 		this.overlay = new OverlayPane(this.out, {
