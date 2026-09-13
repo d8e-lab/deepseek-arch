@@ -403,7 +403,8 @@ tests/
 | 写入文件 | `write_file` | 创建/覆盖文件，diff 预览后确认，原子写入 |
 | 精确编辑 | `edit_file` | 精确字符串替换（不用行号），唯一性检查，diff 预览后确认 |
 | 技能调用 | `skill` | 调用任意已发现技能（plan/release/research），支持 requires-confirm / fork 子代理 |
-| 保存计划 | `save_plan` | 规划文档写入 `.plans/<name>.md` |
+| 保存计划 | `save_plan` | 规划文档写入 `{workspace}/.deepseek-arch/plan/<name>.md`（runtime 目录，不入版本控制） |
+| 查看轨迹 | `subagent_trace` | 查看子代理执行过的工具与参数（不含思维链与工具结果） |
 | 导航 | `browser_navigate` | 打开指定 URL，自动返回页面快照 |
 | 后退 | `browser_navigate_back` | 浏览器后退，自动返回页面快照 |
 | 快照 | `browser_snapshot` | 获取当前页面 aria 结构化快照（文本格式） |

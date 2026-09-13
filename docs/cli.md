@@ -31,9 +31,38 @@ deepseek-arch chat [options]
 开始新对话（全屏 TUI）
 
 Options:
-  --title <name>  设置对话标题
-  -h, --help      显示 chat 命令帮助
+  -r, --resume <id>   恢复既有会话（ID 或标题）
+  -p, --prompt <content>
+                      非交互单轮执行：跑完一轮打印回复到 stdout 后退出（yolo，不进 TUI）
+  --workspace <dir>   指定工作区根目录（默认当前目录）
+  --yolo / --no-yolo  是否跳过工具确认（默认 yolo）
+  --short/--normal/--detail  展示模式
+  --mock              使用 MockProvider（离线测试）
+  -h, --help          显示帮助
 ```
+
+#### 非交互模式（`--prompt`，供脚本与心跳使用）
+
+```
+deepseek-arch chat --prompt "总结一下昨天的改动" [--workspace /path/to/repo] [--resume <id>]
+```
+
+契约：
+
+| 项 | 约定 |
+|:--|:--|
+| stdout | **仅最终回复**（一行结尾），便于管道处理 |
+| stderr | 进度（`[tool] <name>`）与错误（`[error] ...`） |
+| 退出码 | `0` 成功；`1` 会话不存在 / `--workspace` 目录不可用 / 本轮失败 |
+| 工具确认 | 不注册确认回调 → 需要确认的工具**直接执行**（即 yolo） |
+| 落盘 | 与 TUI 一致：会话、turn 正常写入 `~/.deepseek-arch/sessions/` |
+| 空会话 | 本轮失败且未产生轮次时丢弃刚创建的空会话 |
+
+#### 工作区（`--workspace`）
+
+覆盖工作区根目录，影响：工具的 cwd、`{workspace}/.deepseek-arch/` runtime 目录（plan/memory/api-requests）、
+所有走 `DEEPSEEK_ARCH_SESSION_CWD` 的路径解析。
+**必须在进程启动早期生效**（`SessionManager` 构造时会把该值锁定为会话 cwd）。
 
 启动全屏对话界面，包含：
 

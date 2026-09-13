@@ -155,11 +155,14 @@ type = 'subagent_spawned' | 'subagent_finished' | 'subagent_update';
 ### 3.4 持久化格式
 
 ```
-sessions/<id>/subagents/
-├── _index.json          # 索引: ["name1", "name2"]
-├── research.json        # 完整 SubagentRecord JSON
-└── codegen.json
+sessions/<id>/subagents/<name>/
+├── meta.json     # { name, task, status, startMs, endMs?, runCount, systemPrompt }
+└── turn_0.json   # 逐轮运行数组（每轮只存自己的 messages delta + entries + 状态）
 ```
+
+> 与 master 会话同构（meta + 逐轮文件）；每轮 read-modify-write，运行中/取消/崩溃都留下轨迹。
+> `listSubagentRecords` 改为目录扫描，**不兼容**旧的 `<name>.json` 单文件格式
+> （旧格式：`_index.json` + `<name>.json` 整份覆盖，已废弃）。
 
 ---
 
@@ -354,12 +357,11 @@ Task: 分析 src/ 下所有 TypeScript 文件的 import 依赖图...
 ```
 ~/.deepseek-arch/sessions/<session-id>/
 ├── meta.json
-├── turns.json
+├── turns.json / turn_<gen>.json
 └── subagents/
-    ├── _index.json          # ["analyzer", "scanner", "codegen"]
-    ├── analyzer.json        # 完整 SubagentRecord
-    ├── scanner.json
-    └── codegen.json
+    └── <name>/
+        ├── meta.json          # 状态/时间/轮数/system prompt
+        └── turn_0.json        # 逐轮运行记录（messages delta + entries + status）
 ```
 
 ### 7.2 写入时机

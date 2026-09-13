@@ -12,8 +12,33 @@
 <configDir>/sessions/
 └── <session-uuid>/
     ├── meta.json          # 会话元数据（含 lastUsage）
-    └── turns.json         # 全部轮次（数组格式）
+    ├── turns.json         # 全部轮次（v2 格式；分代时改用 turn_<gen>.json）
+    ├── system-prompt.txt  # 会话创建时的 system prompt 快照（resume 复用，命中 KV cache）
+    ├── cache.log          # 缓存命中率日志（追加式）
+    └── subagents/<name>/  # 子代理运行记录
+        ├── meta.json      # 状态/时间/轮数/system prompt
+        └── turn_0.json    # 逐轮运行（每轮自己的 messages delta + entries + status）
 ```
+
+## 工作区 runtime 目录（`{workspace}/.deepseek-arch/`）
+
+与上面的「配置/会话目录」（`~/.deepseek-arch/`）不同，**agent 在工作区内产生的所有 runtime 文件**
+统一放在 `{workspace}/.deepseek-arch/` 下，**不参与版本控制**（仓库 `.gitignore` 已忽略）：
+
+```
+{workspace}/.deepseek-arch/
+├── plan/                 # 规划文档（save_plan 写入；compact 从此处读回重注入）
+├── memory/               # 项目层记忆（清单 MEMORY.md + 主题 .md + logs/ + state.json + audit.jsonl + legacy/）
+├── api-requests/         # API 镜像落盘（deepseek-arch api-monitor）
+└── agent-file-state.json # 文件改动标记（read_file 后 mtime/size 记录，防陈旧编辑）
+```
+
+- `{workspace}` = `DEEPSEEK_ARCH_SESSION_CWD`（SessionManager 构造时锁定）→ 未设置时回退 `process.cwd()`；
+  CLI 可用 `--workspace <dir>` 覆盖（须在进程启动早期生效）。
+- 路径解析单一入口：`src/core/workspace-paths.ts`（`getRuntimeDir` / `getPlanDir` / `getMemoryDir` /
+  `getApiRequestsDir` / `getFileStatePath`）。
+- 全局层记忆是例外：放 `~/.deepseek-arch/memory/`（跨项目偏好），只能经 `memory_read` 工具读取
+  （普通 `read_file` 受 workspace 沙箱限制读不到）。
 
 ### meta.json
 

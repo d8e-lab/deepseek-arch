@@ -52,7 +52,7 @@
 | `chat` | `-r/--resume <id>` `--yolo` `--browser` `--cdp <url>` `--async` `--debug` `--self-interaction` `--mock` `--monitor <url>` | cli/index.ts:112-120 | 均不落盘 |
 | `resume [id]` | `--browser` `--cdp` `--async` `--debug` `--self-interaction` `--mock` `--monitor`（**缺 `--yolo`**） | cli/index.ts:223-229 | 均不落盘 |
 | `clear` | 无 | cli/index.ts:184-218 | — |
-| `api-monitor` | `-p/--port`（默认 8899）`-o/--out`（默认 ./api-requests） | cli/index.ts:339-367 | — |
+| `api-monitor` | `-p/--port`（默认 8899）`-o/--out`（默认 {workspace}/.deepseek-arch/api-requests） | cli/index.ts:339-367 | — |
 | `completion [bash\|zsh]` | 位置参数 | cli/index.ts:463-474 | — |
 
 ### 3.2 环境变量
