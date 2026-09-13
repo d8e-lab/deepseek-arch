@@ -94,6 +94,22 @@ describe('记忆与会话集成', () => {
 		expect(snapshot).toBe('你是助手。');
 	});
 
+	it('会话创建时先做 LRU 维护：闲置条目降级后才构建清单（清单=结算后的结果）', async () => {
+		const w = await store.write('project', { subject: 'a.b', name: 'A', description: '旧偏好', confidence: 2, body: 'x' });
+		// 模拟 100 天没被使用（阈值 90 天 → 应降为 1 并退出清单）
+		await store.setState('project', { usage: { [w.slug]: { uses: 0, lastUsedAt: new Date(Date.now() - 100 * 86_400_000).toISOString() } } });
+
+		const meta = await mgr.startNewSession('LRU 结算');
+		const snapshot = await readFile(join(storage.sessionDir(meta.id), 'system-prompt.txt'), 'utf-8');
+
+		expect((await store.readEntry('project', w.slug))!.confidence).toBe(1);
+		expect(snapshot).not.toContain('旧偏好');   // 已在维护中被降出清单
+
+		// 手动触发（含 dry-run）可用且不落盘
+		const dry = await mgr.maintainMemory({ dryRun: true });
+		expect(dry.map((r) => r.scope)).toEqual(['project', 'global']);
+	});
+
 	it('会话内清单变化 → 变化提醒作为一条 user 消息落盘（历史字节稳定）', async () => {
 		await store.write('project', { subject: 'a.b', name: 'A', description: 'd', confidence: 3, body: 'x' });
 		const meta = await mgr.startNewSession('变化提醒测试');

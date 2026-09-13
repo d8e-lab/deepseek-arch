@@ -118,6 +118,14 @@ export interface MemoryConfig {
 	agent_timeout_ms?: number;
 	/** 「你读过的记忆被更新」是否提醒（默认 true） */
 	notify_read_updates?: boolean;
+	/** LRU 维护总开关（默认 true）：按使用情况主动升降级 + 归档闲置条目 */
+	lru_enabled?: boolean;
+	/** 闲置超过该天数 → 置信度降一级（默认 90） */
+	lru_decay_days?: number;
+	/** 累计使用达到该次数且最近有使用 → 置信度升一级（默认 2） */
+	lru_promote_uses?: number;
+	/** 候选池中闲置超过该天数 → 归档到 legacy/archive/（默认 180） */
+	lru_archive_days?: number;
 }
 
 /** 主配置（config.toml） */

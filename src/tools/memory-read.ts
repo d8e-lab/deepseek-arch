@@ -70,10 +70,15 @@ async function resolveTarget(
 
 /**
  * 读取记忆条目（可显式传入 store —— memory agent 用它自己的实例，避免全局单例串用）
+ *
+ * @param recordUse 读到条目后是否记一次「使用」（LRU 升级/保鲜信号）。
+ *   仅 **master 通过 `memory_read` 工具**读全文时记（工具的 execute 默认开启）；
+ *   归纳代理自己的读取**不记**（它只是查重，不代表用户在用它）。
  */
 export async function readMemoryEntry(
 	store: ReturnType<typeof getMemoryStore>,
 	pathArgRaw: string,
+	recordUse = false,
 ): Promise<ToolResult> {
 	const pathArg = String(pathArgRaw ?? '').trim();
 	if (!pathArg) return { content: '', error: 'path is required' };
@@ -93,6 +98,9 @@ export async function readMemoryEntry(
 		const header = entry
 			? `[memory:${target.scope}] ${entry.slug} (confidence ${entry.confidence}, updated ${entry.updated}, subject ${entry.subject})`
 			: `[memory:${target.scope}] ${basename(target.filePath)} (no frontmatter — legacy note)`;
+		if (recordUse && entry) {
+			await store.recordUse(target.scope, entry.slug).catch(() => { /* 统计失败不影响读取 */ });
+		}
 		return { content: `${header}\n\n${entry ? entry.body : truncated}` };
 	} catch (err) {
 		return { content: `Failed to read ${target.filePath}: ${(err as Error).message}`, error: 'read_failed' };
@@ -120,6 +128,7 @@ export const memoryReadTool: Tool = {
 	requiresConfirm: false,
 
 	async execute(params: Record<string, unknown>): Promise<ToolResult> {
-		return readMemoryEntry(getMemoryStore(), String(params.path ?? ''));
+		// recordUse：master 真读了全文 → 记一次「使用」（LRU 的升级/保鲜信号）
+		return readMemoryEntry(getMemoryStore(), String(params.path ?? ''), true);
 	},
 };

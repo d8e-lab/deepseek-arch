@@ -35,7 +35,7 @@ import type { Tool, ToolCallRecord } from '../tools/types.js';
 import type { ToolCall, ToolCallDelta } from '../types/api.js';
 import { getAllTools } from '../tools/index.js';
 import { formatSubagentTrace } from '../tools/subagent-trace.js';
-import { MemoryStore } from './memory-store.js';
+import { MemoryStore, type MemoryMaintenanceResult } from './memory-store.js';
 import { MemoryRecall } from './memory-recall.js';
 import { MemoryInjector, MEMORY_LISTING_TAG } from './memory-inject.js';
 import { MemoryAgent } from './memory-agent.js';
@@ -128,6 +128,14 @@ export interface MemorySessionConfig {
 	agentMaxInputTokens?: number;
 	agentTimeoutMs?: number;
 	notifyReadUpdates?: boolean;
+	/** LRU 维护总开关（默认 true） */
+	lruEnabled?: boolean;
+	/** 闲置超过该天数 → 降一级（默认 90） */
+	lruDecayDays?: number;
+	/** 累计使用达到该次数且最近有使用 → 升一级（默认 2） */
+	lruPromoteUses?: number;
+	/** 候选池中闲置超过该天数 → 归档（默认 180） */
+	lruArchiveDays?: number;
 	/** 显式注入存储（测试用；省略时按当前工作区构造） */
 	store?: MemoryStore;
 }
@@ -217,8 +225,10 @@ export class SessionManager {
 
 		// 记忆清单注入 system prompt（只在会话创建时做一次：system prompt 在会话内冻结 → 零缓存代价，
 		// 代价只是"可能过期"，由会话内的变化提醒补齐）
+		// 前置：先做一次 LRU 维护（低频、确定性），保证下面注入的清单就是结算后的结果
 		if (this.memory && this.memory.config.inject && this.systemPrompt?.content) {
 			try {
+				await this.maintainMemory();
 				const { block } = await this.memory.injector.buildListingBlock();
 				if (block) {
 					this.systemPrompt = { role: 'system', content: `${this.systemPrompt.content}\n\n${block}` };
@@ -348,6 +358,10 @@ export class SessionManager {
 			agentMaxInputTokens: cfg.agentMaxInputTokens ?? 6000,
 			agentTimeoutMs: cfg.agentTimeoutMs ?? 90_000,
 			notifyReadUpdates: cfg.notifyReadUpdates ?? true,
+			lruEnabled: cfg.lruEnabled ?? true,
+			lruDecayDays: cfg.lruDecayDays ?? 90,
+			lruPromoteUses: cfg.lruPromoteUses ?? 2,
+			lruArchiveDays: cfg.lruArchiveDays ?? 180,
 		};
 		if (!config.enabled) {
 			this.memory = null;
@@ -382,6 +396,32 @@ export class SessionManager {
 	/** 记忆运行时（未启用返回 null） */
 	getMemory(): MemoryRuntime | null {
 		return this.memory;
+	}
+
+	/**
+	 * LRU 维护：按使用情况主动升降级 + 归档（两层都跑）。
+	 *
+	 * 调用时机：
+	 *   - **会话创建时**（`startNewSession`，在构建清单**之前**）→ 保证注入的清单就是结算后的结果；
+	 *   - `/memory gc` 手动触发（可 `--dry-run` 预览）。
+	 * 幂等、确定性：同一天跑多次结果相同（升降级都要求跨越天数/次数阈值）。
+	 */
+	async maintainMemory(opts: { dryRun?: boolean } = {}): Promise<MemoryMaintenanceResult[]> {
+		const mem = this.memory;
+		if (!mem || !mem.config.lruEnabled) return [];
+		const lru = {
+			enabled: mem.config.lruEnabled,
+			decayDays: mem.config.lruDecayDays,
+			promoteUses: mem.config.lruPromoteUses,
+			archiveDays: mem.config.lruArchiveDays,
+		};
+		const out: MemoryMaintenanceResult[] = [];
+		for (const scope of ['project', 'global'] as const) {
+			try {
+				out.push(await mem.store.reconcile(scope, lru, opts.dryRun));
+			} catch { /* 维护失败不阻塞会话创建；store 内部已尽力审计 */ }
+		}
+		return out;
 	}
 
 	/** 「已更新记忆」提示回调（TUI / headless 注册） */

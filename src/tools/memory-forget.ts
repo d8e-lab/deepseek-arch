@@ -36,7 +36,6 @@ export async function forgetMemoryEntry(
 			};
 		}
 		const ok = await store.forget(scope, slug, reason ?? 'memory_agent');
-		await store.rebuildIndex(scope);
 		return ok
 			? { content: `memory_forget ok: "${slug}" retired (${scope}). The file is kept for history.` }
 			: { content: `memory_forget failed: "${slug}" not found.`, error: 'not_found' };

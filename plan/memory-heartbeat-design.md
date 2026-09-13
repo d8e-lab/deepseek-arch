@@ -48,7 +48,7 @@
 | 2 | 第三层「用户个人偏好」 | 与全局层边界不清，用户未想好 |
 | 3 | `memory_search` 工具 | 清单已提供发现通道；全局层由 `memory_read` 覆盖（§13-B2） |
 | 4 | 相似度阈值去重、确定性打分公式 | 清单前置 + 模型判断 + 三条等值规则（§5） |
-| 5 | 连续数值衰减公式（半衰期）、fold 折叠、容量清理 | 半衰期带来不可解释的可见性漂移；fold 在"每主题一文件"后无对象。淘汰改走**离散档位 + agent 顺带清理**（§4）；确定性 GC 见 A3b |
+| 5 | 连续数值衰减公式（半衰期）、fold 折叠 | 半衰期带来不可解释的可见性漂移；fold 在"每主题一文件"后无对象。淘汰改走**离散档位 + agent 顺带清理 + 离散 LRU**（§4、§4.1） |
 | 6 | reviewer（censor agent）/ YOLO 审查自动续答 | 用户决定删除（§13-B5） |
 | 7 | 常驻 daemon | 心跳走外部 cron/systemd + TUI 定时器（§11） |
 | 8 | 记忆参与 compact 摘要生成 | 职责分离：摘要管上下文，记忆管偏好；compact 只做**重注入** |
@@ -218,7 +218,7 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | 软淘汰 | 归纳代理对某条 `memory_write` 传同 slug + `confidence: 1` → 掉回候选池（`candidates.md`），**master 不再看到**，仍可恢复 |
 | 硬淘汰 | `memory_forget`（**仅 memory agent 可用**，每轮上限 3 条，不计入写入配额）：写墓碑 + 退出索引；**`confidence: 3` 拒绝**（只能取代或用户本人 `/memory forget`） |
 | 静默失效的治理 | 归纳代理每轮读清单（含 `updated N days ago`）→ 顺带清理与本轮话题相关且明显过时的条目；配合 `confidence` 的**离散档位**（3→2→1→候选池→superseded），不做连续数值衰减 |
-| 衰减 / LRU（确定性 GC） | **本期不做**，设计要点见 `docs/todo/memory-open-items.md` A3b |
+| **LRU 主动维护** | R26 起已实现（§4.1）：用进废退、一次一级、`pinned` 免疫、可 `--dry-run` 预览、可逆 |
 | 到期提醒 | `remindAt` 到期的条目（**含候选条目**）在下一轮注入 `<memory-due>`，发出后清空 `remindAt`（一次性） |
 
 **淘汰路径（R25：过时记忆如何消失）**
@@ -254,6 +254,47 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 > **一条正式条目会因为"低置信的同义重复"而静默退出注入清单**（已由 `deriveStatus` 统一派生修复，
 > 并加了单测：merge 不降级、显式降级可逆、superseded 终态、阈值可配 `masterMinConfidence=3`）。
 > 提示词与工具描述同步加了"更新已有条目时沿用原 confidence，别在改写措辞时降级"。
+
+### 4.1 LRU 主动维护（R26：不只是"被判断过时"，还要"用进废退"）
+
+上面两条路都要求"有人在相关话题里提到它"。**静默失效**若永远无人提及，就一直没有出口 ——
+所以补一套**确定性的 LRU 维护**（对齐计算机体系结构里"用进废退"的直觉，而不是时间衰减公式）：
+
+**什么算"使用"（只有两种）**
+
+| 信号 | 来源 | 为什么 |
+|:--|:--|:--|
+| **读全文** | master 调 `memory_read` 命中该条（`readMemoryEntry(..., recordUse=true)`） | 清单只给一行摘要；真去读全文说明它确实被用上 |
+| **被重申** | `write` / `merge`（写入即一次使用） | 内容被再次确认 → 语义仍有效 |
+
+> **注入不算使用**：出现在清单里是"曝光"，不是"使用"。若把曝光计入，就会变成"越注入越升级"的正反馈。
+> 归纳代理自己的 `memory_read`（查重用）也不算。
+
+**升降级规则（一次结算只动一级，幂等、确定性）**
+
+| 动作 | 条件 | 结果 |
+|:--|:--|:--|
+| **升级** | `uses ≥ lru_promote_uses`（默认 2）**且**最近有使用（闲置 ≤ `lru_decay_days`）且 conf < 3 | conf +1；`uses` 清零（要求重新积累证据） |
+| **降级** | 闲置 > `lru_decay_days`（默认 90 天）且 conf > 1 | conf −1；`uses` 清零 |
+| **归档** | conf = 1（已在候选池）且闲置 > `lru_archive_days`（默认 180 天） | 文件移到 `legacy/archive/`，退出扫描（**保留文件，不删除**） |
+| **免疫** | `pinned: true`（`/memory pin <slug>`） | 不升不降不归档 |
+
+- 为什么"升级"还要求最近有使用：一条三年前被读爆、此后无人问津的条目不该因为历史计数高而升级。
+- 为什么一次只动一级：避免长眠后条目"一次掉到候选"，让每一步都可解释、可回退。
+- **可逆**：任何降级都能通过再次被读到/被重申逐步回升（候选池 → 正式清单的路径因此存在）。
+- 闲置时钟的起点：有使用记录用 `lastUsedAt`；没有（本机制上线前写入的条目）以 `updated` 起算。
+
+**触发时机与可见性**
+
+| 时机 | 说明 |
+|:--|:--|
+| **会话创建时**（`startNewSession`） | 在**构建清单之前**同步跑一次（两层）→ 注入的清单就是结算后的结果；随后异常只记审计 |
+| `/memory gc [--dry-run]` | 手动触发；`--dry-run` 只返回计划、零副作用（预览会降哪些条） |
+| 审计 | 每次结算落一条 `{kind:'lru', promoted[], demoted[], archived[]}` |
+| 透明度 | `/memory show` 每行显示 `uses=N last-used=Nd ago pinned`，另 `/memory status` 显示参数 |
+
+**用户控制面**：`lru_enabled`（总开关）、三个阈值可配、`pin` 永久免疫、`/memory forget` 立即删除。
+**明确不做**：半衰期/连续数值衰减（可见性随日期漂移无法解释）、按打分公式排序（召回已交给 flash）。
 
 ---
 
@@ -387,6 +428,8 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | `/memory show [kw]` | 列出条目（`slug  conf  scope  updated  description`，≤20 行；带 kw 时按关键词过滤） |
 | `/memory candidates` | 列出候选池（模糊条目，仅 memory agent 管理） |
 | `/memory forget <slug>` | 遗忘：写墓碑 + 退出索引（文件保留）；自动判断条目在哪一层 |
+| `/memory gc [--dry-run]` | 手动跑一次 LRU 维护（升降级 + 归档）；`--dry-run` 只预览不落盘 |
+| `/memory pin <slug>` / `unpin <slug>` | 钉住/取消钉住：免疫 LRU 升降级与归档（写 `pinned: true` 到 frontmatter） |
 | `/memory on` / `off` | 开关；写回 `memory.enabled`；关闭立即生效（不再注入/归纳，已有记忆保留） |
 | `/memory refresh` | 重建 system prompt 里的清单并同步重写会话快照（前缀会作废一次，故做成手动） |
 
@@ -429,6 +472,10 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 | `agent_max_input_tokens` | `6000` | 归纳输入 token 预算（同时决定 watchdog 的 token 上限 = ×3） |
 | `agent_timeout_ms` | `90000` | 单次归纳最长时长 |
 | `notify_read_updates` | `true` | 「你读过的条目被更新」是否提醒 |
+| `lru_enabled` | `true` | LRU 主动维护总开关（升降级 + 归档） |
+| `lru_decay_days` | `90` | 闲置超过该天数 → 置信度降一级 |
+| `lru_promote_uses` | `2` | 累计使用次数达标且最近有使用 → 升一级 |
+| `lru_archive_days` | `180` | 候选池中闲置超过该天数 → 归档到 `legacy/archive/` |
 
 ### 10.2 必须同步的 5 处（约束 C）
 
@@ -472,18 +519,19 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 ## 12. 实现状态与测试映射
 
-截至 2026-09-13：**全量 584 测试通过**（53 个测试文件），`tsc` 无错。
+截至 2026-09-13：**全量 601 测试通过**（54 个测试文件），`tsc` 无错。
 
 | 模块 | 文件 | 测试 | 用例数 |
 |:--|:--|:--|:--|
-| 存储 | `src/core/memory-store.ts` | `tests/core/memory-store.test.ts` | 19 |
+| 存储 | `src/core/memory-store.ts` | `tests/core/memory-store.test.ts` | 23 |
 | 召回 | `src/core/memory-recall.ts` | `tests/core/memory-recall.test.ts` | 10 |
 | 注入 | `src/core/memory-inject.ts` | `tests/core/memory-inject.test.ts` | 10 |
 | 服务装配 | `src/core/memory-service.ts` | 经工具测试覆盖 | — |
 | 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts` | 10 |
 | 淘汰工具 | `src/tools/memory-forget.ts` | `tests/tools/memory-forget.test.ts` | 6 |
+| LRU 维护 | `src/core/memory-store.ts`（`reconcile` / `recordUse` / `setPinned`） | `tests/core/memory-lru.test.ts` | 11 |
 | 归纳代理 | `src/core/memory-agent.ts`、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 14 |
-| 会话接线 | `src/core/session.ts` | `tests/core/memory-session.test.ts` | 8 |
+| 会话接线（含 LRU 结算时机） | `src/core/session.ts` | `tests/core/memory-session.test.ts` | 9 |
 | 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts` | +4 |
 | CLI（含 `--no-memory`、`--prompt`） | `src/cli/index.ts` | `tests/cli/prompt.test.ts` | 7 |
 
@@ -491,12 +539,15 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 1. **游标用轮次序号**（`"1"`/`"2"`…）而非消息 uuid —— 简单、跨进程稳定。
 2. **agent 工具只有 read+write+forget** —— 从根上避免"去核实技术细节"。淘汰不走「打分公式」而走
-   「离散档位 + 由 agent 顺带判断」（§4 末三行、§8.3）。
+   「离散档位 + agent 顺带判断 + 确定性 LRU」（§4、§4.1）。
 3. **配额在工具层强制**（返回错误文本给模型）而非中断运行。
 4. **watchdog 中止不推进游标**（可重试），`no_input`/`master_wrote` 推进游标（避免空转）。
 5. **注入块与子代理通知共用"落盘为一条 user 消息"形态**；并修掉了**无工具轮丢弃注入块**的 bug
    （`saveTurn` 的 `agentLoopMessages` 传递条件）。
 6. **`MEMORY.md` 由条目派生**，与注入清单共用渲染函数，保证字节一致。
+7. **索引自维护**：`write`/`forget`/`setPinned`/`reconcile` 内部调 `syncIndex()`（失败只落审计），
+   调用方不再需要记得 `rebuildIndex` —— 消除"第二个写入口忘刷索引"的隐患。
+8. **LRU 的"使用"只算读全文与重申**，注入不算（避免"越注入越升级"的正反馈）。
 
 ---
 
@@ -521,5 +572,5 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 | 组 | 内容 |
 |:--|:--|
-| **A** | A2 事件化提示、A3b 确定性 GC（衰减/LRU 归档）、A4 `logs/` 写入、A5 CLI 面（`--memory-scope`/`--quiet`/`pin`/`show --audit`）、A6 `--prompt` 契约对齐、A7 跨层去重分层、A8 `agent_max_tokens` 字段 |
+| **A** | A2 事件化提示、A4 `logs/` 写入、A5 CLI 面（`--memory-scope`/`--quiet`/`show --audit`）、A6 `--prompt` 契约对齐、A7 跨层去重分层、A8 `agent_max_tokens` 字段 |
 | **C** | 心跳载体契约、cron/systemd 细节、无人值守时的到期提醒呈现 |

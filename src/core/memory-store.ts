@@ -60,6 +60,8 @@ export interface MemoryEntry {
 	paths?: string[];
 	/** 提醒时间（ISO 8601；到期后注入提醒） */
 	remindAt?: string;
+	/** 用户钉住：免疫 LRU 升降级与归档（`/memory pin`） */
+	pinned?: boolean;
 	/** 创建/更新时间（ISO 8601） */
 	created: string;
 	updated: string;
@@ -118,17 +120,66 @@ export interface MemoryManifest {
 	rev: string;
 }
 
+/**
+ * 单条记忆的使用统计（LRU 的输入信号）。
+ *
+ * 什么算"使用"（**只有这两种**，注入/出现在清单里不算 —— 否则"越注入越升级"会变成正反馈）：
+ *   1. master 真的读了全文（`memory_read` 工具命中）；
+ *   2. 被写入/合并重申（`write` / `merge`，写入即一次使用）。
+ */
+export interface MemoryUsage {
+	/** 累计使用次数（升级判定用；升级后清零，要求"重新积累证据"） */
+	uses: number;
+	/** 最近一次使用时间（ISO；降级/归档的闲置时钟） */
+	lastUsedAt: string;
+	/** 最近一次因使用而升级（审计） */
+	lastPromotedAt?: string;
+	/** 最近一次因闲置而降级（审计） */
+	lastDemotedAt?: string;
+}
+
 /** 持久化状态（state.json） */
 export interface MemoryState {
 	/** 归纳游标：已归纳到哪一轮（turn id） */
 	lastExtractedTurnId?: string;
 	/** 上次归一化的时间（ISO） */
 	updatedAt?: string;
+	/** LRU 使用统计：slug → usage */
+	usage?: Record<string, MemoryUsage>;
+}
+
+/** LRU 维护参数（来自 `[memory]` 配置段） */
+export interface MemoryLruOptions {
+	/** 总开关（默认 true） */
+	enabled?: boolean;
+	/** 闲置超过该天数 → 降一级（默认 90） */
+	decayDays?: number;
+	/** 累计使用达到该次数且最近有使用 → 升一级（默认 2） */
+	promoteUses?: number;
+	/** 候选池中闲置超过该天数 → 归档到 legacy/archive/（默认 180） */
+	archiveDays?: number;
+}
+
+/** 一次 LRU 维护的结算结果（供 UI 打印与审计） */
+export interface MemoryMaintenanceResult {
+	scope: MemoryScope;
+	/** 提升的条目（含前后置信度） */
+	promoted: { slug: string; from: number; to: number }[];
+	/** 降级的条目 */
+	demoted: { slug: string; from: number; to: number }[];
+	/** 归档的条目（候选池长期闲置） */
+	archived: string[];
+	/** 跳过的（pinned 免疫） */
+	pinned: string[];
+	/** 仅预览、未落盘 */
+	dryRun?: boolean;
 }
 
 /** 审计记录（audit.jsonl，追加式；kind 区分类型） */
 export interface MemoryAuditRecord {
-	kind: 'write' | 'merge' | 'supersede' | 'forget' | 'fold' | 'inject' | 'error' | 'agent_run' | 'remind_due';
+	kind:
+		| 'write' | 'merge' | 'supersede' | 'forget' | 'fold' | 'inject'
+		| 'error' | 'agent_run' | 'remind_due' | 'lru' | 'pin' | 'use';
 	at: string;
 	[extra: string]: unknown;
 }
@@ -325,7 +376,22 @@ export class MemoryStore {
 	 *      b. 否则 → **supersede**（旧条目标记 superseded + supersededBy，退出索引，留演化记录）
 	 *   3. 其余 → **add**（slug 由 subject 派生，冲突自动加后缀）
 	 */
+	/**
+	 * 写入（唯一的公开写入口）：在 `applyWrite` 之上补两件"调用方不该再操心"的事 ——
+	 *   ① 记一次使用（写入即重申，累计 use 可让条目回升）；
+	 *   ② 索引自维护（`MEMORY.md` / `candidates.md` 随写随新）。
+	 */
 	async write(scope: MemoryScope, input: MemoryWriteInput): Promise<MemoryWriteResult> {
+		const result = await this.applyWrite(scope, input);
+		if (result.superseded?.length) {
+			await this.dropUsage(scope, result.superseded).catch(() => { /* 清理失败不影响写入 */ });
+		}
+		await this.recordUse(scope, result.slug).catch(() => { /* 使用统计失败不影响写入 */ });
+		await this.syncIndex(scope);
+		return result;
+	}
+
+	private async applyWrite(scope: MemoryScope, input: MemoryWriteInput): Promise<MemoryWriteResult> {
 		const dir = await this.ensureDir(scope);
 		const now = new Date().toISOString();
 		const target = input.slug ? await this.readEntry(scope, input.slug) : null;
@@ -400,6 +466,8 @@ export class MemoryStore {
 		const now = new Date().toISOString();
 		await this.writeEntry(dir, { ...entry, status: 'superseded', updated: now });
 		await this.audit({ kind: 'forget', at: now, scope, slug, reason });
+		await this.dropUsage(scope, [slug]).catch(() => { /* 清理失败不影响遗忘 */ });
+		await this.syncIndex(scope);
 		return true;
 	}
 
@@ -475,6 +543,163 @@ export class MemoryStore {
 		await atomicWrite(join(dir, STATE_FILE), JSON.stringify(next, null, 2) + '\n');
 	}
 
+	// ─── 使用统计与 LRU 维护 ─────────────────────────────
+
+	/**
+	 * 记录一次「使用」（master 读了全文 / 被写入重申）。
+	 * 注入与出现在清单里**不算使用** —— 否则"越注入越升级"会形成正反馈。
+	 */
+	async recordUse(scope: MemoryScope, slug: string, now: string = new Date().toISOString()): Promise<void> {
+		const state = await this.getState(scope);
+		const usage = { ...(state.usage ?? {}) };
+		const cur = usage[slug] ?? { uses: 0, lastUsedAt: now };
+		usage[slug] = { ...cur, uses: cur.uses + 1, lastUsedAt: now };
+		await this.setState(scope, { usage });
+		await this.audit({ kind: 'use', at: now, scope, slug, uses: usage[slug].uses });
+	}
+
+	/** 丢弃若干条目的使用记录（条目被取代/遗忘后不再需要；避免 state.json 无限累积） */
+	private async dropUsage(scope: MemoryScope, slugs: string[]): Promise<void> {
+		if (slugs.length === 0) return;
+		const state = await this.getState(scope);
+		const usage = { ...(state.usage ?? {}) };
+		let changed = false;
+		for (const slug of slugs) {
+			if (usage[slug] !== undefined) {
+				delete usage[slug];
+				changed = true;
+			}
+		}
+		if (changed) await this.setState(scope, { usage });
+	}
+
+	/** 钉住 / 取消钉住（免疫 LRU 升降级与归档；不改 `updated`，不影响内容时效显示） */
+	async setPinned(scope: MemoryScope, slug: string, pinned: boolean): Promise<boolean> {
+		const entry = await this.readEntry(scope, slug);
+		if (!entry) return false;
+		const now = new Date().toISOString();
+		await this.writeEntry(this.dirs[scope], { ...entry, pinned: pinned || undefined });
+		await this.audit({ kind: 'pin', at: now, scope, slug, pinned });
+		await this.syncIndex(scope);
+		return true;
+	}
+
+	/**
+	 * LRU 维护：按「使用情况 + 闲置时长」主动升降级并归档。**幂等、确定性、可预览、全程审计**。
+	 *
+	 * 规则（一次结算只动一级，避免长眠后条目一次掉到候选）：
+	 *   ① 升级：`uses ≥ promoteUses` 且最近有使用（闲置 ≤ decayDays）→ confidence +1（封顶 3），uses 清零
+	 *   ② 降级：闲置 > decayDays → confidence −1（下限 1），uses 清零
+	 *   ③ 归档：已是 confidence 1（候选池）且闲置 > archiveDays → 移到 `legacy/archive/`，退出扫描
+	 *   - `pinned` 条目全部跳过（用户显式要留住）；
+	 *   - 从未有过使用记录的条目（本机制上线前写的）以 `updated` 作为闲置起点；
+	 *   - **不删除任何文件**：降级只是移出清单（可逆），归档保留原文件。
+	 *
+	 * @param dryRun true 时只返回计划、不落盘（`/memory gc --dry-run`）
+	 */
+	async reconcile(
+		scope: MemoryScope,
+		opts: MemoryLruOptions = {},
+		dryRun = false,
+	): Promise<MemoryMaintenanceResult> {
+		const result: MemoryMaintenanceResult = {
+			scope, promoted: [], demoted: [], archived: [], pinned: [], dryRun: dryRun || undefined,
+		};
+		if (opts.enabled === false) return result;
+
+		const decayDays = opts.decayDays ?? 90;
+		const promoteUses = opts.promoteUses ?? 2;
+		const archiveDays = opts.archiveDays ?? 180;
+		const DAY = 86_400_000;
+		const nowMs = Date.now();
+		const nowIso = new Date(nowMs).toISOString();
+
+		const dir = await this.ensureDir(scope);
+		const { entries } = await this.scan(scope);
+		const state = await this.getState(scope);
+		const usage = { ...(state.usage ?? {}) };
+
+		/** 先算完整计划（纯计算），再统一落盘 —— dry-run 因此零副作用 */
+		const plan: {
+			slug: string; confidence: number; status: MemoryStatus;
+			usage?: MemoryUsage; archive?: boolean;
+		}[] = [];
+
+		for (const entry of entries) {
+			if (entry.status === 'superseded') continue;
+			if (entry.pinned) {
+				result.pinned.push(entry.slug);
+				continue;
+			}
+			const u = usage[entry.slug] ?? { uses: 0, lastUsedAt: entry.updated };
+			// 闲置时钟 = max(最近使用, 最近降级)：降级本身也算"结算过"，否则同一分钟内
+			// 连续两次结算（两次会话启动 / 手动 gc）会把 3→1 连降两级，"每 decayDays 降一级"失效
+			const clock = latestIso(u.lastUsedAt || entry.updated, u.lastDemotedAt);
+			const idleDays = Math.floor((nowMs - Date.parse(clock)) / DAY);
+
+			if (u.uses >= promoteUses && idleDays <= decayDays && entry.confidence < 3) {
+				const to = Math.min(3, entry.confidence + 1);
+				result.promoted.push({ slug: entry.slug, from: entry.confidence, to });
+				plan.push({
+					slug: entry.slug, confidence: to,
+					status: deriveStatus(entry.status, to, this.masterMinConfidence),
+					usage: { ...u, uses: 0, lastPromotedAt: nowIso },
+				});
+			} else if (entry.confidence > 1 && idleDays > decayDays) {
+				const to = Math.max(1, entry.confidence - 1);
+				result.demoted.push({ slug: entry.slug, from: entry.confidence, to });
+				plan.push({
+					slug: entry.slug, confidence: to,
+					status: deriveStatus(entry.status, to, this.masterMinConfidence),
+					usage: { ...u, uses: 0, lastDemotedAt: nowIso },
+				});
+			} else if (entry.confidence <= 1 && idleDays > archiveDays) {
+				result.archived.push(entry.slug);
+				plan.push({ slug: entry.slug, confidence: entry.confidence, status: entry.status, archive: true });
+			}
+		}
+
+		if (dryRun || plan.length === 0) return result;
+
+		const archiveDir = join(dir, 'legacy', 'archive');
+		for (const p of plan) {
+			if (p.archive) {
+				await mkdir(archiveDir, { recursive: true, mode: 0o700 });
+				await rename(join(dir, `${p.slug}.md`), join(archiveDir, `${p.slug}.md`));
+				delete usage[p.slug];
+				continue;
+			}
+			const entry = entries.find((e) => e.slug === p.slug)!;
+			await this.writeEntry(dir, {
+				...entry, confidence: p.confidence, status: p.status, updated: entry.updated,
+			});
+			usage[p.slug] = p.usage!;
+		}
+		await this.setState(scope, { usage });
+		await this.syncIndex(scope);
+		await this.audit({
+			kind: 'lru', at: nowIso, scope,
+			promoted: result.promoted, demoted: result.demoted, archived: result.archived,
+		});
+		return result;
+	}
+
+	/**
+	 * 索引自维护：`write` / `forget` / `pin` / `reconcile` 内部调用，
+	 * 调用方**不需要**（也不应）再记得手动 `rebuildIndex`。
+	 * 索引失败不影响已写入的条目（可随时重建），只落一条审计。
+	 */
+	private async syncIndex(scope: MemoryScope): Promise<void> {
+		try {
+			await this.rebuildIndex(scope);
+		} catch (err) {
+			await this.audit({
+				kind: 'error', at: new Date().toISOString(), scope,
+				where: 'rebuildIndex', message: (err as Error).message,
+			}).catch(() => { /* 审计自身失败就放弃 */ });
+		}
+	}
+
 	// ─── 内部 ──────────────────────────────────────────
 
 	private async writeEntry(dir: string, entry: MemoryEntry): Promise<void> {
@@ -505,7 +730,7 @@ export class MemoryStore {
 
 const FRONTMATTER_FIELDS = [
 	'name', 'description', 'type', 'subject', 'tags', 'scope',
-	'confidence', 'signal', 'paths', 'remindAt', 'created', 'updated', 'status', 'supersededBy',
+	'confidence', 'signal', 'paths', 'remindAt', 'pinned', 'created', 'updated', 'status', 'supersededBy',
 ] as const;
 
 /** 解析条目文件；缺 frontmatter / 缺 subject 时返回 null（视为用户手写笔记） */
@@ -528,6 +753,7 @@ export function parseEntry(raw: string, filePath: string, scope: MemoryScope): M
 		signal: fm.signal === undefined ? undefined : String(fm.signal),
 		paths: fm.paths === undefined ? undefined : toStringArray(fm.paths),
 		remindAt: fm.remindAt === undefined ? undefined : String(fm.remindAt),
+		pinned: fm.pinned === true || fm.pinned === 'true' || undefined,
 		created: String(fm.created ?? new Date(0).toISOString()),
 		updated: String(fm.updated ?? fm.created ?? new Date(0).toISOString()),
 		status: (fm.status === 'candidate' || fm.status === 'superseded' ? fm.status : 'active') as MemoryStatus,
@@ -582,6 +808,7 @@ export function serializeEntry(entry: MemoryEntry): string {
 	if (entry.signal) fm.signal = entry.signal;
 	if (entry.paths && entry.paths.length > 0) fm.paths = entry.paths;
 	if (entry.remindAt) fm.remindAt = entry.remindAt;
+	if (entry.pinned) fm.pinned = true;
 	fm.created = entry.created;
 	fm.updated = entry.updated;
 	if (entry.status !== 'active') fm.status = entry.status;
@@ -711,6 +938,15 @@ function mergeEntryFields(entry: MemoryEntry, input: MemoryWriteInput, now: stri
 function deriveStatus(previous: MemoryStatus, confidence: number, minConfidence: number): MemoryStatus {
 	if (previous === 'superseded') return 'superseded';
 	return confidence >= minConfidence ? 'active' : 'candidate';
+}
+
+/** 取两个 ISO 时间里较晚的那个（忽略 undefined / 非法值）；都没有时返回 fallback */
+function latestIso(a: string, b?: string): string {
+	const ta = Date.parse(a);
+	if (!b) return a;
+	const tb = Date.parse(b);
+	if (Number.isNaN(tb)) return a;
+	return Number.isNaN(ta) || tb > ta ? b : a;
 }
 
 function clampConfidence(v?: number): number {

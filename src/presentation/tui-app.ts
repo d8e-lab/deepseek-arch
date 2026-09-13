@@ -786,7 +786,7 @@ export class TuiApp {
 			['/provider [name]', 'Switch provider (interactive picker if no arg)'],
 			['/system [name]', 'List/switch system prompt template'],
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
-			['/memory',        'Long-term memory: /memory [show|candidates|forget <slug>|on|off|refresh]'],
+			['/memory',        'Long-term memory: /memory [show|candidates|gc|pin|unpin|forget <slug>|on|off|refresh]'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
 			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
 			['/subagent_cancel','Cancel subagent(s) via interactive list'],
@@ -943,7 +943,8 @@ export class TuiApp {
 				this.cmdOut(green('[memory] enabled') + dim(`  project=${entries.length} 条  global=${global.length} 条  candidates(模糊)=${candidates.length} 条`));
 				this.cmdOut(dim(`  注入预算 ${mem.config.maxInjectTokens} tokens · 召回/归纳模型 ${mem.config.recallModel}/${mem.config.agentModel}`));
 				this.cmdOut(dim(`  项目层目录 ${store.dirOf('project')}`));
-				this.cmdOut(dim('  子命令：show [kw] | candidates | forget <slug> | on | off | refresh'));
+				this.cmdOut(dim('  子命令：show [kw] | candidates | gc [--dry-run] | pin <slug> | unpin <slug> | forget <slug> | on | off | refresh'));
+				this.cmdOut(dim(`  LRU 维护：${mem.config.lruEnabled ? '开' : '关'} · 闲置 ${mem.config.lruDecayDays} 天降一级 · 使用满 ${mem.config.lruPromoteUses} 次升一级 · 候选闲置 ${mem.config.lruArchiveDays} 天归档`));
 				return true;
 			}
 			case 'show': {
@@ -956,10 +957,49 @@ export class TuiApp {
 					this.cmdOut(dim('(无匹配条目)'));
 					return true;
 				}
+				const usage = {
+					project: (await store.getState('project')).usage ?? {},
+					global: (await store.getState('global')).usage ?? {},
+				};
 				for (const e of filtered.slice(0, 20)) {
-					this.cmdOut(dim(`  ${e.slug}  conf=${e.confidence}  ${e.scope}  ${e.updated.slice(0, 10)}  ${e.description}`));
+					this.cmdOut(dim(`  ${e.slug}  conf=${e.confidence}${this.usageHint(e, usage[e.scope][e.slug])}  ${e.scope}  ${e.updated.slice(0, 10)}  ${e.description}`));
 				}
 				if (filtered.length > 20) this.cmdOut(dim(`  …(${filtered.length - 20} more)`));
+				return true;
+			}
+			case 'gc': {
+				// LRU 维护：按使用情况主动升降级/归档（幂等，可 --dry-run 预览）
+				const dryRun = rest.includes('--dry-run');
+				const results = await this.sessionMgr.maintainMemory({ dryRun });
+				if (results.length === 0) {
+					this.cmdOut(dim('[memory] LRU 维护已关闭（memory.lru_enabled = false）'));
+					return true;
+				}
+				const head = dryRun ? '[memory] LRU 预览（--dry-run，未落盘）' : '[memory] LRU 维护完成';
+				this.cmdOut(green(head));
+				for (const r of results) {
+					const bits: string[] = [];
+					if (r.promoted.length) bits.push(`升级 ${r.promoted.map((p) => `${p.slug} ${p.from}→${p.to}`).join(', ')}`);
+					if (r.demoted.length) bits.push(`降级 ${r.demoted.map((p) => `${p.slug} ${p.from}→${p.to}`).join(', ')}`);
+					if (r.archived.length) bits.push(`归档 ${r.archived.join(', ')}`);
+					if (r.pinned.length) bits.push(dim(`免疫(pinned) ${r.pinned.length} 条`));
+					this.cmdOut(dim(`  ${r.scope}: ${bits.length ? bits.join(' · ') : '无变化'}`));
+				}
+				return true;
+			}
+			case 'pin':
+			case 'unpin': {
+				const slug = rest[0];
+				const pinned = sub === 'pin';
+				if (!slug) {
+					this.cmdOut(red(`用法：/memory ${sub} <slug>`));
+					return true;
+				}
+				const scope = (await store.readEntry('project', slug)) ? 'project' : 'global';
+				const ok = await store.setPinned(scope, slug, pinned);
+				this.cmdOut(ok
+					? green(`[memory] ${pinned ? '已钉住' : '已取消钉住'} ${slug}`) + dim(pinned ? '（免疫 LRU 升降级与归档）' : '')
+					: red(`[memory] 未找到条目 ${slug}`));
 				return true;
 			}
 			case 'candidates': {
@@ -982,7 +1022,6 @@ export class TuiApp {
 				}
 				const scope = (await store.readEntry('project', slug)) ? 'project' : 'global';
 				const ok = await store.forget(scope, slug, 'user requested via /memory forget');
-				await store.rebuildIndex(scope);
 				this.cmdOut(ok ? green(`[memory] 已遗忘 ${slug}`) : red(`[memory] 未找到条目 ${slug}`));
 				return true;
 			}
@@ -1007,6 +1046,10 @@ export class TuiApp {
 						recallModel: cfg?.get<string>('memory.recall_model') ?? undefined,
 						agentModel: cfg?.get<string>('memory.agent_model') ?? undefined,
 						agentOnTurnEnd: cfg?.get<boolean>('memory.agent_on_turn_end') ?? undefined,
+						lruEnabled: cfg?.get<boolean>('memory.lru_enabled') ?? undefined,
+						lruDecayDays: cfg?.get<number>('memory.lru_decay_days') ?? undefined,
+						lruPromoteUses: cfg?.get<number>('memory.lru_promote_uses') ?? undefined,
+						lruArchiveDays: cfg?.get<number>('memory.lru_archive_days') ?? undefined,
 					});
 				}
 				this.cmdOut(green(`[memory: ${enabled ? 'ON' : 'OFF'}]`) + dim(enabled ? '  下次发言起生效' : '  不再注入/归纳（已存在的记忆保留）'));
@@ -1020,9 +1063,22 @@ export class TuiApp {
 				return true;
 			}
 			default:
-				this.cmdOut(red(`未知子命令：${sub}`) + dim('  可用：show | candidates | forget | on | off | refresh'));
+				this.cmdOut(red(`未知子命令：${sub}`) + dim('  可用：show | candidates | gc [--dry-run] | pin <slug> | unpin <slug> | forget <slug> | on | off | refresh'));
 				return true;
 		}
+	}
+
+	/** `/memory show` 的用量后缀：uses / 最近使用 / pinned（让 LRU 的判断对用户可见、可解释） */
+	private usageHint(entry: { pinned?: boolean }, usage?: { uses: number; lastUsedAt: string }): string {
+		const bits: string[] = [];
+		if (usage) {
+			const days = Math.max(0, Math.floor((Date.now() - Date.parse(usage.lastUsedAt)) / 86_400_000));
+			bits.push(`uses=${usage.uses}`, days === 0 ? 'last-used=today' : `last-used=${days}d ago`);
+		} else {
+			bits.push('uses=0');
+		}
+		if (entry.pinned) bits.push('pinned');
+		return `  ${bits.join(' ')}`;
 	}
 
 	/** /subagent_cancel — 交互式选择要取消的子代理（含"全部取消"选项） */	private async cancelSubagentInteractive(): Promise<true> {

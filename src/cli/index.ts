@@ -118,6 +118,10 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 		agentMaxInputTokens: cfg.get<number>('memory.agent_max_input_tokens') ?? 6000,
 		agentTimeoutMs: cfg.get<number>('memory.agent_timeout_ms') ?? 90_000,
 		notifyReadUpdates: cfg.get<boolean>('memory.notify_read_updates') ?? true,
+		lruEnabled: cfg.get<boolean>('memory.lru_enabled') ?? true,
+		lruDecayDays: cfg.get<number>('memory.lru_decay_days') ?? 90,
+		lruPromoteUses: cfg.get<number>('memory.lru_promote_uses') ?? 2,
+		lruArchiveDays: cfg.get<number>('memory.lru_archive_days') ?? 180,
 	});
 	// 记忆工具（memory_read/write）与「已更新记忆」提示：与工作区/阈值保持一致
 	setMemoryStore(sessionMgr.getMemory()?.store ?? null);

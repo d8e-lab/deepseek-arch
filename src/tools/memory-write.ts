@@ -53,7 +53,7 @@ export async function writeMemoryEntry(
 			supersedes: asStringArray(params.supersedes),
 			by: typeof params.by === 'string' ? params.by : 'master',
 		});
-		await store.rebuildIndex(scope);
+		// 索引（MEMORY.md / candidates.md）由 store 内部随写随新，调用方不需要 rebuildIndex
 
 		const verb =
 			result.action === 'add' ? 'added'

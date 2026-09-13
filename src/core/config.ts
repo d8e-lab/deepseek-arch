@@ -110,6 +110,10 @@ agent_max_input_turns = 3      # 归纳输入最多轮数（游标之后的保�
 agent_max_input_tokens = 6000  # 归纳输入 token 预算
 agent_timeout_ms = 90000       # 单次归纳最长时长（毫秒）
 notify_read_updates = true     # 「你读过的记忆被更新」是否提醒
+lru_enabled = true             # 按使用情况主动维护置信度（升降级 + 归档闲置条目）
+lru_decay_days = 90            # 闲置超过该天数 → 置信度降一级（最低 1 即进候选池）
+lru_promote_uses = 2           # 累计被读/被重申该次数且最近有使用 → 升一级
+lru_archive_days = 180         # 候选池中闲置超过该天数 → 归档到 legacy/archive/
 `;
 
 const DEFAULT_PROVIDERS: ProvidersConfig = {
@@ -155,6 +159,10 @@ const MEMORY_DEFAULTS: Required<MemoryConfig> = {
 	agent_max_input_tokens: 6000,
 	agent_timeout_ms: 90_000,
 	notify_read_updates: true,
+	lru_enabled: true,
+	lru_decay_days: 90,
+	lru_promote_uses: 2,
+	lru_archive_days: 180,
 };
 
 /**
