@@ -20,7 +20,7 @@ import { MEMORY_AGENT_PROMPT } from './memory-agent-prompt.js';
 import { memoryReadTool, readMemoryEntry } from '../tools/memory-read.js';
 import { memoryWriteTool, writeMemoryEntry } from '../tools/memory-write.js';
 import { memoryForgetTool, forgetMemoryEntry } from '../tools/memory-forget.js';
-import { estimateTokens, type MemoryStore } from './memory-store.js';
+import { estimateTokens, renderManifestLine, type MemoryStore } from './memory-store.js';
 
 /** 每轮归纳最多硬淘汰几条（独立于 maxWritesPerRun，防误删；软降级走 memory_write confidence=1） */
 const MAX_FORGETS_PER_RUN = 3;
@@ -79,8 +79,44 @@ export interface MemoryAgentResult {
 	elapsedMs: number;
 }
 
-export class MemoryAgent {
-	private readonly opts: MemoryAgentOptions;
+/**
+ * 渲染「现有记忆索引」注入归纳代理的输入（对齐 Claude Code 的"清单前置"）。
+ *
+ * 为什么必须有：
+ *   - 没有它，agent 无从判断"该更新哪条"，只能靠瞎猜 subject → 产生重复条目；
+ *   - **候选池（confidence 1）master 看不到、也不会被 `memory_read` 命中**，
+ *     因此那批条目的升级只能由 agent 在归纳时决定 —— 它必须先"看得见"候选池。
+ *
+ * @param maxPerSection 每段最多列多少条（防超长；超出标注省略数）
+ */
+export async function renderMemoryIndex(store: MemoryStore, maxPerSection = 30): Promise<string> {
+	const out: string[] = [];
+	for (const scope of ['project', 'global'] as const) {
+		const label = scope === 'project' ? '项目层' : '全局层';
+		const active = await store.listEntries(scope);
+		const candidates = await store.listCandidates(scope);
+		const usage = (await store.getState(scope)).usage ?? {};
+		if (active.length === 0 && candidates.length === 0) continue;
+
+		out.push(`### ${label} — 正式条目（master 可见，已在清单里）`);
+		if (active.length === 0) out.push('(无)');
+		for (const e of active.slice(0, maxPerSection)) out.push(renderManifestLine(e));
+		if (active.length > maxPerSection) out.push(`- …(${active.length - maxPerSection} more)`);
+
+		out.push('');
+		out.push(`### ${label} — 候选池（confidence 1，**master 看不到**，需要你维护：被再次印证就升级，确认无价值才淘汰）`);
+		if (candidates.length === 0) out.push('(无)');
+		for (const e of candidates.slice(0, maxPerSection)) {
+			const uses = usage[e.slug]?.uses ?? 0;
+			out.push(`${renderManifestLine(e).replace(/ \(confidence/, ` (共被使用 ${uses} 次, confidence`)}`);
+		}
+		if (candidates.length > maxPerSection) out.push(`- …(${candidates.length - maxPerSection} more)`);
+		out.push('');
+	}
+	return out.join('\n');
+}
+
+export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 	private running = false;
 	private lastRunAt = 0;
 	private controller: AbortController | null = null;
@@ -132,10 +168,11 @@ export class MemoryAgent {
 
 		try {
 			const tools = this.buildTools(writes);
+			const index = await renderMemoryIndex(store).catch(() => '');
 			const { messages } = await runSubagentLoop(
 				[
 					{ role: 'system', content: MEMORY_AGENT_PROMPT },
-					{ role: 'user', content: renderInput(turns, input.currentUser) },
+					{ role: 'user', content: renderInput(turns, input.currentUser, index) },
 				],
 				this.opts.provider,
 				tools,
@@ -285,14 +322,17 @@ export class MemoryAgent {
 }
 
 /** 渲染输入片段：只有用户消息与助手最终回复（R2：无工具轨迹、无思维链） */
-export function renderInput(turns: MemoryAgentTurn[], currentUser: string): string {
-	const parts = [
-		'以下是需要归纳的对话片段（只含用户消息与助手最终回复）：',
-		'',
-	];
+export function renderInput(turns: MemoryAgentTurn[], currentUser: string, index = ''): string {
+	const parts: string[] = [];
+	// 记忆索引前置（对齐 Claude Code）：没有它，agent 无法判断"该更新哪条"，
+	// 也看不到候选池（confidence 1）——那批条目 master 不可见，只能由 agent 维护
+	if (index.trim()) {
+		parts.push('## 现有记忆（先看这里判断：该更新哪条 / 哪条该升级）', '', index.trim(), '');
+	}
+	parts.push('## 需要归纳的对话片段（只含用户消息与助手最终回复）', '');
 	for (const t of turns) {
-		parts.push(`## 用户\n${t.user}`);
-		if (t.assistant.trim()) parts.push(`## 助手\n${t.assistant}`);
+		parts.push(`### 用户\n${t.user}`);
+		if (t.assistant.trim()) parts.push(`### 助手\n${t.assistant}`);
 		parts.push('');
 	}
 	parts.push(`## 本轮用户消息（重点）\n${currentUser}`);

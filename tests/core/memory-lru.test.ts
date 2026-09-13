@@ -220,4 +220,29 @@ describe('memory LRU', () => {
 		expect(await store.listEntries('project')).toHaveLength(1);
 		expect(await readdir(projectDir)).toContain('MEMORY.md');
 	});
+
+	it('候选条的确定性升路：同主题反复出现（跨取代）→ 重申计数累积 → 自动升到 2', async () => {
+		// 第 1 次：模糊条目（信号 F，conf 1，master 看不到）
+		const first = await store.write('project', {
+			subject: 'style.tone', name: '语气', description: 'd', confidence: 1, body: '希望语气轻松',
+		});
+		expect(first.action).toBe('add');
+		expect(await store.listEntries('project')).toHaveLength(0);
+
+		// 第 2 次：同主题再次出现，agent 又报 1（正文不同 → 取代）
+		const second = await store.write('project', {
+			subject: 'style.tone', name: '语气', description: 'd', confidence: 1, body: '语气要轻松一点，别太正式',
+		});
+		expect(second.action).toBe('supersede');
+
+		// 计数跨取代延续：新条目继承旧条目的重申次数（每次 write 计一次重申）
+		const usage = (await store.getState('project')).usage!;
+		expect(usage[second.slug].uses).toBe(2);
+		expect(usage[first.slug]).toBeUndefined();   // 旧条目记录已清理
+
+		// 达到 lru_promote_uses=2 且最近有使用 → 自动升到 2 → 进入 master 可见清单
+		const r = await store.reconcile('project');
+		expect(r.promoted).toEqual([{ slug: second.slug, from: 1, to: 2 }]);
+		expect(await store.listEntries('project')).toHaveLength(1);
+	});
 });

@@ -383,10 +383,14 @@ export class MemoryStore {
 	 */
 	async write(scope: MemoryScope, input: MemoryWriteInput): Promise<MemoryWriteResult> {
 		const result = await this.applyWrite(scope, input);
+		let inherited = 0;
 		if (result.superseded?.length) {
-			await this.dropUsage(scope, result.superseded).catch(() => { /* 清理失败不影响写入 */ });
+			// 同主题的「复现计数」跨取代延续：同 subject 的改写说明这个话题又出现了，
+			// 计数清零会让"反复被提到但始终模糊"的候选条目永远升不上来（master 看不到它，
+			// 唯一可能的使用信号就是"再次被提到/重申"）。
+			inherited = await this.inheritUsage(scope, result.superseded, result.slug).catch(() => 0);
 		}
-		await this.recordUse(scope, result.slug).catch(() => { /* 使用统计失败不影响写入 */ });
+		await this.recordUse(scope, result.slug, undefined, inherited).catch(() => { /* 使用统计失败不影响写入 */ });
 		await this.syncIndex(scope);
 		return result;
 	}
@@ -549,13 +553,42 @@ export class MemoryStore {
 	 * 记录一次「使用」（master 读了全文 / 被写入重申）。
 	 * 注入与出现在清单里**不算使用** —— 否则"越注入越升级"会形成正反馈。
 	 */
-	async recordUse(scope: MemoryScope, slug: string, now: string = new Date().toISOString()): Promise<void> {
+	async recordUse(
+		scope: MemoryScope,
+		slug: string,
+		now: string = new Date().toISOString(),
+		inheritedUses = 0,
+	): Promise<void> {
 		const state = await this.getState(scope);
 		const usage = { ...(state.usage ?? {}) };
 		const cur = usage[slug] ?? { uses: 0, lastUsedAt: now };
-		usage[slug] = { ...cur, uses: cur.uses + 1, lastUsedAt: now };
+		usage[slug] = { ...cur, uses: cur.uses + inheritedUses + 1, lastUsedAt: now };
 		await this.setState(scope, { usage });
 		await this.audit({ kind: 'use', at: now, scope, slug, uses: usage[slug].uses });
+	}
+
+	/**
+	 * 把被取代条目的使用计数转给新条目并清理旧记录。
+	 * 返回转出的次数（调用方把它叠加到新条目上）。
+	 */
+	private async inheritUsage(scope: MemoryScope, fromSlugs: string[], toSlug: string): Promise<number> {
+		const state = await this.getState(scope);
+		const usage = { ...(state.usage ?? {}) };
+		let inherited = 0;
+		let lastUsedAt: string | undefined;
+		for (const slug of fromSlugs) {
+			const old = usage[slug];
+			if (!old) continue;
+			inherited += old.uses;
+			if (!lastUsedAt || old.lastUsedAt > lastUsedAt) lastUsedAt = old.lastUsedAt;
+			delete usage[slug];
+		}
+		if (lastUsedAt) {
+			const cur = usage[toSlug] ?? { uses: 0, lastUsedAt };
+			usage[toSlug] = { ...cur, lastUsedAt: cur.lastUsedAt > lastUsedAt ? cur.lastUsedAt : lastUsedAt };
+		}
+		await this.setState(scope, { usage });
+		return inherited;
 	}
 
 	/** 丢弃若干条目的使用记录（条目被取代/遗忘后不再需要；避免 state.json 无限累积） */

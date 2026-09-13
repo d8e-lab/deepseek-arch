@@ -2,9 +2,9 @@
 
 > **版本说明**
 > - **v2（2026-09-13）**：与实现一致，是唯一的实施依据。§13 列出 v1 已废弃的方案及理由。
-> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；五轮评审（R1–R25）后改为
+> - v1 曾以「JSONL 单文件 + 临时 user 消息注入 + memory_search」为核心；五轮评审（R1–R27）后改为
 >   「每主题 Markdown + 清单注入 system prompt + 落盘式变化提醒 + flash 召回」，
->   并删除了 reviewer（censor agent）；R25 补齐了「过时记忆如何淘汰」（§4）。
+>   并删除了 reviewer（censor agent）；R25–R27 补齐了「过时记忆如何淘汰」与「候选池如何升级」（§4、§4.1、§4.2）。
 >
 > **配套文件**
 > - 讲解版（用户视角）：`plan/memory-design-explained.md`
@@ -286,6 +286,25 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 - **可逆**：任何降级都能通过再次被读到/被重申逐步回升（候选池 → 正式清单的路径因此存在）。
 - 闲置时钟的起点：有使用记录用 `lastUsedAt`；没有（本机制上线前写入的条目）以 `updated` 起算。
 
+### 4.2 候选池（conf 1）怎么升上来（R27：三条通道，缺一不可）
+
+**问题**：候选条目 `confidence = 1` 时 master 看不到、不会被注入、也永远不会去读它 ——
+而 LRU 的"使用"信号里恰好有一半来自"被读"。只靠 LRU，候选池基本只进不出，等于单向坟场。
+
+三条通道互补（前两条不依赖对方）：
+
+| # | 通道 | 机制 | 依赖 |
+|:--|:--|:--|:--|
+| 1 | **代理显式升级** | 归纳时发现"本轮再次印证了候选池某条" → 用它的 slug 更新并传 `confidence: 2` | 代理必须**看得见候选池** → 输入前置索引（§8.2） |
+| 2 | **复现计数自动升级**（确定性兜底） | 同 subject 的条目每次被写/被取代 → `uses` 累积（**跨取代延续**，不因改写清零）→ 达到 `lru_promote_uses` 且最近有使用 → LRU 自动升到 2 | 无需代理配合；只要"这个话题又出现了" |
+| 3 | **同义合并取 max** | 同 subject 且正文归一化后相等 → `confidence = max(旧, 新)` | 依赖代理写出等价正文 |
+
+- 通道 2 是这次专门补的兜底：候选条目的升级不再依赖"代理记得用 slug 更新"，只要话题重复出现就会累积证据。
+- 通道 1 的前提是**索引前置**（`renderMemoryIndex`）：输入开头给出「正式条目 + 候选池（含 `共被使用 N 次`）」，
+  代理才知道 slug、才知道该升级谁。此前设计稿 §5 声称做了"清单前置"，实际**没实现**（代理只有对话片段、
+  看不见任何条目）—— 这既是重复条目的来源，也让通道 1 与 §4 的清理规则无从落地。
+- `pinned` 的候选条目同样免疫 LRU，但**通道 1 仍可把它升到 2**（pin 只免疫自动结算，不禁止显式升级）。
+
 **触发时机与可见性**
 
 | 时机 | 说明 |
@@ -304,8 +323,9 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 
 **核心：不写相似度算法。** 重复检测交给模型，代码只做确定性动作。
 
-1. **清单前置**（对齐 Claude Code）：归纳代理的输入里带上"现有记忆清单"，并明确要求
-   「先查清单 / 先 `memory_read`：能更新已有条目就不要新建」。
+1. **清单前置**（对齐 Claude Code）：归纳代理的输入开头带上「正式条目 + 候选池」索引
+   （`renderMemoryIndex`，含 slug 与 `共被使用 N 次`），并要求「先看索引、能更新已有条目就不要新建」。
+   > 注：这条曾长期**只在文档里**（代码里代理只有对话片段），R27 才真正落地；它同时是候选池升级通道 1 的前提（§4.2）。
 2. **三条确定性规则**（§3.4）覆盖了代码能做的一切：指定 slug 改写、完全相等合并、同 subject 取代。
 3. **演化记录**：被取代的条目保留在原文件里（`status` + `supersededBy` + `updated`），可回溯"偏好怎么变的"。
 4. **源头控制重复**：游标增量（§3.5）+ 主/后台互斥（§8.4）→ 同一段对话只归纳一次、master 写过就不重复写。
@@ -377,8 +397,11 @@ supersededBy: reply-format-2                      # status=superseded 时指向�
 
 - **只给**「用户消息 + 助手最终回复」；
 - **不给**工具调用轨迹、**不给**思维链（`reasoning_content`）。
+- **前置现有记忆索引**（`renderMemoryIndex`，R27）：正式条目 + 候选池（两层，每段 ≤30 行，
+  候选行带 `共被使用 N 次`）——这是"清单前置"的真实落地，也是候选池升级通道 1 的前提（§4.2）。
 - 后果（明示）：信号 C（"assistant 随后确实执行"）不再可验证，C 降级为按用户话术判断。
-- 裁剪：最多 `agent_max_input_turns`（默认 3）轮、总预算 `agent_max_input_tokens`（默认 6000），**最新轮优先**。
+- 裁剪：最多 `agent_max_input_turns`（默认 3）轮、总预算 `agent_max_input_tokens`（默认 6000），**最新轮优先**；
+  索引不计入该裁剪，但整体仍受 watchdog 的 token 上限（`maxInputTokens × 3`）约束。
 
 ### 8.3 工具集（有意收紧）
 
@@ -521,7 +544,7 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 
 ## 12. 实现状态与测试映射
 
-截至 2026-09-13：**全量 603 测试通过**（54 个测试文件），`tsc` 无错。
+截至 2026-09-13：**全量 605 测试通过**（54 个测试文件），`tsc` 无错。
 
 | 模块 | 文件 | 测试 | 用例数 |
 |:--|:--|:--|:--|
@@ -531,8 +554,8 @@ deepseek-arch chat --prompt "<内容>" [--workspace <dir>] [--resume <id|name>] 
 | 服务装配 | `src/core/memory-service.ts` | 经工具测试覆盖 | — |
 | 记忆工具 | `src/tools/memory-read.ts`、`memory-write.ts` | `tests/tools/memory-tools.test.ts` | 10 |
 | 淘汰工具 | `src/tools/memory-forget.ts` | `tests/tools/memory-forget.test.ts` | 6 |
-| LRU 维护 | `src/core/memory-store.ts`（`reconcile` / `recordUse` / `setPinned`） | `tests/core/memory-lru.test.ts` | 13 |
-| 归纳代理 | `src/core/memory-agent.ts`、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 14 |
+| LRU 维护 + 候选升级通道 | `src/core/memory-store.ts`（`reconcile`/`recordUse`/`inheritUsage`/`setPinned`） | `tests/core/memory-lru.test.ts` | 14 |
+| 归纳代理（含索引前置） | `src/core/memory-agent.ts`（`renderMemoryIndex`）、`memory-agent-prompt.ts` | `tests/core/memory-agent.test.ts` | 15 |
 | 会话接线（含 LRU 结算时机） | `src/core/session.ts` | `tests/core/memory-session.test.ts` | 9 |
 | 配置段 | `src/types/config.ts`、`src/core/config.ts` | `tests/core/config.test.ts` | +4 |
 | CLI（含 `--no-memory`、`--prompt`） | `src/cli/index.ts` | `tests/cli/prompt.test.ts` | 7 |

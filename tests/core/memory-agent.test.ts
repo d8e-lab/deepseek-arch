@@ -239,8 +239,32 @@ describe('MemoryAgent', () => {
 		expect(seen[0]).toContain('user-3');
 	});
 
-	// ── 淘汰（memory_forget）：归纳时顺带清理过时记忆 ──────────────────────
+	// ── 记忆索引前置（含候选池）：agent 的升级/去重判断依据 ──────────────────
 
+	it('输入前置现有记忆索引：正式条目 + 候选池（conf 1 只有 agent 看得到）', async () => {
+		await store.write('project', { subject: 'reply.format', name: '正式条', description: '可见', confidence: 3, body: 'b1' });
+		const cand = await store.write('project', { subject: 'style.tone', name: '候选条', description: '模糊', confidence: 1, body: 'b2' });
+		await store.recordUse('project', cand.slug);   // 加两次使用
+		await store.recordUse('project', cand.slug);
+
+		const seen: string[] = [];
+		const provider = makeProvider([{ content: 'ok' }], (messages) => {
+			seen.push(String(messages[1]?.content ?? ''));
+		});
+		const agent = makeAgent(provider, store);
+		await agent.run({ turns: [{ user: 'u', assistant: 'a', turnId: 't1' }], currentUser: 'u' });
+
+		const input = seen[0];
+		expect(input).toContain('现有记忆');
+		expect(input).toContain('正式条目');          // 段标题
+		expect(input).toContain('正式条');            // 正式条目内容
+		expect(input).toContain('候选池');            // 段标题（master 不可见的那批）
+		expect(input).toContain(cand.slug);          // 候选条目（拿得到 slug 才能升级）
+		expect(input).toContain('共被使用 3 次');     // 升级判断依据
+		expect(input.indexOf('现有记忆')).toBeLessThan(input.indexOf('需要归纳的对话片段'));  // 清单前置
+	});
+
+	// ── 淘汰（memory_forget）：归纳时顺带清理过时记忆 ──────────────────────
 	async function seed(scope: 'project' | 'global', subject: string, confidence: number) {
 		return store.write(scope, {
 			subject, name: `主题-${subject}`, description: 'd', type: 'user', confidence, body: 'b',
