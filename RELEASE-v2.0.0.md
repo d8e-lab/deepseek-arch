@@ -84,16 +84,23 @@
 
 ## 📦 安装
 
-```bash
-# npm（推荐，2.0.0 已发布）
-npm install -g deepseek-arch@2.0.0
+本版本通过 **GitHub Release** 分发（`deepseek-arch-2.0.0.tgz`，含编译产物与依赖，安装免构建）：
 
-# 从源码
+```bash
+# 方式一：直接装 GitHub Release 的包（推荐）
+npm install -g https://github.com/d8e-lab/deepseek-arch/releases/download/v2.0.0/deepseek-arch-2.0.0.tgz
+
+# 方式二：下载后本地安装
+curl -LO https://github.com/d8e-lab/deepseek-arch/releases/download/v2.0.0/deepseek-arch-2.0.0.tgz
+npm install -g ./deepseek-arch-2.0.0.tgz
+
+# 方式三：源码构建
 git clone git@github.com:d8e-lab/deepseek-arch.git && cd deepseek-arch
 npm install && npm run build && node dist/cli/index.js
 ```
 
-> AUR（`yay -S deepseek-arch`）本次**未同步更新**，仍停留在旧版本；需要 2.0.0 请用 npm 或源码安装。
+> - **AUR（`yay -S deepseek-arch`）本次未同步**，仍停留在旧版本 —— 需要 2.0.0 请用上面的 GitHub Release 包。
+> - 本项目目前**未发布到 npm registry**，请勿使用 `npm install -g deepseek-arch`（会 404）。
 
 ## 🔜 后续计划
 

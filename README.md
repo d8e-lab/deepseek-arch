@@ -8,10 +8,20 @@
 
 ## 快速开始
 
-### Arch Linux
+### 任意发行版（推荐）
 
 ```bash
-# 方式一：从 AUR 安装（审核通过后可用）
+# GitHub Release 预编译包：含编译产物与依赖，免构建，装完即用
+npm install -g https://github.com/d8e-lab/deepseek-arch/releases/latest/download/deepseek-arch-2.0.0.tgz
+```
+
+> 本项目**未发布到 npm registry**（不要用 `npm install -g deepseek-arch`）；
+> 下方 AUR 包可能落后于最新 release（2.0.0 未同步）。
+
+### Arch Linux（AUR / 本地构建）
+
+```bash
+# 方式一：从 AUR 安装（若有更新）
 # yay -S deepseek-arch
 
 # 方式二：makepkg 本地构建
