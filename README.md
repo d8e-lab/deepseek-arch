@@ -102,6 +102,7 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 - **API 请求监听**：`--monitor` + `api-monitor` 子命令，完整记录发给 API 的请求体，排查上下文丢失
 - **本地测试模式**：`--mock` 使用内置 MockProvider，无需 API key 即可体验
 - **Windows 支持**：Windows 自动使用内置 Edge，PowerShell 命令执行
+- **长期记忆**：后台归纳代理自动记住你的偏好/约定/边界（写走工具调用），新会话自动注入清单；**生命周期由 confidence 档位表达**（3/2 可见 → 1 待观察 → 0 待销毁 → 归档），按**活动日**老化（长时间不启动程序不会一次性清空），**闲置不致死**（只有记忆总量超限才淘汰）；`/memory` 查看与管理，`--no-memory` 一键关闭
 - **配置外置**：TOML 文件管理，支持文件间跳转引用
 - **安全隔离**：操作范围限于 home 目录和项目工作目录
 
@@ -143,6 +144,7 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 /yolo               切换 YOLO 模式（写回 defaults.yolo）
 /subagent [name]    查看子代理详情
 /subagent_cancel    交互式取消子代理
+/memory             长期记忆：状态摘要 / show [kw] / candidates / gc [--dry-run] / pin|unpin <slug> / forget <slug> / on|off / refresh
 /compact            压缩会话上下文（摘要 + 文件重注入，开启新分代）
 /context            显示会话上下文与 token 用量
 /help               显示命令列表
@@ -154,6 +156,10 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 
 ```
 -r, --resume <id>     按 ID 或名称恢复会话
+-p, --prompt <content>
+                      非交互单轮执行：跑完一轮把回复打印到 stdout 后退出（供脚本/心跳使用）
+--workspace <dir>     指定工作区根目录（决定 `.deepseek-arch/` 与项目层记忆的落点；默认当前目录）
+--no-memory           完全关闭长期记忆：不注入、不归纳、剔除 memory_read/memory_write，也不创建记忆 runtime 文件
 --browser             显示浏览器窗口（默认 headless）
 --cdp <url>           连接宿主机浏览器（如 --cdp http://127.0.0.1:9222）
 --yolo                跳过所有工具确认（自动批准 shell/edit；默认已开启）
@@ -169,6 +175,8 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 ```
 
 > `--short` / `--normal` / `--detail` 互斥；展示模式仅影响终端展示，不改变发送给模型的完整上下文。
+> 长期记忆的存储布局与配置项见 `docs/storage.md`「记忆目录布局」与 `docs/config.md`「记忆配置」；
+> 设计依据（档位/活动日/窗口/容量淘汰）见 `plan/memory-heartbeat-design.md` §4。
 > 新会话第一条用户消息自动作为会话标题（≤20 字），可用 `/resume` 列表或 `resume <title>` 按标题恢复。
 
 ## 配置

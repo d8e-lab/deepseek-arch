@@ -13,13 +13,13 @@
 |:--|:--|:--|:--|:--|
 | **A2** | 写入提示通道：StreamEvent `memory_updated` | 用 `SessionManager.setMemoryNoticeCallback` + TUI 一行 dim + headless stderr | 回调方案更简单且已够用；事件化的收益（外部订阅）当前无消费者 | `types/chat.ts` + `session.ts` 事件泵；S |
 | **A3a** | ✅ **已做（2026-09-13）**：淘汰过时记忆 —— 归纳代理 `memory_forget` 工具 + 软淘汰（`confidence: 1`）+ 提示词"时效与清理"规则 | `src/tools/memory-forget.ts`（`confidence: 3` 拒绝、每轮上限 3 条、不计写入配额）、`memory-agent.ts` 工具集与配额、`memory-agent-prompt.ts` 规则表；测试 `tests/tools/memory-forget.test.ts`(6) + `tests/core/memory-agent.test.ts`(+3) | 起因：**"静默失效"（没人再提且未被推翻）原本无任何淘汰路径** —— 先前判"无消费者"不准确：原设计的消费者（打分 + fold）被废弃了，而淘汰本身需要有落点，落点就在"归纳时顺带判断" | — |
-| **A3b** | ✅ **已做（2026-09-13，设计稿 §4.1 / R26 + R28）**：LRU 主动维护 —— **活动日时钟**（缺席不老化）+ **memory window 换出** + **销毁倒计时**（换出→缓刑→复活/销毁）+ 置信度升降级 | `MemoryStore.reconcile()` / `recordUse()` / `setPinned()`（`src/core/memory-store.ts`）；会话创建时结算（`SessionManager.maintainMemory()`）；命令 `/memory gc [--dry-run]`、`/memory pin\|unpin`；配置 `lru_enabled` / `lru_decay_days` / `lru_promote_uses` / `lru_archive_days`；测试 `tests/core/memory-lru.test.ts`(13) + `memory-session.test.ts`(+1) | — |
+| **A3b** | ✅ **已做（2026-09-13，设计稿 §4.1 / §4.4，R26–R31）**：LRU 主动维护 —— **统一 confidence 档位**（3/2 可见 → 1 待观察 → 0 待销毁 → 销毁）+ **活动日时钟**（缺席不老化）+ **闲置不致死**（闲置下限 1；0 只由容量压力产生）+ memory window / 总量上限 | `MemoryStore.reconcile()`/`recordUse()`/`recordTouch()`/`inheritUsage()`/`setPinned()`（`src/core/memory-store.ts`）；会话创建时结算（`SessionManager.maintainMemory()`）；命令 `/memory gc [--dry-run]`、`/memory pin\|unpin`；配置 `lru_enabled` / `lru_decay_active_days`(90) / `lru_promote_uses`(2) / `lru_window_size`(200) / `lru_total_limit`(400) / `lru_destroy_after_days`(180) / `lru_destroy_mode`；测试 `tests/core/memory-lru.test.ts`(20) + `memory-session.test.ts`(1) | — |
 | **A3c** | 连续数值衰减（半衰期 `0.5^(Δdays/180)`） | 未实现 | **不做**：可见性随日期漂移无法解释、无用户可感知收益；改用离散档位（3→2→1→候选池→archive），每次动作落 `audit.jsonl` 可审计 | — |
 | **A3d** | 会话内"主动出示条目全文" | 未实现（只出示清单与变化提醒） | 每轮多一次 LLM 调用或引入打分噪声，收益边际；`memory_read` 已提供按需通道 | `memory-inject.ts` + `memory-recall.ts`；M–L |
 | **A4** | `logs/yyyy/mm/dd.md` 每日日志写入 | `MemoryStore.appendLog()` 已实现但**无调用方** | 归纳的可审计性已由 `audit.jsonl` 的 `agent_run.notes` 承担；再写一份原始日志属重复 | `memory-agent.ts` 在 run 结束追加；S |
-| **A5** | CLI/命令面缺口：`--memory-scope`、`--memory-model`、`--quiet`、`/memory show --scope\|--limit\|--audit`、`/memory agent on\|off` | **部分已做**：`/memory gc [--dry-run]`、`/memory pin\|unpin <slug>`（A3b/R26）；其余未实现 | 多数是调试/便利功能；`--quiet`/`--json` 与实际心跳契约绑定（见 A6） | `cli/index.ts`、`tui-app.ts`；S–M |
+| **A5** | CLI/命令面缺口：`--memory-scope`、`--memory-model`、`--quiet`、`/memory show --scope\|--limit\|--audit`、`/memory agent on\|off` | **部分已做**：`/memory gc [--dry-run]`、`/memory pin\|unpin <slug>`；`/memory candidates` 已按档位分组 | 多数是调试/便利功能；`--quiet`/`--json` 与实际心跳契约绑定（见 A6） | `cli/index.ts`、`tui-app.ts`；S–M |
 | **A6** | `chat --prompt` 契约不一致：文档写 `--json`、退出码 0/1/2/3、`--session <name>`、`--timeout`、工具白名单 | 实现：stdout 纯文本、退出码 0/1、`--resume`、yolo 直接放行 | 心跳未开工，契约等心跳一起定更省事（见 §心跳） | `cli/index.ts` `runPromptOnce`；M |
-| **A7** | 跨层去重未分层：`seen`/`surfaced` 按 slug 全局去重 | 项目层与全局层同 slug（同主题）时"已见/已出示"互相影响 | 需要决定键的形态（`scope:slug` vs 分开两张表），属小改但会影响注入内容 | `memory-inject.ts`（键改 `${scope}:${slug}`）；S |
+| **A7** | 跨层去重未分层：`seen`/`surfaced` 按 slug 全局去重 | 项目层与全局层同 slug（同主题）时"已见/已出示"互相影响（`manifestAll` 按 slug 去重，注入的清单里不带层信息） | **需要决策**：键改成 `scope:slug` 就必须让清单行携带层标识（改变注入内容格式），或改用两张表 / 按 `manifestAll` 的层信息回填。**非小改，故挂起** | `memory-inject.ts`（`seen`/`surfaced`/`markRead`/`parseListingSlugs`）+ 清单渲染格式；M |
 | **A8** | `agent_max_tokens` 独立配置 | 实现用 `maxInputTokens × 3`（18000）作为运行 token 上限 | 独立字段收益不大；如需精细化再补 | `config.ts` + `memory-agent.ts`；S |
 
 ## B 组：实现阶段发现、明确不做的（已写进设计稿 v2 §13 废弃清单）
@@ -31,6 +31,8 @@
 | **B3** | 相似度阈值去重（Jaccard/阈值/冲突打分） | 清单前置 + 模型判断 + 三条确定性规则已足够，代码量降一个数量级 |
 | **B4** | 确定性打分公式（权重 0.45/0.25/…） | 召回交给 flash；公式无消费者 |
 | **B5** | reviewer（censor agent）/ YOLO 审查自动续答 | 用户决定删除（A1，已落地） |
+
+| **A9** | 时间兜底：如「两年（活动日）未被触达即归档」，独立于容量压力 | 未实现 | **待定（需决策）**：R31 之后自动归档只在 `lru_total_limit` 超限时发生 —— 若实际用量长期远低于上限，就不会有任何自动清理。是否需要一条纯时间的兜底（会让"闲置不致死"不再绝对）？ | `memory-store.ts` 的 `reconcile` 分支 + 配置一个 `lru_max_idle_days`；S |
 
 ## C 组：与心跳相关（等心跳开工时一起处理）
 

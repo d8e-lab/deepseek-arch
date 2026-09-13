@@ -81,6 +81,46 @@ currency = "CNY"
 content = "你是一个有用的AI助手..."
 ```
 
+### 记忆配置（`config.toml` 的 `[memory]` 段）
+
+跨会话记忆（偏好/约定/边界的自动归纳与注入）。设计依据与完整规则见
+`plan/memory-heartbeat-design.md`（§4 生命周期、§6 注入、§10 配置）。
+
+```toml
+[memory]
+enabled = true                 # 总开关（`/memory off` 与 CLI `--no-memory` 亦会关闭）
+inject = true                  # 会话创建 / resume 首轮把清单注入 system prompt
+max_inject_tokens = 800        # 清单注入预算（超出时用 recall_model 挑选相关行）
+delta_inject_tokens = 200      # 会话内变化提醒预算
+master_min_confidence = 2      # 主代理可见的最低置信度（建议保持 2；设 1 会让"候选区"概念失效）
+recall_model = "deepseek-v4-flash"   # 召回/挑选用模型
+agent_model = "deepseek-v4-flash"    # 后台归纳代理用模型
+agent_on_turn_end = true       # 每轮用户消息后异步归纳
+agent_min_interval_sec = 30    # 同会话两次归纳最小间隔
+agent_max_writes_per_run = 3   # 单次归纳最多写 3 条（配额在工具层强制）
+agent_max_input_turns = 3      # 归纳输入最多轮数（游标之后的保护上限）
+agent_max_input_tokens = 6000  # 归纳输入 token 预算（同时决定 watchdog 上限 = ×3）
+agent_timeout_ms = 90000       # 单次归纳最长时长
+notify_read_updates = true     # 「你读过的条目被更新」是否提醒
+lru_enabled = true             # LRU 维护总开关（档位升降级 + 窗口换出 + 容量淘汰 + 销毁）
+lru_decay_active_days = 90     # 闲置超过该「活动日」数 → 置信度降一级（下限 1，闲置不会致销毁）
+lru_promote_uses = 2           # 累计被读/被重申该次数且最近有使用 → 升一级
+lru_window_size = 200          # 可见条目上限（超出按 LRU 把最久未用者降到 conf 1）
+lru_total_limit = 400          # 记忆总量上限（可见+候选）；超限才把最久未用的候选降到 conf 0（待销毁）
+lru_destroy_after_days = 180   # conf 0 的销毁期限（活动日）；期间被触达 → 回到 conf 1 重新观察
+lru_destroy_mode = "archive"   # 销毁方式：archive（移入 legacy/archive/）或 delete（物理删除）
+```
+
+要点（细节见设计稿 §4）：
+
+- **`confidence` 档位就是生命周期**：`3/2` = 可见；`1` = 待观察（不可见）；`0` = 待销毁。
+- **时间单位是"活动日"**（程序实际被使用的天数）——**缺席不老化**，长期不启动程序不会一次性清空。
+- **闲置不致死**：闲置最多降到 `1`；只有 `lru_total_limit` 超限（真的装不下）才会出现 `0`。
+- **`--no-memory`（CLI）与 `/memory off`（TUI）** 都可即时关闭：不注入、不归纳、并从工具集中剔除
+  `memory_read`/`memory_write`（`--no-memory` 还会避免创建任何记忆 runtime 文件）。
+- 命令面：`/memory`（状态）、`/memory show [kw]`、`/memory candidates`（待观察 / ⏳待销毁）、
+  `/memory gc [--dry-run]`、`/memory pin|unpin <slug>`、`/memory forget <slug>`、`/memory refresh`。
+
 ## API
 
 | 方法 | 说明 |

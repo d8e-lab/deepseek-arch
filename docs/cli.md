@@ -35,6 +35,8 @@ Options:
   -p, --prompt <content>
                       非交互单轮执行：跑完一轮打印回复到 stdout 后退出（yolo，不进 TUI）
   --workspace <dir>   指定工作区根目录（默认当前目录）
+  --no-memory         完全关闭长期记忆：不注入、不归纳、并从工具集中剔除 memory_read/memory_write
+                      （也不会创建任何记忆 runtime 文件）
   --yolo / --no-yolo  是否跳过工具确认（默认 yolo）
   --short/--normal/--detail  展示模式
   --mock              使用 MockProvider（离线测试）
@@ -44,7 +46,7 @@ Options:
 #### 非交互模式（`--prompt`，供脚本与心跳使用）
 
 ```
-deepseek-arch chat --prompt "总结一下昨天的改动" [--workspace /path/to/repo] [--resume <id>]
+deepseek-arch chat --prompt "总结一下昨天的改动" [--workspace /path/to/repo] [--resume <id>] [--mock]
 ```
 
 契约：
@@ -94,6 +96,7 @@ deepseek-arch resume [options]
 Options:
   --id <id>      按对话 ID 精确匹配
   --name <name>  按对话标题精确匹配
+  --no-memory    完全关闭长期记忆（同上：不注入、不归纳、剔除记忆工具）
   -h, --help     显示 resume 命令帮助
 ```
 

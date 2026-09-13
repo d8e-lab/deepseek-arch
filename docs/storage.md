@@ -28,7 +28,7 @@
 ```
 {workspace}/.deepseek-arch/
 ├── plan/                 # 规划文档（save_plan 写入；compact 从此处读回重注入）
-├── memory/               # 项目层记忆（清单 MEMORY.md + 主题 .md + logs/ + state.json + audit.jsonl + legacy/）
+├── memory/               # 项目层记忆（见下方"记忆目录布局"）
 ├── api-requests/         # API 镜像落盘（deepseek-arch api-monitor）
 └── agent-file-state.json # 文件改动标记（read_file 后 mtime/size 记录，防陈旧编辑）
 ```
@@ -39,6 +39,26 @@
   `getApiRequestsDir` / `getFileStatePath`）。
 - 全局层记忆是例外：放 `~/.deepseek-arch/memory/`（跨项目偏好），只能经 `memory_read` 工具读取
   （普通 `read_file` 受 workspace 沙箱限制读不到）。
+
+### 记忆目录布局（项目层/全局层同构）
+
+```
+{workspace}/.deepseek-arch/memory/
+├── MEMORY.md            派生索引：正式条目（confidence ≥ 阈值）；注入清单与之同源（renderManifestLine）
+├── candidates.md        派生索引：候选区（confidence 0/1 = 待观察 / 待销毁），不注入
+├── <slug>.md            主题文件：frontmatter（confidence/status/subject/type/tags/updated[/pinned/remindAt]）+ 正文
+├── state.json           运行时状态：归纳游标 lastExtractedTurnId、活动日 activeDayCount/lastActiveDate、
+│                        usage[slug] = { uses, lastUsedAt, lastUsedDay, lastStepDay }
+├── audit.jsonl          追加式审计（write/merge/supersede/forget/use/pin/remind_due/agent_run/lru/error）
+├── logs/yyyy/mm/dd.md   原始观察日志（`appendLog()` 有实现，当前无调用方 —— 见 docs/todo A4）
+└── legacy/              用户手写笔记（无 frontmatter，不进索引）
+    └── archive/         **销毁**的条目（`lru_destroy_mode = "archive"` 时移入此处；不物理删除）
+```
+
+- **索引是派生的**：`MEMORY.md` / `candidates.md` 由条目文件随时可重建（`rebuildIndex`），
+  写入路径（`write`/`forget`/`setPinned`/`reconcile`）内部自动同步，调用方无需手动刷新。
+- **"待销毁"= `confidence: 0`**（写在条目 frontmatter 里，可 grep）；销毁期限见 `lru_destroy_after_days`。
+- 生命周期细节（活动日时钟、窗口/容量、档位升降级）见 `plan/memory-heartbeat-design.md` §4。
 
 ### meta.json
 
