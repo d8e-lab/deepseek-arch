@@ -592,7 +592,7 @@ npm publish --access public
 | [docs/system-prompt.md](./docs/system-prompt.md) | System Prompt 组装与调试 |
 | [docs/testing.md](./docs/testing.md) | 测试指南（含 PTY 集成测试） |
 | [docs/interaction-cmd.md](./docs/interaction-cmd.md) | 交互命令设计 |
-| [docs/goal-tool-design.md](./docs/goal-tool-design.md) | Goal 工具设计（目标锚定 + reviewer 配合） |
+| [docs/goal-tool-design.md](./docs/goal-tool-design.md) | Goal 工具设计（目标锚定；其中 reviewer 部分的前提已失效，见文件内说明） |
 | [docs/subagent-followup-research.md](./docs/subagent-followup-research.md) | subagent 追加指令可行性调研 |
 | [docs/audit-config-command-sync.md](./docs/audit-config-command-sync.md) | 配置↔命令↔配置文件同步缺口审计 |
 
@@ -608,6 +608,51 @@ npm publish --access public
 ---
 
 ## 更新日志
+
+### v2.0.0 — 长期记忆 + 子代理生命周期
+
+**🧠 长期记忆（全新）**：后台归纳代理自动记住你的偏好、约定与边界，新会话自动注入清单
+- 生命周期由 **confidence 档位**表达：3/2 = 模型可见 → 1 = 待观察 → 0 = 待销毁 → 归档；
+  按**活动日**老化（长期不启动程序不会一次性清空），**闲置不致死**（只有记忆总量超限才淘汰）
+- 写入不需要确认，任何失败都不会打扰主流程；`/memory` 查看与管理，`--no-memory` 一键关闭
+- 两层存储：项目层 `{workspace}/.deepseek-arch/memory/` + 全局层 `~/.deepseek-arch/memory/`
+
+**🤖 子代理生命周期**：可续跑、可查轨迹、崩溃可恢复
+- 已完成/失败/取消的子代理都能用 `subagent_send` 或 Ctrl+T 视图继续对话（取消不再是终点）
+- 新增 `subagent_trace` 查看执行过的工具与参数；记录增量落盘，进程中断后可续
+- 通知改为"消费后不再打扰"，异步模式下不再重复提示
+
+**🖥️ 工程与体验**
+- Runtime 文件统一到 `{workspace}/.deepseek-arch/`（plan / memory / api-requests / 文件状态）
+- 新增 `--workspace <dir>` 指定工作区、`chat --prompt` 非交互单轮（供脚本与心跳复用）
+- 记忆配置段 `[memory]`（21 个键，均可调/TUI 内开关）
+
+**🔧 修复**
+- `--no-memory` 之前实际未生效（不注入只是"恰好没有记忆文件"），现已真正关闭并剔除记忆工具
+- Windows 上 shell 命令输出的中文乱码（UTF-8 与流式解码）
+- 无工具调用的轮次会丢失注入的提醒块
+
+**⚠️ 破坏性变更**
+- 移除 YOLO 审查模型（reviewer / censor agent）与自动续答：`defaults.review_model`、`/review_model` 已删除
+- 子代理记录文件布局变更（旧 `<name>.json` 不再读取，改为 `<name>/meta.json` + 分代 turn 文件）
+
+### v1.5.3 — 前端组件化重构
+
+- TUI 界面拆分为可独立拼装/测试的组件（ConversationViewer / SubagentsViewer / CommandResultPane 等）
+- 列表渲染、滚动状态机、按键解析、Markdown 段落渲染统一收口为共享实现（无功能变化）
+
+### v1.5.2 — 标题、展示模式与 Subagents 视图
+
+- 新会话首条消息自动成为标题、三档展示模式（short/normal/detail）、默认 YOLO 放行
+- Subagents 总览视图体验升级
+
+### v1.5.1 — 安装修复
+
+- 修复 Linux 安装后 `pty.node` 加载失败导致 CLI 直接崩溃（开箱即用，无需手动编译）
+
+### v1.5.0 — 全双工 TUI + Subagent 会话化
+
+- 模型输出期间 `/` 命令立即执行、普通文本排队不中断；子代理升级为可恢复会话
 
 ### v1.4.1 — 渲染与交互体验
 
