@@ -1,6 +1,6 @@
 # Storage 设计（文件系统）
 
-> 最后更新：2026-05-18 · 实现文件：`src/core/storage.ts`
+> 最后更新：2026-09-15 · 实现文件：`src/core/storage.ts`、`src/core/memory-store.ts`
 
 ## 设计动机
 
@@ -14,6 +14,7 @@
     ├── meta.json          # 会话元数据（含 lastUsage）
     ├── turns.json         # 全部轮次（v2 格式；分代时改用 turn_<gen>.json）
     ├── system-prompt.txt  # 会话创建时的 system prompt 快照（resume 复用，命中 KV cache）
+    ├── memory-cursor.json # 记忆归纳游标（按会话；{ cursor: "N" }）
     ├── cache.log          # 缓存命中率日志（追加式）
     └── subagents/<name>/  # 子代理运行记录
         ├── meta.json      # 状态/时间/轮数/system prompt
@@ -44,20 +45,33 @@
 
 ```
 {workspace}/.deepseek-arch/memory/
+├── manifest.json        **总表（harness 工作集）**：条目元数据 + usage + 活动日；进程内读写的唯一入口
 ├── MEMORY.md            派生索引：正式条目（confidence ≥ 阈值）；注入清单与之同源（renderManifestLine）
 ├── candidates.md        派生索引：候选区（confidence 0/1 = 待观察 / 待销毁），不注入
-├── <slug>.md            主题文件：frontmatter（confidence/status/subject/type/tags/updated[/pinned/remindAt]）+ 正文
-├── state.json           运行时状态：归纳游标 lastExtractedTurnId、活动日 activeDayCount/lastActiveDate、
-│                        usage[slug] = { uses, lastUsedAt, lastUsedDay, lastStepDay }
-├── audit.jsonl          追加式审计（write/merge/supersede/forget/use/pin/remind_due/agent_run/lru/error）
+├── <slug>.md            主题文件：frontmatter（confidence/status/subject/type/tags/updated[/pinned]）+ 正文
+├── state.json           旧版运行时状态（活动日/usage）——仅总表缺失时**一次性导入**，不再写入
+├── audit.jsonl          追加式审计（write/merge/supersede/forget/use/pin/agent_run/lru/inject/error）
+├── .memory.lock         写入互斥锁（跨进程；存在与否是瞬时的，不参与版本控制）
 ├── logs/yyyy/mm/dd.md   原始观察日志（`appendLog()` 有实现，当前无调用方 —— 见 docs/todo A4）
 └── legacy/              用户手写笔记（无 frontmatter，不进索引）
     └── archive/         **销毁**的条目（`lru_destroy_mode = "archive"` 时移入此处；不物理删除）
 ```
 
-- **索引是派生的**：`MEMORY.md` / `candidates.md` 由条目文件随时可重建（`rebuildIndex`），
+**总表与工作集**（v3 起，见 `docs/memory-algorithm.md` §3.4/§4）：
+
+```jsonc
+{ "version": 1, "updatedAt": "...", "activeDayCount": 42, "lastActiveDate": "2026-09-15",
+  "entries": [ /* 元数据，不含正文 */ ], "usage": { "<slug>": { "uses": 2, "lastUsedAt": "..." } } }
+```
+
+- 决策（可见性 / LRU / 召回 / 注入）只需要元数据 → 全部放总表，进程内作为**工作集**；
+  **正文只存在 `<slug>.md`**，仅"读全文"时按需读取（单条上限 64KB，超出截断并提示）。
+- 缺失/损坏时从主题文件**全量重建并写回**（自愈）；其它进程写入通过总表 mtime 检测重载。
+- 写操作（写入/遗忘/结算/钉住）在层目录上取 `.memory.lock` 串行执行；读路径不取锁。
+- **索引是派生的**：`MEMORY.md` / `candidates.md` 由工作集随时可重建（`rebuildIndex`），
   写入路径（`write`/`forget`/`setPinned`/`reconcile`）内部自动同步，调用方无需手动刷新。
 - **"待销毁"= `confidence: 0`**（写在条目 frontmatter 里，可 grep）；销毁期限见 `lru_destroy_after_days`。
+- 归纳游标**不再放在这里**：已改为按会话存放（`<sessionDir>/memory-cursor.json`），避免跨会话互相覆盖。
 - 生命周期细节（活动日时钟、窗口/容量、档位升降级）见 `plan/memory-heartbeat-design.md` §4。
 
 ### meta.json

@@ -12,11 +12,11 @@
 
 ```bash
 # GitHub Release 预编译包：含编译产物与依赖，免构建，装完即用
-npm install -g https://github.com/d8e-lab/deepseek-arch/releases/latest/download/deepseek-arch-2.0.0.tgz
+npm install -g https://github.com/d8e-lab/deepseek-arch/releases/latest/download/deepseek-arch-2.0.1.tgz
 ```
 
 > 本项目**未发布到 npm registry**（不要用 `npm install -g deepseek-arch`）；
-> 下方 AUR 包可能落后于最新 release（2.0.0 未同步）。
+> 下方 AUR 包可能落后于最新 release（2.0.0 / 2.0.1 未同步，AUR 仍为 1.5.3）。
 
 ### Arch Linux（AUR / 本地构建）
 
@@ -112,7 +112,7 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 - **API 请求监听**：`--monitor` + `api-monitor` 子命令，完整记录发给 API 的请求体，排查上下文丢失
 - **本地测试模式**：`--mock` 使用内置 MockProvider，无需 API key 即可体验
 - **Windows 支持**：Windows 自动使用内置 Edge，PowerShell 命令执行
-- **长期记忆**：后台归纳代理自动记住你的偏好/约定/边界（写走工具调用），新会话自动注入清单；**生命周期由 confidence 档位表达**（3/2 可见 → 1 待观察 → 0 待销毁 → 归档），按**活动日**老化（长时间不启动程序不会一次性清空），**闲置不致死**（只有记忆总量超限才淘汰）；`/memory` 查看与管理，`--no-memory` 一键关闭
+- **长期记忆**：后台归纳代理自动记住你的偏好/约定/边界（写走工具调用），新会话自动注入清单；**生命周期由 confidence 档位表达**（3/2 可见 → 1 待观察 → 0 待销毁 → 归档），按**活动日**老化（长时间不启动程序不会一次性清空），**闲置不致死**（只有记忆总量超限才淘汰）；升级/淘汰在会话内即时生效并告知模型；读取走内存工作集（不再每轮扫描整个记忆库）；`/memory` 查看与管理，`--no-memory` 一键关闭
 - **配置外置**：TOML 文件管理，支持文件间跳转引用
 - **安全隔离**：操作范围限于 home 目录和项目工作目录
 
@@ -168,7 +168,8 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 -r, --resume <id>     按 ID 或名称恢复会话
 -p, --prompt <content>
                       非交互单轮执行：跑完一轮把回复打印到 stdout 后退出（供脚本/心跳使用）
---workspace <dir>     指定工作区根目录（决定 `.deepseek-arch/` 与项目层记忆的落点；默认当前目录）
+--workspace <dir>     指定工作区根目录（决定 `.deepseek-arch/` 与项目层记忆的落点；默认当前目录；
+                      **`--prompt` 非交互模式必须显式指定**）
 --no-memory           完全关闭长期记忆：不注入、不归纳、剔除 memory_read/memory_write，也不创建记忆 runtime 文件
 --browser             显示浏览器窗口（默认 headless）
 --cdp <url>           连接宿主机浏览器（如 --cdp http://127.0.0.1:9222）
@@ -186,7 +187,8 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 
 > `--short` / `--normal` / `--detail` 互斥；展示模式仅影响终端展示，不改变发送给模型的完整上下文。
 > 长期记忆的存储布局与配置项见 `docs/storage.md`「记忆目录布局」与 `docs/config.md`「记忆配置」；
-> 设计依据（档位/活动日/窗口/容量淘汰）见 `plan/memory-heartbeat-design.md` §4。
+> **算法整体说明（档位状态机 / 活动日 / 注入 / 召回 / 后台归纳）见 `docs/memory-algorithm.md`**；
+> 设计沿革见 `plan/memory-heartbeat-design.md` §4 与决策记录 `plan/memory-v3-decisions.md`。
 > 新会话第一条用户消息自动作为会话标题（≤20 字），可用 `/resume` 列表或 `resume <title>` 按标题恢复。
 
 ## 配置
@@ -618,6 +620,26 @@ npm publish --access public
 ---
 
 ## 更新日志
+
+### v2.0.1 — 记忆机制的准确性与性能
+
+**🧠 记忆更准**
+- 升级/淘汰**即时生效**：刚被用到、达标的记忆立刻升级；已进入"待销毁"的记忆一旦再次被用到就回到观察区
+- 记忆进出可见清单时**主动告知模型**（新增/升级给简介，退出/删除给提示），不再拿过期清单当现状
+- 后台归纳的进度改为**按会话**记录：新开会话不再抹掉旧会话的进度，也不会重复归纳同一段对话
+
+**⚡ 记忆更快、更省**
+- 新增每层一份"总表"作为内存工作集：读取不再每轮扫描整个记忆库（此前每轮要读几百个文件）
+- 记忆条目超过 64KB 时截断返回并在界面提示（提醒把长内容放进普通文件）
+
+**🔒 安全与可靠性**
+- `memory_read` 只能读记忆目录内的文件（此前可读任意路径）
+- 多进程（TUI 与 `chat --prompt`）同时写记忆时加锁串行，避免互相覆盖
+- 修复：召回挑选失败时整份记忆清单消失；候选区出现已删除条目并被反复"提升"无效
+
+**⚠️ 变更**
+- **`chat --prompt` 现在必须搭配 `--workspace`**（非交互场景的工作区不再依赖当前目录）
+- 移除"到期提醒"（`remindAt`）：记忆不再携带定时提醒，暂缓事项按普通记忆记录
 
 ### v2.0.0 — 长期记忆 + 子代理生命周期
 

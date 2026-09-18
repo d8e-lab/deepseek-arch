@@ -33,8 +33,9 @@ deepseek-arch chat [options]
 Options:
   -r, --resume <id>   恢复既有会话（ID 或标题）
   -p, --prompt <content>
-                      非交互单轮执行：跑完一轮打印回复到 stdout 后退出（yolo，不进 TUI）
-  --workspace <dir>   指定工作区根目录（默认当前目录）
+                      非交互单轮执行：跑完一轮打印回复到 stdout 后退出（yolo，不进 TUI；
+                      **必须搭配 --workspace**）
+  --workspace <dir>   指定工作区根目录（默认当前目录；--prompt 时必填）
   --no-memory         完全关闭长期记忆：不注入、不归纳、并从工具集中剔除 memory_read/memory_write
                       （也不会创建任何记忆 runtime 文件）
   --yolo / --no-yolo  是否跳过工具确认（默认 yolo）
@@ -46,7 +47,7 @@ Options:
 #### 非交互模式（`--prompt`，供脚本与心跳使用）
 
 ```
-deepseek-arch chat --prompt "总结一下昨天的改动" [--workspace /path/to/repo] [--resume <id>] [--mock]
+deepseek-arch chat --prompt "总结一下昨天的改动" --workspace /path/to/repo [--resume <id>] [--mock]
 ```
 
 契约：
@@ -55,7 +56,7 @@ deepseek-arch chat --prompt "总结一下昨天的改动" [--workspace /path/to/
 |:--|:--|
 | stdout | **仅最终回复**（一行结尾），便于管道处理 |
 | stderr | 进度（`[tool] <name>`）与错误（`[error] ...`） |
-| 退出码 | `0` 成功；`1` 会话不存在 / `--workspace` 目录不可用 / 本轮失败 |
+| 退出码 | `0` 成功；`1` 缺 `--workspace` / 会话不存在 / `--workspace` 目录不可用 / 本轮失败 |
 | 工具确认 | 不注册确认回调 → 需要确认的工具**直接执行**（即 yolo） |
 | 落盘 | 与 TUI 一致：会话、turn 正常写入 `~/.deepseek-arch/sessions/` |
 | 空会话 | 本轮失败且未产生轮次时丢弃刚创建的空会话 |
@@ -65,6 +66,9 @@ deepseek-arch chat --prompt "总结一下昨天的改动" [--workspace /path/to/
 覆盖工作区根目录，影响：工具的 cwd、`{workspace}/.deepseek-arch/` runtime 目录（plan/memory/api-requests）、
 所有走 `DEEPSEEK_ARCH_SESSION_CWD` 的路径解析。
 **必须在进程启动早期生效**（`SessionManager` 构造时会把该值锁定为会话 cwd）。
+
+> `--prompt` **强制要求** `--workspace`：非交互调用（cron / 心跳 / 脚本）的当前目录不可控，
+> 缺省会让项目层记忆与 runtime 目录落到错误的位置。缺失时直接报错退出（退出码 1）。
 
 启动全屏对话界面，包含：
 

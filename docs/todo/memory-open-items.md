@@ -7,6 +7,20 @@
 
 ---
 
+## v3 已解决（2026-09-15，见 `plan/memory-v3-decisions.md`）
+
+下列条目在 Memory v3 改造中已落地，不再是挂起项：
+
+| 事项 | 结论 |
+|:--|:--|
+| `--prompt` 契约（A6 的一部分） | `--prompt` 现**强制要求** `--workspace`（退出码 1）；`--json`/`--timeout` 仍未做 |
+| `/memory on` 丢失配置（A5 的一部分） | 与 CLI 启动共用 `readMemorySessionConfig`，不再回落默认值 |
+| 归纳游标跨会话互相覆盖 | 游标改为按会话存放（`<sessionDir>/memory-cursor.json`） |
+| `remindAt` / 到期提醒（C3） | **功能整体删除**（决策 D1）：不再有定时提醒与 `<memory-due>` 注入块 |
+| 每轮全量扫描 | 新增每层 `manifest.json` 总表作为内存工作集；读路径不再扫描条目文件 |
+| A7 跨层去重（`seen`/`surfaced` 按 slug） | **仍未做**：`seen` 仍按 slug 全局去重（清单行不带层信息） |
+| A9 纯时间兜底归档 | **仍未做**：自动归档依旧只在容量超限时发生 |
+
 ## A 组：评审提出但暂缓的澄清项
 
 | ID | 事项 | 现状（已实现） | 挂起原因 | 落地位置 / 工作量 |
@@ -40,7 +54,7 @@
 |:--|:--|:--|
 | **C1** | 心跳载体契约（`--session`/`--timeout`/`--json`/退出码） | 见 A6；心跳的 systemd/cron 示例依赖它 |
 | **C2** | 心跳形态：cron/systemd 调 `chat --prompt`（主）+ TUI 内定时器（备） | 用户已定方向，细节（间隔、与用户输入冲突、token 预算）待定 |
-| **C3** | 心跳与 memory 的配合：`remindAt` 到期在无人值守时如何呈现 | 当前到期提醒只在"用户发消息那一轮"注入；心跳可承担"主动唤起" |
+| **C3** | ~~心跳与 memory 的配合：`remindAt` 到期在无人值守时如何呈现~~ | **已作废（2026-09-14）**：`remindAt`/到期提醒按 v3 决策 D1 整体删除（见 `plan/memory-v3-decisions.md`） |
 
 ---
 

@@ -7,6 +7,8 @@
 >   并删除了 reviewer（censor agent）；R25–R30 补齐了「过时记忆如何淘汰」「候选池如何升级」「活动日时钟 + 窗口」，并在 R30 把生命周期**统一到 confidence 档位**（0 = 待销毁）、R31 明确**闲置不致死**（0 只由容量压力产生）（§4.1、§4.4）。
 >
 > **配套文件**
+> - **评审后决策（v3 起点，实现以它为准）**：`plan/memory-v3-decisions.md`（记录相对本文的改变与未决项；**冲突处以 v3 为准**，例如已删除的 `remindAt`/到期提醒）
+> - 整体算法说明（技术报告）：`docs/memory-algorithm.md`
 > - 讲解版（用户视角）：`plan/memory-design-explained.md`
 > - Claude Code 记忆机制调研（参照对象，含 `文件:行号` 证据）：`plan/claude-code-memory-reference.md`
 > - 未做项 / 挂起项：`docs/todo/memory-open-items.md`
