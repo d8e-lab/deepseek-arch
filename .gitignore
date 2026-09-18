@@ -38,6 +38,9 @@ tests/
 demo_test/
 .agent-file-state.json
 
+# Test sandbox config (DEEPSEEK_ARCH_CONFIG_DIR target; contains api keys & sessions)
+.config-tmp/
+
 # Temp files
 tmp/
 
