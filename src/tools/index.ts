@@ -7,7 +7,7 @@
  *   3. 无需修改其他文件
  *
  * getAllTools() 支持过滤：主代理传 { includeSubagent: true }，
- * 子代理传 {} 或省略（不含 spawn/wait/list_subagents/skill/save_plan）。
+ * 子代理传 {} 或省略（不含 spawn/wait/list_subagents/skill）。
  */
 
 import type { Tool } from './types.js';
@@ -19,7 +19,6 @@ export { writeFileTool } from './write-file.js';
 export { editFileTool } from './edit-file.js';
 export { skillTool, setSkillForkRunner } from './skill.js';
 export type { SkillForkRunner } from './skill.js';
-export { savePlanTool } from './save-plan.js';
 export { browserNavigateTool } from './browser-navigate.js';
 export { browserSnapshotTool } from './browser-snapshot.js';
 export { browserClickTool } from './browser-click.js';
@@ -55,7 +54,6 @@ import { searchContentTool } from './search-content.js';
 import { writeFileTool } from './write-file.js';
 import { editFileTool } from './edit-file.js';
 import { skillTool } from './skill.js';
-import { savePlanTool } from './save-plan.js';
 import { browserNavigateTool } from './browser-navigate.js';
 import { browserSnapshotTool } from './browser-snapshot.js';
 import { browserClickTool } from './browser-click.js';
@@ -79,7 +77,7 @@ import { tuiSessionReadTool } from './tui-session-read.js';
 import { tuiSessionCaptureTool } from './tui-session-capture.js';
 import { tuiSessionStopTool, tuiSessionListTool } from './tui-session-stop.js';
 
-/** 所有工具（含 spawn/wait/list/plan），主代理使用 */
+/** 所有工具（含 spawn/wait/list），主代理使用 */
 const ALL_TOOLS: Tool[] = [
 	shellTool,
 	readFileTool,
@@ -87,7 +85,6 @@ const ALL_TOOLS: Tool[] = [
 	writeFileTool,
 	editFileTool,
 	skillTool,
-	savePlanTool,
 	browserNavigateTool,
 	browserSnapshotTool,
 	browserClickTool,
@@ -117,7 +114,7 @@ const SELF_INTERACTION_TOOLS: Tool[] = [
 	tuiSessionListTool,
 ];
 
-/** 子代理工具集（不含 spawn/wait/list/plan/save_plan） */
+/** 子代理工具集（不含 spawn/wait/list） */
 const SUBAGENT_TOOLS: Tool[] = [
 	shellTool,
 	readFileTool,
@@ -139,8 +136,8 @@ export interface GetToolsOptions {
 }
 
 export function getAllTools(opts?: GetToolsOptions): Tool[] {
-	// includeSubagent=true → 全量工具集（主代理使用，含 plan/subagent_spawn 等）
-	// includeSubagent=false/undefined → 子代理工具集（不含 spawn/wait/list/plan）
+	// includeSubagent=true → 全量工具集（主代理使用，含 subagent_spawn 等）
+	// includeSubagent=false/undefined → 子代理工具集（不含 spawn/wait/list）
 	const tools = opts?.includeSubagent ? [...ALL_TOOLS] : [...SUBAGENT_TOOLS];
 	if (opts?.selfInteraction) {
 		tools.push(...SELF_INTERACTION_TOOLS);

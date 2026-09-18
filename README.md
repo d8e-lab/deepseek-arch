@@ -359,7 +359,6 @@ src/
 │   ├── write-file.ts       # 文件写入工具
 │   ├── edit-file.ts        # 精确编辑工具
 │   ├── skill.ts            # Skill 调用工具
-│   ├── save-plan.ts        # 计划保存工具
 │   ├── browser-*.ts        # 浏览器工具（navigate/snapshot/click/type/press-key/scroll/back）
 │   ├── browser-state.ts    # Playwright 浏览器单例管理
 │   ├── subagent-spawn.ts   # 子代理生成工具
@@ -419,8 +418,7 @@ tests/
 | 内容搜索 | `search_content` | 多关键词 OR 搜索，上下文行显示，glob 过滤 |
 | 写入文件 | `write_file` | 创建/覆盖文件，diff 预览后确认，原子写入 |
 | 精确编辑 | `edit_file` | 精确字符串替换（不用行号），唯一性检查，diff 预览后确认 |
-| 技能调用 | `skill` | 调用任意已发现技能（plan/release/research），支持 requires-confirm / fork 子代理 |
-| 保存计划 | `save_plan` | 规划文档写入 `{workspace}/.deepseek-arch/plan/<name>.md`（runtime 目录，不入版本控制） |
+| 技能调用 | `skill` | 调用任意已发现技能（release/research），支持 requires-confirm / fork 子代理 |
 | 查看轨迹 | `subagent_trace` | 查看子代理执行过的工具与参数（不含思维链与工具结果） |
 | 导航 | `browser_navigate` | 打开指定 URL，自动返回页面快照 |
 | 后退 | `browser_navigate_back` | 浏览器后退，自动返回页面快照 |
@@ -612,7 +610,6 @@ npm publish --access public
 
 | 技能 | 文件 | 说明 |
 |------|------|------|
-| plan | `skill/plan.skill.md` | 编码任务规划与自检框架（复杂度评估 → 拆解 → 确认 → 执行） |
 | release | `skill/release.skill.md` | 版本发布全流程 |
 | research | `skill/research.skill.md` | 独立技术调研（隔离子代理执行，不占用主对话上下文） |
 | docs | `docs.skill.md` | 文档维护规范（条件激活：触碰 docs/ 路径时出现） |
@@ -620,6 +617,16 @@ npm publish --access public
 ---
 
 ## 更新日志
+
+### v2.0.2 — shell 稳定性与移除规划能力
+
+**🖥️ shell 更稳**
+- 修复：命令留下后台进程时 shell 调用**永久挂起**；现在命令一结束就返回，超时/中断会清理**整个进程组**，不留孤儿进程
+- `!命令` 手动执行模式同步修复
+- 移除"交互式命令"黑名单：`less`/`more`/`top`/`git log | less`/`ssh`/`gdb` 等不再被误拦
+
+**🧠 破坏性变更**
+- 删除 `plan` skill 与 `save_plan` 工具；对话压缩不再重注入历史计划（`[Compact Plan]` 取消）
 
 ### v2.0.1 — 记忆机制的准确性与性能
 

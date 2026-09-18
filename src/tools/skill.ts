@@ -5,8 +5,7 @@
  * 调用本工具按名称加载并执行。支持 inline（默认，内容注入当前对话）
  * 与 fork（frontmatter context: fork，内容作为子代理任务执行）。
  *
- * 替换旧的硬编码 plan_on 工具：新增 skill 只需放文件 + 写 frontmatter，
- * 无需修改代码。
+ * 新增 skill 只需放文件 + 写 frontmatter，无需修改代码。
  */
 
 import { loadSkills, findSkill, getSkillContent } from '../core/skill.js';
@@ -26,8 +25,8 @@ export const skillTool: Tool = {
 	description:
 		'调用一个 skill（技能）。可用 skill 列表与各自适用场景见系统提示中的 <skill_listing>。' +
 		'当用户请求与某个 skill 的适用场景匹配时，必须先调用本工具再继续生成其他内容。' +
-		'示例: {"skill": "plan", "args": "重构 session 模块"}、{"skill": "release", "args": "1.4.0"}。' +
-		'若用户提到 "/plan" 等斜杠命令，即指同名 skill，用本工具调用。',
+		'示例: {"skill": "research", "args": "对比两个方案"}、{"skill": "release", "args": "1.4.0"}。' +
+		'若用户提到 "/release" 等斜杠命令，即指同名 skill，用本工具调用。',
 	parameters: {
 		type: 'object',
 		properties: {

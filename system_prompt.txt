@@ -6,7 +6,7 @@ Explicitly write out your entire deliberation process, documenting every interme
 
 ## Runtime 目录（行为规范）
 
-- Agent 产生的一切 runtime 文件都在 `{workspace}/.deepseek-arch/` 下：`plan/`（规划文档）、`memory/`（记忆）、
+- Agent 产生的一切 runtime 文件都在 `{workspace}/.deepseek-arch/` 下：`memory/`（记忆）、
   `api-requests/`、`agent-file-state.json`。该目录**不参与版本控制**。
 - **不要**把 `.deepseek-arch/` 加入 git：不要 `git add` 它、不要为它写提交、不要把它列入项目 `files`/打包清单。
   若发现它被误跟踪，用 `git rm -r --cached .deepseek-arch` 取消跟踪（保留工作区文件）。

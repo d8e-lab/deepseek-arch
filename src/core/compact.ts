@@ -18,7 +18,6 @@ import type { ModelProvider } from './model-provider.js';
 import type { TurnRecord, Message } from '../types/index.js';
 import type { ToolCallRecord } from '../tools/types.js';
 import { turnUserContent, turnAssistantContent } from '../utils/turn-utils.js';
-import { getPlanDir } from './workspace-paths.js';
 
 // ─── 常量（后续可配置化）───────────────────────────
 
@@ -34,21 +33,13 @@ export const MAX_FILE_BYTES = 256 * 1024;
 export const SKILL_MAX_TOKENS = 5_000;
 /** skills 总预算（tokens） */
 export const SKILLS_TOKEN_BUDGET = 25_000;
-/** plan 文件截断上限（tokens） */
-export const PLAN_MAX_TOKENS = 5_000;
 
 /** 排除路径前缀：runtime 目录（plan/memory 等）不参与文件重注入 */
 const EXCLUDED_PREFIXES = ['.deepseek-arch/', 'memory/', '.memory/'];
 
-/** 工具名 → skill 文件映射（旧版兼容：plan_on 工具） */
-const SKILL_MAP: Record<string, string> = {
-	plan_on: 'plan.skill.md',
-};
-
 /**
  * 从工具调用记录解析 skill 文件名。
- * 新机制：skill 工具调用，skill 名在 arguments.skill（可能带别名/前导斜杠）。
- * 旧机制：硬编码工具名映射（SKILL_MAP 兼容）。
+ * skill 工具调用，skill 名在 arguments.skill（可能带别名/前导斜杠）。
  */
 function skillFileNameFromCall(tcr: ToolCallRecord): string | undefined {
 	if (tcr.name === 'skill') {
@@ -58,7 +49,7 @@ function skillFileNameFromCall(tcr: ToolCallRecord): string | undefined {
 			return base.endsWith('.skill.md') ? base : `${base}.skill.md`;
 		}
 	}
-	return SKILL_MAP[tcr.name];
+	return undefined;
 }
 
 // ─── 工具函数 ──────────────────────────────────────
@@ -180,7 +171,7 @@ export async function buildFileRestoreBlock(
 
 /** 会话中调用过的 skill 记录 */
 export interface SkillRecord {
-	/** skill 文件名（如 plan.skill.md） */
+	/** skill 文件名（如 release.skill.md） */
 	name: string;
 	/** 最近调用时间戳 */
 	lastCallMs: number;
@@ -242,53 +233,6 @@ export async function buildSkillsBlock(
 		if (total + tokens > SKILLS_TOKEN_BUDGET) break;
 		parts.push(`[Skill: ${s.name}]\n${truncated}`);
 		total += tokens;
-	}
-	return { text: parts.join('\n\n'), tokenCount: total };
-}
-
-// ─── Plan 文件提取 ─────────────────────────────────
-
-/** 从历史轮次提取 save_plan 调用保存的 plan 文件名（按最近调用排序，去重） */
-export function extractPlanNames(turns: TurnRecord[]): string[] {
-	const names: string[] = [];
-	const seen = new Set<string>();
-	// 从最新轮次到最旧，轮内从后到前（后调用 = 更新）
-	for (let i = turns.length - 1; i >= 0; i--) {
-		const tcs = turns[i].tool_calls ?? [];
-		for (let j = tcs.length - 1; j >= 0; j--) {
-			const tcr = tcs[j];
-			if (tcr.name !== 'save_plan') continue;
-			const name = String(tcr.arguments?.plan_name ?? '');
-			if (!name || seen.has(name)) continue;
-			seen.add(name);
-			names.push(name);
-		}
-	}
-	return names;
-}
-
-/** 构建 plan 重注入块（读 {workspace}/.deepseek-arch/plan/<name>.md 最新内容，截断 PLAN_MAX_TOKENS） */
-export async function buildPlanBlock(
-	turns: TurnRecord[],
-	sessionCwd: string,
-): Promise<{ text: string; tokenCount: number }> {
-	const names = extractPlanNames(turns);
-	const planDir = getPlanDir(sessionCwd);
-	const parts: string[] = [];
-	let total = 0;
-	for (const name of names) {
-		const safe = name.replace(/[^a-zA-Z0-9_-]/g, '_');
-		const filePath = join(planDir, `${safe}.md`);
-		try {
-			const content = await readFile(filePath, 'utf-8');
-			const truncated = truncateTokens(content, PLAN_MAX_TOKENS);
-			const tokens = estimateTokens(truncated);
-			if (total + tokens > PLAN_MAX_TOKENS) break;
-			parts.push(`[Current Plan: ${name}]\n${truncated}`);
-			total += tokens;
-		} catch {
-			/* plan 文件不存在 → 跳过 */
-		}
 	}
 	return { text: parts.join('\n\n'), tokenCount: total };
 }
@@ -362,7 +306,6 @@ export async function generateSummary(provider: ModelProvider, turns: TurnRecord
 export function buildCompactMessages(
 	summary: string,
 	restoreText: string,
-	planText: string,
 	skillsText: string,
 ): Message[] {
 	const messages: Message[] = [
@@ -370,9 +313,6 @@ export function buildCompactMessages(
 	];
 	if (restoreText) {
 		messages.push({ role: 'user', content: `[Compact File Restore Block]\n${restoreText}` });
-	}
-	if (planText) {
-		messages.push({ role: 'user', content: `[Compact Plan]\n${planText}` });
 	}
 	if (skillsText) {
 		messages.push({ role: 'user', content: `[Compact Skills]\n${skillsText}` });

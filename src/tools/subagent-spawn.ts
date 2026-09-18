@@ -1,7 +1,7 @@
 /**
  * subagent_spawn 工具 — 主代理委派子任务给独立子代理
  *
- * 子代理有独立消息上下文和受限工具集（无 spawn/wait/list_subagents/plan/save_plan）。
+ * 子代理有独立消息上下文和受限工具集（无 spawn/wait/list_subagents/plan）。
  * Agent Loop 会拦截此工具做特殊处理（非阻塞启动 + 状态追踪）。
  * 此文件中的 execute 仅为 fallback（直接调用时阻塞等待）。
  */
@@ -21,7 +21,7 @@ export const subagentSpawnTool: Tool = {
 	description:
 		'Spawn a subagent to independently execute a sub-task. ' +
 		'The subagent has shell, file (read/write/edit/search), and browser tools. ' +
-		'It CANNOT spawn sub-subagents or use plan/save_plan. ' +
+		'It CANNOT spawn sub-subagents or use plan. ' +
 		'Use this to parallelize independent work: spawn multiple subagents in one round. ' +
 		'Each subagent needs a unique subagent_name for later tracking (via wait/list_subagents). ' +
 		'Be specific about the task and expected output format — the subagent works independently. ' +

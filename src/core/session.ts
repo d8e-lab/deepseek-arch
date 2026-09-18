@@ -47,7 +47,6 @@ import {
 	buildCompactMessages,
 	buildCompactTurn,
 	buildFileRestoreBlock,
-	buildPlanBlock,
 	buildSkillsBlock,
 	estimateTokens,
 	extractReadFiles,
@@ -65,7 +64,7 @@ You are running as a subagent delegated by a master agent. Key constraints:
 - You have access to shell, file, and browser tools.
 - Do NOT ask the user questions — there is no interactive user in this context.
 - Do NOT spawn sub-subagents, use wait, or list_subagents (these tools are not available to you).
-- Do NOT use the skill tool or save_plan (not available to subagents).
+- Do NOT use the skill tool (not available to subagents).
 - If you cannot complete the task, explain why and return what you have.
 - Keep output focused: the master agent needs your result, not a conversation.
 - You may receive follow-up instructions after reporting a result. When given a follow-up,
@@ -557,7 +556,7 @@ export class SessionManager {
 	 * 执行上下文压缩（compact）。
 	 *
 	 * 流程：等待 subagent 结束 → 生成结构化摘要（独立模型调用）→
-	 * 构建文件/plan/skills 重注入块 → 开启新分代写入摘要轮 → 更新内存状态。
+	 * 构建文件/skills 重注入块 → 开启新分代写入摘要轮 → 更新内存状态。
 	 *
 	 * compact 后 master agent 请求上下文 = 摘要 + 重注入块 + 后续轮次；
 	 * 磁盘分代文件保留全部历史（用户视角可回查）。
@@ -587,14 +586,13 @@ export class SessionManager {
 		// Phase 2：生成结构化摘要（独立非流式调用，失败有 fallback）
 		const summary = await generateSummary(this.provider, turns);
 
-		// Phase 3：构建重注入块（文件 / plan / skills）
+		// Phase 3：构建重注入块（文件 / skills）
 		const readFiles = extractReadFiles(turns);
 		const restore = await buildFileRestoreBlock(readFiles, cwd);
-		const plan = await buildPlanBlock(turns, cwd);
 		const skills = await buildSkillsBlock(turns);
 
 		// 组装消息序列并开启新分代
-		const messages = buildCompactMessages(summary, restore.text, plan.text, skills.text);
+		const messages = buildCompactMessages(summary, restore.text, skills.text);
 		const compactTurn = buildCompactTurn(summary, messages);
 		const gen = await this.storage.newGeneration(this.session.meta.id, compactTurn);
 

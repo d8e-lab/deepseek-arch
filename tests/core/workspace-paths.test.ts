@@ -7,7 +7,6 @@ import {
 	RUNTIME_DIR_NAME,
 	getSessionCwd,
 	getRuntimeDir,
-	getPlanDir,
 	getMemoryDir,
 	getApiRequestsDir,
 	getFileStatePath,
@@ -34,7 +33,6 @@ describe('workspace-paths', () => {
 	it('runtime 目录布局统一在 {workspace}/.deepseek-arch/ 下', () => {
 		expect(RUNTIME_DIR_NAME).toBe('.deepseek-arch');
 		expect(getRuntimeDir()).toBe(join('/tmp/ws-test', '.deepseek-arch'));
-		expect(getPlanDir()).toBe(join('/tmp/ws-test', '.deepseek-arch', 'plan'));
 		expect(getMemoryDir()).toBe(join('/tmp/ws-test', '.deepseek-arch', 'memory'));
 		expect(getApiRequestsDir()).toBe(join('/tmp/ws-test', '.deepseek-arch', 'api-requests'));
 		expect(getFileStatePath()).toBe(join('/tmp/ws-test', '.deepseek-arch', 'agent-file-state.json'));
@@ -42,7 +40,6 @@ describe('workspace-paths', () => {
 
 	it('可显式传入 workspace（不读环境变量）', () => {
 		delete process.env.DEEPSEEK_ARCH_SESSION_CWD;
-		expect(getPlanDir('/tmp/explicit')).toBe(join('/tmp/explicit', '.deepseek-arch', 'plan'));
 		expect(getMemoryDir('/tmp/explicit')).toBe(join('/tmp/explicit', '.deepseek-arch', 'memory'));
 	});
 });

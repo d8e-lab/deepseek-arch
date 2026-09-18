@@ -4,7 +4,7 @@
  * 覆盖：
  *   - extractReadFiles：提取/去重/排除 plan·memory/按最后访问时间排序
  *   - buildFileRestoreBlock：大小分流（小文件全文 / 大文件引用）、前 5 上限、预算截断
- *   - extractSkills / extractPlanNames：从 tool_calls 提取
+ *   - extractSkills：从 tool_calls 提取
  *   - buildCompactMessages：组装消息序列
  *   - generateSummary：mock provider 摘要生成 + fallback
  */
@@ -18,7 +18,6 @@ import {
   extractReadFiles,
   buildFileRestoreBlock,
   extractSkills,
-  extractPlanNames,
   buildCompactMessages,
   generateSummary,
   estimateTokens,
@@ -200,20 +199,10 @@ describe('buildFileRestoreBlock', () => {
   });
 });
 
-describe('extractSkills / extractPlanNames', () => {
-  it('extractSkills 提取旧版 plan_on 调用并去重', () => {
-    const turns = [
-      makeTurn('q1', 'a1', [{ name: 'plan_on', args: {} }], '2026-01-01T00:00:00Z'),
-      makeTurn('q2', 'a2', [{ name: 'execute_command', args: {} }], '2026-01-02T00:00:00Z'),
-    ];
-    const skills = extractSkills(turns);
-    expect(skills).toHaveLength(1);
-    expect(skills[0].name).toBe('plan.skill.md');
-  });
-
+describe('extractSkills', () => {
   it('extractSkills 识别新版 skill 工具调用（读 arguments.skill）', () => {
     const turns = [
-      makeTurn('q1', 'a1', [{ name: 'skill', args: { skill: 'plan' } }], '2026-01-01T00:00:00Z'),
+      makeTurn('q1', 'a1', [{ name: 'skill', args: { skill: 'research' } }], '2026-01-01T00:00:00Z'),
       makeTurn('q2', 'a2', [
         { name: 'skill', args: { skill: 'release', args: '1.4.0' } },
         { name: 'read_file', args: { path: 'x.ts' } },
@@ -222,46 +211,33 @@ describe('extractSkills / extractPlanNames', () => {
     const skills = extractSkills(turns);
     expect(skills).toHaveLength(2);
     expect(skills[0].name).toBe('release.skill.md'); // 最近调用优先
-    expect(skills[1].name).toBe('plan.skill.md');
+    expect(skills[1].name).toBe('research.skill.md');
   });
 
   it('extractSkills 支持 skill 带前导斜杠与已带 .skill.md 后缀', () => {
     const turns = [
-      makeTurn('q1', 'a1', [{ name: 'skill', args: { skill: '/plan' } }], '2026-01-01T00:00:00Z'),
+      makeTurn('q1', 'a1', [{ name: 'skill', args: { skill: '/research' } }], '2026-01-01T00:00:00Z'),
       makeTurn('q2', 'a2', [{ name: 'skill', args: { skill: 'release.skill.md' } }], '2026-01-02T00:00:00Z'),
     ];
     const skills = extractSkills(turns);
-    expect(skills.map((s) => s.name).sort()).toEqual(['plan.skill.md', 'release.skill.md']);
-  });
-
-  it('extractPlanNames 提取 save_plan 文件名（从新到旧去重）', () => {
-    const turns = [
-      makeTurn('q1', 'a1', [{ name: 'save_plan', args: { plan_name: 'alpha' } }], '2026-01-01T00:00:00Z'),
-      makeTurn('q2', 'a2', [
-        { name: 'save_plan', args: { plan_name: 'alpha' } },
-        { name: 'save_plan', args: { plan_name: 'beta' } },
-      ], '2026-01-02T00:00:00Z'),
-    ];
-    const names = extractPlanNames(turns);
-    expect(names).toEqual(['beta', 'alpha']);
+    expect(skills.map((s) => s.name).sort()).toEqual(['release.skill.md', 'research.skill.md']);
   });
 });
 
 describe('buildCompactMessages', () => {
-  it('组装 [摘要 + 文件重注入 + plan + skills] 消息序列', () => {
-    const messages = buildCompactMessages('摘要内容', '文件块', '计划块', '技能块');
-    expect(messages).toHaveLength(4);
+  it('组装 [摘要 + 文件重注入 + skills] 消息序列', () => {
+    const messages = buildCompactMessages('摘要内容', '文件块', '技能块');
+    expect(messages).toHaveLength(3);
     expect(messages[0]).toEqual({
       role: 'user',
       content: '[Compacted Context Summary]\n摘要内容',
     });
     expect(messages[1].content).toContain('[Compact File Restore Block]');
-    expect(messages[2].content).toContain('[Compact Plan]');
-    expect(messages[3].content).toContain('[Compact Skills]');
+    expect(messages[2].content).toContain('[Compact Skills]');
   });
 
   it('空重注入块不生成对应消息', () => {
-    const messages = buildCompactMessages('摘要', '', '', '');
+    const messages = buildCompactMessages('摘要', '', '');
     expect(messages).toHaveLength(1);
   });
 });

@@ -5,7 +5,6 @@
  * 该目录不参与版本控制（见仓库根 .gitignore）：
  *
  *   {workspace}/.deepseek-arch/
- *   ├── plan/                  规划文档（save_plan 写入；compact 重注入读取）
  *   ├── memory/                项目层记忆（全局层在 ~/.deepseek-arch/memory/）
  *   ├── api-requests/          API 镜像落盘（api-monitor 调试用）
  *   └── agent-file-state.json  文件改动标记（file-state）
@@ -29,11 +28,6 @@ export function getSessionCwd(): string {
 /** `{workspace}/.deepseek-arch` */
 export function getRuntimeDir(sessionCwd: string = getSessionCwd()): string {
 	return join(sessionCwd, RUNTIME_DIR_NAME);
-}
-
-/** `{workspace}/.deepseek-arch/plan`（save_plan 写入 / compact 读取） */
-export function getPlanDir(sessionCwd: string = getSessionCwd()): string {
-	return join(getRuntimeDir(sessionCwd), 'plan');
 }
 
 /** `{workspace}/.deepseek-arch/memory`（项目层记忆；全局层为 `~/.deepseek-arch/memory`） */

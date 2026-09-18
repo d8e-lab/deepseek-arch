@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *   - parseSkillFrontmatter：正常/缺失/降级/数组字段/特殊字符/requires-confirm
- *   - loadSkills：从项目 skill/ 目录加载真实 skill（plan/release）
+ *   - loadSkills：从项目 skill/ 目录加载真实 skill（release/research）
  *   - buildSkillListing：预算内完整、超预算截断、极端只剩名字
  *   - findSkill：精确/别名/前导斜杠/大小写
  *   - getSkillContent：剥离 frontmatter、$ARGUMENTS 与 ${SKILL_DIR} 替换
@@ -142,7 +142,6 @@ when_to_use: 用户自定义发版流程时
 		const skills = await loadSkillsFromDirs(tmpDir, getProjectSkillDir());
 		const names = skills.map((s) => s.name);
 		expect(names).toContain('custom'); // 用户自定义
-		expect(names).toContain('plan'); // 项目自带
 		expect(names).toContain('release');
 		expect(names).toContain('research'); // fork 示例
 	});
@@ -157,10 +156,10 @@ when_to_use: 用户自定义发版流程时
 
 	it('项目 skill frontmatter 解析完整', async () => {
 		const skills = await loadSkillsFromDirs(tmpDir, getProjectSkillDir());
-		const plan = skills.find((s) => s.name === 'plan' && s.source === 'project');
-		expect(plan).toBeDefined();
-		expect(plan!.whenToUse).toBeDefined();
-		expect(plan!.context).toBe('inline');
+		const release = skills.find((s) => s.name === 'release' && s.source === 'project');
+		expect(release).toBeDefined();
+		expect(release!.whenToUse).toBeDefined();
+		expect(release!.context).toBe('inline');
 		// fork 示例：context 解析为 fork
 		const research = skills.find((s) => s.name === 'research');
 		expect(research).toBeDefined();
