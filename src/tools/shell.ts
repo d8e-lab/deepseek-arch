@@ -12,20 +12,63 @@
  *   4. stdin → /dev/null（不支持交互式命令）
  *   5. stdout/stderr 各截断至最后 8192 字节
  *   6. 返回退出码 + killed 标记
+ *   7. 命令自成进程组：超时/中止时杀掉整组，避免后台子进程逃逸
+ *   8. 命令结束后仍有子进程占住管道时，按 graceMs 兜底收尾（不永久挂起）
+ *
+ * 进程组与收尾语义（R-fix）：
+ *   `spawn({ timeout })` 单独使用不可靠——父 shell 退出后它已不存在，
+ *   到点 kill 打空、SIGKILL 升级被取消，而 `close` 要等所有子进程关闭
+ *   继承来的 stdout/stderr 管道才会触发，于是工具调用会永久挂起。
+ *   因此这里改为：detached 建组 + 自己的超时定时器 + 组级 kill +
+ *   exit 后的管道排空兜底。
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { resolve, relative } from 'node:path';
 import type { Tool, ToolResult } from './types.js';
-import { isInteractiveCommand } from './utils.js';
 
 /** 单侧输出截断字节数 */
 const TRUNCATE_BYTES = 8192;
 /** 命令超时 (10 分钟) */
 const CMD_TIMEOUT_MS = 10 * 60 * 1000;
+/** SIGTERM → SIGKILL 宽限期 */
+export const KILL_GRACE_MS = 3000;
+/** 命令已退出、但仍有子进程占住管道时的排水兜底时长 */
+export const PIPE_DRAIN_GRACE_MS = 3000;
 
 const IS_WINDOWS = process.platform === 'win32';
+
+/**
+ * 杀掉整棵进程树。
+ * POSIX 用负 PID 打整个进程组（命令已 detached 成组长）；Windows 用 taskkill /T。
+ * 从不抛错：进程可能已退出（ESRCH），或组已不存在。
+ * @param childId 子进程 pid（即进程组 id）
+ * @param signal  POSIX 信号，默认 SIGKILL
+ */
+export function killProcessGroup(childId: number | undefined, signal: NodeJS.Signals = 'SIGKILL'): void {
+	if (childId === undefined) return;
+	if (IS_WINDOWS) {
+		try {
+			execFileSync('taskkill', ['/pid', String(childId), '/T', '/F'], { stdio: 'ignore' });
+		} catch { /* 进程树已退出 */ }
+		return;
+	}
+	try {
+		process.kill(-childId, signal);
+	} catch { /* ESRCH：组已不存在 */ }
+}
+
+/**
+ * 让 spawn 返回的 child.kill() 也作用于整个进程组，保留 Node 内建
+ * AbortSignal 支持（它内部只对直接子进程发信号）。
+ * @param child  spawn 返回的子进程
+ * @param signal 要转发的信号
+ */
+export function killTree(child: { pid?: number | undefined; kill: (signal?: NodeJS.Signals) => boolean }, signal?: NodeJS.Signals): boolean {
+	killProcessGroup(child.pid, signal ?? 'SIGKILL');
+	return true;
+}
 
 /**
  * Windows PowerShell 编码前缀：
@@ -108,12 +151,6 @@ export const shellTool: Tool = {
 			return { content: '', error: 'sudo is forbidden' };
 		}
 
-		// ── 交互式命令禁止 ──────────────────────────
-		const interactiveBlocked = isInteractiveCommand(command);
-		if (interactiveBlocked) {
-			return { content: '', error: interactiveBlocked };
-		}
-
 		// ── 工作目录校验 ──────────────────────────
 		const sessionCwd = process.env.DEEPSEEK_ARCH_SESSION_CWD ?? process.cwd();
 		let workDir = sessionCwd;
@@ -143,14 +180,43 @@ export const shellTool: Tool = {
 
 		return new Promise((resolveResult, reject) => {
 			let settled = false;
+			// detached：命令自成进程组（组长），后续可用 kill(-pid) 清掉整棵树。
 			const child = spawn(bin, args, {
 				cwd: workDir,
-				timeout: CMD_TIMEOUT_MS,
+				detached: !IS_WINDOWS,
 				stdio: ['pipe', 'pipe', 'pipe'],
 			});
+			// Node 内建的 timeout/AbortSignal 只对直接子进程发信号；这里改写成组级。
+			child.kill = (signal?: NodeJS.Signals): boolean => killTree(child, signal);
 
 			// 立即关闭 stdin
 			child.stdin?.end();
+
+			/** 命令退出后的排水兜底定时器 */
+			let drainTimer: ReturnType<typeof setTimeout> | null = null;
+			/** 超时 / 中止的终止流程是否已启动 */
+			let terminating = false;
+
+			/**
+			 * 终止整棵进程树：先 SIGTERM，宽限期后升级 SIGKILL。
+			 * 幂等——超时与中止同时发生也只会走一遍。
+			 */
+			const terminateTree = (): void => {
+				if (terminating) return;
+				terminating = true;
+				killProcessGroup(child.pid, IS_WINDOWS ? undefined : 'SIGTERM');
+				setTimeout(() => killProcessGroup(child.pid, 'SIGKILL'), KILL_GRACE_MS).unref?.();
+			};
+
+			const timeoutTimer = setTimeout(terminateTree, CMD_TIMEOUT_MS);
+			timeoutTimer.unref?.();
+
+			/** 收尾：清定时器 + 终止残留进程树 */
+			const cleanup = (): void => {
+				clearTimeout(timeoutTimer);
+				if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
+				killProcessGroup(child.pid, 'SIGKILL');
+			};
 
 			const emitLine = (stream: 'stdout' | 'stderr', line: string): void => {
 				if (onOutput) {
@@ -238,9 +304,40 @@ export const shellTool: Tool = {
 				processChunk('stderr', stderrDecoder.write(chunk), stderrFull, stderrPend, stderrTmr);
 			});
 
+			/**
+			 * 命令已结束、管道仍未关闭时的兜底：exit/close 都可能先到，
+			 * 由这个定时器保证 Promise 一定收尾（这是"永久挂起"的解药）。
+			 */
+			let exitFacts: { code: number | null; signal: string | null } | null = null;
+			let drainArmed = false;
+
+			child.on('exit', (code: number | null, signal: string | null) => {
+				exitFacts = { code, signal };
+				if (settled || drainArmed) return;
+				// close 事件仍在等继承管道的子进程；给一个宽限期，
+				// 超时即按已拿到的退出状态收尾，并清掉残留进程树。
+				drainArmed = true;
+				drainTimer = setTimeout(() => {
+					drainTimer = null;
+					finish(exitFacts?.code ?? null, exitFacts?.signal ?? null);
+				}, PIPE_DRAIN_GRACE_MS);
+				drainTimer.unref?.();
+			});
+
 			child.on('close', (exitCode: number | null, termSignal: string | null) => {
+				finish(exitCode, termSignal);
+			});
+
+			/**
+			 * 统一收尾：发出剩余暂存行、冲刷解码器、构造结果并 resolve。
+			 * close 与排水兜底两条路径共用，`settled` 保证只执行一次。
+			 * @param exitCode    退出码（null 表示被信号终止）
+			 * @param termSignal  终止信号
+			 */
+			function finish(exitCode: number | null, termSignal: string | null): void {
 				if (settled) return;
 				settled = true;
+				cleanup();
 
 				// 清除定时器，发出剩余暂存行（\r 合并为最后一段）
 				if (stdoutTmr.ref) { clearTimeout(stdoutTmr.ref); stdoutTmr.ref = null; }
@@ -277,11 +374,12 @@ export const shellTool: Tool = {
 				};
 
 				resolveResult(result);
-			});
+			}
 
 			child.on('error', (err: Error) => {
 				if (settled) return;
 				settled = true;
+				cleanup();
 
 				if (stdoutTmr.ref) { clearTimeout(stdoutTmr.ref); stdoutTmr.ref = null; }
 				if (stderrTmr.ref) { clearTimeout(stderrTmr.ref); stderrTmr.ref = null; }
@@ -304,20 +402,13 @@ export const shellTool: Tool = {
 				resolveResult(result);
 			});
 
-			// 监听外部 AbortSignal，终止子进程
-			// Windows 不支持 POSIX 信号，使用无参 child.kill()
+			// 监听外部 AbortSignal，终止整棵进程树（Windows 走 taskkill /T）
 			if (signal) {
 				const onAbort = () => {
-					if (IS_WINDOWS) {
-						child.kill();
-					} else {
-						child.kill('SIGTERM');
-						setTimeout(() => {
-							if (!child.killed) child.kill('SIGKILL');
-						}, 1000);
-					}
+					terminateTree();
 					if (!settled) {
 						settled = true;
+						cleanup();
 						const err = new Error('The operation was aborted');
 						err.name = 'AbortError';
 						reject(err);

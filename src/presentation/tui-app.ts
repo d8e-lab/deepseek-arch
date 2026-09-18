@@ -21,6 +21,7 @@ import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '.
 import { InputEditor } from '../render/input-editor.js';
 import { Throttle } from '../utils/throttle.js';
 import { spawn } from 'node:child_process';
+import { killProcessGroup, killTree, KILL_GRACE_MS, PIPE_DRAIN_GRACE_MS } from '../tools/shell.js';
 import {
 	getTermSize,
 	enableBracketedPaste,
@@ -52,7 +53,6 @@ import type { OverlayReplayInfo } from './overlay-pane.js';
 import { Selector } from '../render/selector.js';
 import type { SelectOption } from '../render/selector.js';
 import { MarkdownTableRenderer } from '../render/markdown.js';
-import { isInteractiveCommand } from '../tools/utils.js';
 import { ConversationViewer } from './views/conversation-viewer.js';
 import { SubagentsViewer } from './views/subagents-viewer.js';
 import type { ViewInputResult } from './views/types.js';
@@ -68,6 +68,9 @@ const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/help', '/context
 
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
+
+/** 平台判据：Windows 无 POSIX 进程组，进程树清理走 taskkill /T */
+const IS_WINDOWS = process.platform === 'win32';
 
 export class TuiApp {
 	/** 屏幕输出缓冲（所有终端输出唯一通道） */
@@ -1208,6 +1211,7 @@ export class TuiApp {
 
 	/** 执行 shell 命令并收集输出（F-4：异步 spawn，不阻塞事件循环——长命令期间 Ctrl+C 仍可响应） */
 	private executeShellCommand(cmd: string): void {
+		const self = this;
 		// 打印命令到 scrollback（cmd 已包含前导 !）
 		this.out.write(PINK_BG_START + cmd + PINK_BG_END + '\r\n');
 		this.outputEndsWithSeparator = false; // 命令行为内容行
@@ -1215,42 +1219,56 @@ export class TuiApp {
 		// 去掉前导 ! 后执行
 		const shellCmd = cmd.startsWith('!') ? cmd.slice(1).trimStart() : cmd;
 
-		// ── 交互式命令禁止 ──────────────────────────
-		const interactiveBlocked = isInteractiveCommand(shellCmd);
-		if (interactiveBlocked) {
-			this.out.write(red(`  Blocked: ${interactiveBlocked}`) + '\r\n');
-			return;
-		}
-
 		let stdout = '';
 		let stderr = '';
 		let timedOut = false;
 
-		// 使用系统默认 shell（与 execSync 行为一致，跨平台）
+		// 使用系统默认 shell（与 execSync 行为一致，跨平台）。
+		// detached：自成进程组，超时时可整组清理（否则 30s 超时只杀 shell，
+		// 子进程继续占住管道会让 close 永不触发、shell 模式卡死）。
 		const child = spawn(shellCmd, {
 			cwd: process.cwd(),
 			shell: true,
+			detached: !IS_WINDOWS,
 			stdio: ['ignore', 'pipe', 'pipe'] as const,
 		});
+		// Node 内建 AbortSignal/timeout 只对直接子进程发信号，这里改成组级
+		child.kill = (sig?: NodeJS.Signals): boolean => killTree(child, sig);
 
 		child.stdout?.on('data', (buf: Buffer) => { stdout += buf.toString(); });
 		child.stderr?.on('data', (buf: Buffer) => { stderr += buf.toString(); });
 
-		// 30s 超时（与原 execSync timeout 一致）
+		// 30s 超时（与原 execSync timeout 一致）：先 SIGTERM，宽限期后 SIGKILL
 		const timeout = setTimeout(() => {
 			timedOut = true;
-			child.kill();
+			child.kill('SIGTERM');
+			setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS).unref?.();
 		}, 30000);
+
+		// 命令已退出但仍有子进程占住管道时按排水宽限收尾，避免永久不结算
+		let drain: ReturnType<typeof setTimeout> | null = null;
+		child.on('exit', () => {
+			drain ??= setTimeout(() => self.finishShellCommand(cmd, stdout, stderr), PIPE_DRAIN_GRACE_MS);
+			drain.unref?.();
+		});
 
 		child.on('error', (err: Error) => {
 			if (!stdout && !stderr) stderr = err.message;
 		});
 
-		child.on('close', () => {
+		child.on('close', () => finish());
+
+		/** 统一收尾：close 与排水兜底共用，`done` 保证只执行一次 */
+		let done = false;
+		function finish(): void {
+			if (done) return;
+			done = true;
 			clearTimeout(timeout);
+			if (drain) { clearTimeout(drain); drain = null; }
+			killProcessGroup(child.pid, 'SIGKILL');
 			if (timedOut && !stderr) stderr = '(timed out after 30s)';
-			this.finishShellCommand(cmd, stdout, stderr);
-		});
+			self.finishShellCommand(cmd, stdout, stderr);
+		}
 	}
 
 	/** 收集 shell 输出完成：打印结果 + 构造隐藏上下文块 + 退出 shell 模式 */
