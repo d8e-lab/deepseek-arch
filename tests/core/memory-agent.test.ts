@@ -82,7 +82,8 @@ describe('MemoryAgent', () => {
 		expect(r.status).toBe('done');
 		expect(r.writes).toEqual([{ slug: 'reply-format', action: 'add' }]);
 		expect(r.notes).toContain('写入 1 条');
-		expect((await store.getState('project')).lastExtractedTurnId).toBe('t1');
+		// v3：游标由调用方（会话层）持久化，agent 只返回"该推进到哪"
+		expect(r.advanceCursorTo).toBe('t1');
 
 		const audit = await readFile(join(root, 'project', 'audit.jsonl'), 'utf-8');
 		expect(audit).toContain('"kind":"agent_run"');
@@ -145,7 +146,7 @@ describe('MemoryAgent', () => {
 		});
 		expect(r.status).toBe('skipped');
 		expect(r.reason).toBe('master_wrote');
-		expect((await store.getState('project')).lastExtractedTurnId).toBe('t1');
+		expect(r.advanceCursorTo).toBe('t1');
 		expect(await store.listEntries('project')).toHaveLength(0);
 	});
 
@@ -174,8 +175,27 @@ describe('MemoryAgent', () => {
 		});
 		expect(r.status).toBe('error');
 		expect(r.reason).toBe('tool_limit');
-		// 中止窗口不推进游标 → 下一轮可重试
-		expect((await store.getState('project')).lastExtractedTurnId).toBeUndefined();
+		expect(r.limitReason).toBe('tool_limit');
+		// 首次中止不推进游标 → 下一轮可重试该窗口
+		expect(r.advanceCursorTo).toBeUndefined();
+	});
+
+	it('watchdog：同一窗口连续失败达到上限 → 放弃该窗口（推进游标），不再无限重试', async () => {
+		const steps: Step[] = Array.from({ length: 10 }, (_, i) => ({
+			toolCalls: [{ id: `c${i}`, name: 'memory_read', args: { path: 'x.md' } }],
+		}));
+		const agent = makeAgent(makeProvider(steps), store, { maxToolCalls: 3, minIntervalSec: 0 });
+		const input = {
+			turns: [{ user: 'u', assistant: 'a', turnId: 't1' }], currentUser: 'u', nextCursor: 't1',
+		};
+
+		const first = await agent.run(input);
+		expect(first.advanceCursorTo).toBeUndefined();
+
+		const second = await agent.run(input);
+		expect(second.status).toBe('error');
+		// 连续第二次失败 → 放弃窗口并推进游标（调用方据此跳过该段）
+		expect(second.advanceCursorTo).toBe('t1');
 	});
 
 	it('watchdog：超时 → 中止并标 timeout（不抛错）', async () => {
@@ -205,7 +225,7 @@ describe('MemoryAgent', () => {
 		const r = await agent.run({ turns: [], currentUser: '', nextCursor: 't9' });
 		expect(r.status).toBe('skipped');
 		expect(r.reason).toBe('no_input');
-		expect((await store.getState('project')).lastExtractedTurnId).toBe('t9');
+		expect(r.advanceCursorTo).toBe('t9');
 	});
 
 	it('provider 抛错 → 记审计 error 且不抛给调用方', async () => {
@@ -244,8 +264,10 @@ describe('MemoryAgent', () => {
 	it('输入前置现有记忆索引：正式条目 + 候选区（conf 1 只有 agent 看得到）', async () => {
 		await store.write('project', { subject: 'reply.format', name: '正式条', description: '可见', confidence: 3, body: 'b1' });
 		const cand = await store.write('project', { subject: 'style.tone', name: '候选条', description: '模糊', confidence: 1, body: 'b2' });
-		await store.recordUse('project', cand.slug);   // 加两次使用
-		await store.recordUse('project', cand.slug);
+		// 直接摆使用次数：recordUse 会触发会话内即时升级（v3），而本用例要的是"仍是候选"的场景
+		await store.setState('project', {
+			usage: { [cand.slug]: { uses: 3, lastUsedAt: new Date().toISOString() } },
+		});
 
 		const seen: string[] = [];
 		const provider = makeProvider([{ content: 'ok' }], (messages) => {

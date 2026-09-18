@@ -28,7 +28,8 @@ import { loadSkills, buildSkillListing } from '../core/skill.js';
 import { configureBrowser } from '../tools/browser-state.js';
 import { startApiMonitor } from '../core/api-monitor.js';
 import { getApiRequestsDir } from '../core/workspace-paths.js';
-import { setMemoryStore } from '../core/memory-service.js';
+import { setMemoryStore, setMemoryAlertSink } from '../core/memory-service.js';
+import { readMemorySessionConfig } from '../core/memory-config.js';
 import { existsSync, statSync } from 'node:fs';
 import { turnAssistantContent } from '../utils/turn-utils.js';
 
@@ -107,34 +108,18 @@ async function createSessionManager(config: TuiConfig, tools: Tool[], asyncMode 
 	if (noMemory) {
 		sessionMgr.configureMemory({ enabled: false });
 	} else {
-		sessionMgr.configureMemory({
-		enabled: cfg.get<boolean>('memory.enabled') ?? true,
-		inject: cfg.get<boolean>('memory.inject') ?? true,
-		maxInjectTokens: cfg.get<number>('memory.max_inject_tokens') ?? 800,
-		deltaInjectTokens: cfg.get<number>('memory.delta_inject_tokens') ?? 200,
-		masterMinConfidence: cfg.get<number>('memory.master_min_confidence') ?? 2,
-		recallModel: cfg.get<string>('memory.recall_model') ?? 'deepseek-v4-flash',
-		agentModel: cfg.get<string>('memory.agent_model') ?? 'deepseek-v4-flash',
-		agentOnTurnEnd: cfg.get<boolean>('memory.agent_on_turn_end') ?? true,
-		agentMinIntervalSec: cfg.get<number>('memory.agent_min_interval_sec') ?? 30,
-		agentMaxWritesPerRun: cfg.get<number>('memory.agent_max_writes_per_run') ?? 3,
-		agentMaxInputTurns: cfg.get<number>('memory.agent_max_input_turns') ?? 3,
-		agentMaxInputTokens: cfg.get<number>('memory.agent_max_input_tokens') ?? 6000,
-		agentTimeoutMs: cfg.get<number>('memory.agent_timeout_ms') ?? 90_000,
-		notifyReadUpdates: cfg.get<boolean>('memory.notify_read_updates') ?? true,
-		lruEnabled: cfg.get<boolean>('memory.lru_enabled') ?? true,
-		lruDecayActiveDays: cfg.get<number>('memory.lru_decay_active_days') ?? 90,
-		lruPromoteUses: cfg.get<number>('memory.lru_promote_uses') ?? 2,
-		lruWindowSize: cfg.get<number>('memory.lru_window_size') ?? 200,
-		lruTotalLimit: cfg.get<number>('memory.lru_total_limit') ?? 400,
-		lruDestroyAfterDays: cfg.get<number>('memory.lru_destroy_after_days') ?? 180,
-		lruDestroyMode: (cfg.get<string>('memory.lru_destroy_mode') === 'delete' ? 'delete' : 'archive'),
-		});
+		// 完整键集由 core/memory-config 统一读取（TUI 的 /memory on 复用同一函数，
+		// 避免"关掉再打开"让部分配置静默回落默认值）
+		sessionMgr.configureMemory(readMemorySessionConfig(cfg));
 	}
 	// 记忆工具（memory_read/write）与「已更新记忆」提示：与工作区/阈值保持一致
 	setMemoryStore(sessionMgr.getMemory()?.store ?? null);
 	sessionMgr.setMemoryNoticeCallback((count) => {
 		process.stderr.write(`[memory] updated ${count}\n`);
+	});
+	// 记忆告警（如条目超过 64K 被截断）：headless 走 stderr
+	setMemoryAlertSink((message) => {
+		process.stderr.write(`${message}\n`);
 	});
 
 	// 设置 system prompt
@@ -264,7 +249,7 @@ program
 	.option('--monitor <url>', 'mirror API requests to a monitor server (start one with: deepseek-arch api-monitor)')
 	.option('--workspace <dir>', 'workspace root for tools & runtime files (default: current directory)')
 	.option('--no-memory', 'disable long-term memory entirely (no injection, no extraction, no memory tools)')
-	.option('-p, --prompt <content>', 'run a single non-interactive turn and print the reply to stdout (yolo; combines with --resume)')
+	.option('-p, --prompt <content>', 'run a single non-interactive turn and print the reply to stdout (requires --workspace; yolo; combines with --resume)')
 	.action(async (options: { resume?: string; prompt?: string; workspace?: string; memory?: boolean; yolo?: boolean; short?: boolean; normal?: boolean; detail?: boolean; browser?: boolean; cdp?: string; async?: boolean; debug?: boolean; selfInteraction?: boolean; mock?: boolean; monitor?: string }) => {
 		try {
 			// commander 的 `--no-memory` 生成的是 `memory: false`（不是 `noMemory`）——
@@ -273,6 +258,16 @@ program
 			// 加载配置（幂等）——必须先于 cfg.get，否则 defaults/display 读不到
 			const cfg = ConfigManager.getInstance();
 			await cfg.load();
+
+			// v3 决策 D14：--prompt 必须搭配 --workspace。
+			// 非交互场景（cron / 心跳）的 cwd 不可控，缺省会把项目层记忆与 runtime 目录
+			// （plan / memory / api-requests）落到错误的目录，工具也会在错误的目录里执行。
+			if (options.prompt !== undefined && !options.workspace) {
+				console.error(
+					'Error: --prompt requires --workspace <dir> — non-interactive runs must pin the workspace explicitly.',
+				);
+				process.exit(1);
+			}
 
 			// 工作区覆盖必须在创建 SessionManager 之前（构造时锁定会话 cwd）
 			if (!applyWorkspace(options.workspace)) {
@@ -333,6 +328,8 @@ program
 					setCaptureFn(() => app.captureScreen());
 				}
 				await app.start(session);
+				// 退出前收敛后台记忆归纳（避免写到一半就退出）
+				await sessionMgr.abortMemoryAgent().catch(() => { /* 收敛失败忽略 */ });
 				return;
 			}
 
@@ -345,6 +342,8 @@ program
 				setCaptureFn(() => app.captureScreen());
 			}
 			await app.start();
+			// 退出前收敛后台记忆归纳（避免写到一半就退出）
+			await sessionMgr.abortMemoryAgent().catch(() => { /* 收敛失败忽略 */ });
 		} catch (err: any) {
 			console.error('Failed to start:', err?.message ?? err);
 			process.exit(1);
@@ -479,6 +478,8 @@ program
 					setCaptureFn(() => app.captureScreen());
 				}
 				await app.start(session);
+				// 退出前收敛后台记忆归纳（避免写到一半就退出）
+				await sessionMgr.abortMemoryAgent().catch(() => { /* 收敛失败忽略 */ });
 				return;
 			}
 

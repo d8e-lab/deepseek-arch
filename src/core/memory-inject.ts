@@ -14,7 +14,7 @@
  * `resume` 时从**磁盘上的 system prompt 快照**里解析出旧的清单（模型已经看过的那份）来播种。
  */
 
-import { renderManifestLine, type MemoryEntry, type MemoryStore } from './memory-store.js';
+import { renderManifestLine, estimateTokens, type MemoryEntry, type MemoryStore } from './memory-store.js';
 import type { MemoryRecall, RecallMode } from './memory-recall.js';
 
 /** system prompt 里的清单块标签（渲染与解析共用） */
@@ -38,6 +38,10 @@ export interface ListingResult {
 	block: string | null;
 	rev: string;
 	mode: RecallMode;
+	/** 召回退化/未调用模型的原因（审计用；预算内直接全给时为 budget_fits） */
+	recallReason?: string;
+	/** 清单块自身的 token 估算（审计用） */
+	tokens: number;
 }
 
 export interface MemoryDiff {
@@ -52,7 +56,7 @@ export class MemoryInjector {
 	private readonly maxInjectTokens: number;
 	private readonly deltaInjectTokens: number;
 	private readonly enabled: boolean;
-	/** 模型当前"看到"的清单：slug → updated（用于变化检测） */
+	/** 模型当前"看到"的清单：slug → 版本键（updated|confidence，用于变化检测） */
 	private seen = new Map<string, string>();
 	/** 会话内已出示过的 slug（去重；compact 后由会话层重置） */
 	private surfaced = new Set<string>();
@@ -70,20 +74,22 @@ export class MemoryInjector {
 	/**
 	 * 构建清单块（会话创建 / refresh 时调用）。
 	 * 预算内直接全给；超预算时用 recall 模型挑选；失败自动退化（见 memory-recall）。
+	 * 返回 `mode`/`recallReason` 供调用方落审计（旧实现把它们丢掉，"为何退化"无从追查）。
 	 */
 	async buildListingBlock(taskText = ''): Promise<ListingResult> {
-		if (!this.enabled) return { block: null, rev: '', mode: 'all' };
+		if (!this.enabled) return { block: null, rev: '', mode: 'all', tokens: 0 };
 
 		const manifest = await this.store.manifestAll(this.maxInjectTokens);
 		if (manifest.lines.length === 0) {
 			this.seen = new Map();
-			return { block: null, rev: manifest.rev, mode: 'all' };
+			return { block: null, rev: manifest.rev, mode: 'all', tokens: 0 };
 		}
 
 		// 预算内：直接全给（零额外调用）
 		const entries = await this.allEntries();
 		let selected = entries;
 		let mode: RecallMode = 'all';
+		let recallReason: string | undefined = 'budget_fits';
 		if (entries.length > manifest.lines.length) {
 			const result = await this.recall.select({
 				taskText,
@@ -94,11 +100,12 @@ export class MemoryInjector {
 			});
 			selected = result.entries;
 			mode = result.mode;
+			recallReason = result.reason;
 		}
 
 		if (selected.length === 0) {
 			this.seen = new Map();
-			return { block: null, rev: manifest.rev, mode };
+			return { block: null, rev: manifest.rev, mode, recallReason, tokens: 0 };
 		}
 
 		const lines = selected.map((e) => renderManifestLine(e));
@@ -110,9 +117,9 @@ export class MemoryInjector {
 			`</${MEMORY_LISTING_TAG}>`,
 		].join('\n');
 
-		this.seen = new Map(selected.map((e) => [e.slug, e.updated]));
+		this.seen = new Map(selected.map((e) => [e.slug, visibilityKey(e)]));
 		for (const e of selected) this.surfaced.add(e.slug);
-		return { block, rev: manifest.rev, mode };
+		return { block, rev: manifest.rev, mode, recallReason, tokens: estimateTokens(block) };
 	}
 
 	/**
@@ -129,7 +136,10 @@ export class MemoryInjector {
 
 	/**
 	 * 检查清单是否变化；有变化则返回要落盘的提醒块（无变化返回 null）。
-	 * 变化 = 新增 / updated 变化 / 移除（含置信度降到阈值以下、被取代、被遗忘）。
+	 * 变化 = 新增 / 版本变化（更新时间 **或置信度**）/ 移除（含置信度降到阈值以下、被取代、被遗忘）。
+	 *
+	 * 只有**真正展示给模型**的条目才推进 `seen`：被 maxEntries 截断的变更保持旧值，
+	 * 下一轮继续上报（旧实现先把全部标为已见，导致未展示的变更永久静默）。
 	 */
 	async buildUpdateBlock(): Promise<string | null> {
 		if (!this.enabled) return null;
@@ -137,24 +147,36 @@ export class MemoryInjector {
 		const entries = await this.allEntries();
 		const diff = diffSeen(this.seen, entries);
 		const hasChange = diff.added.length > 0 || diff.updated.length > 0 || diff.removed.length > 0;
-		this.seen = new Map(entries.map((e) => [e.slug, e.updated]));
 		if (!hasChange) return null;
 
 		const maxEntries = 6;
 		const lines: string[] = [];
+		/** 真正展示给模型的条目（只有这些推进 seen） */
+		const shown: MemoryEntry[] = [];
 		const push = (label: string, list: MemoryEntry[]) => {
-			for (const e of list.slice(0, maxEntries)) lines.push(`- ${label}: ${renderManifestLine(e)}`);
+			for (const e of list.slice(0, maxEntries)) {
+				lines.push(`- ${label}: ${renderManifestLine(e)}`);
+				shown.push(e);
+			}
 		};
 		push('added', diff.added);
 		push('updated', diff.updated);
-		if (diff.removed.length > 0) {
-			lines.push(`- removed/retired: ${diff.removed.slice(0, maxEntries).join(', ')}`);
+		const removedShown = diff.removed.slice(0, maxEntries);
+		if (removedShown.length > 0) {
+			lines.push(`- removed/retired: ${removedShown.join(', ')}`);
 		}
 		const omitted =
 			Math.max(0, diff.added.length - maxEntries) +
 			Math.max(0, diff.updated.length - maxEntries) +
 			Math.max(0, diff.removed.length - maxEntries);
-		if (omitted > 0) lines.push(`- …(${omitted} more)`);
+		if (omitted > 0) lines.push(`- …(${omitted} more, will be reported on a later turn)`);
+
+		// seen 只推进"已展示"的条目；removed 从 seen 删除。
+		// 未展示的变更保持旧键 → 下一轮再次进入 diff，不再静默丢失。
+		const nextSeen = new Map(this.seen);
+		for (const e of shown) nextSeen.set(e.slug, visibilityKey(e));
+		for (const slug of diff.removed) nextSeen.delete(slug);
+		this.seen = nextSeen;
 
 		const block = [
 			`<${MEMORY_UPDATE_TAG}>`,
@@ -177,7 +199,7 @@ export class MemoryInjector {
 			const entries = await this.store.listEntries(scope);
 			const entry = entries.find((e) => e.slug === slug);
 			if (entry) {
-				this.seen.set(entry.slug, entry.updated);
+				this.seen.set(entry.slug, visibilityKey(entry));
 				this.surfaced.add(entry.slug);
 				return;
 			}
@@ -193,10 +215,10 @@ export class MemoryInjector {
 		for (const slug of readSlugs) {
 			const entry = bySlug.get(slug);
 			if (!entry) continue;
-			if (this.seen.get(slug) === entry.updated) continue;
+			if (this.seen.get(slug) === visibilityKey(entry)) continue;
 			lines.push(`- ${renderManifestLine(entry)}`);
 			// 提醒一次即推进，避免每轮重复打扰（模型重新 memory_read 会再次刷新）
-			this.seen.set(slug, entry.updated);
+			this.seen.set(slug, visibilityKey(entry));
 		}
 		if (lines.length === 0) return null;
 		const block = [
@@ -207,36 +229,6 @@ export class MemoryInjector {
 			`</${MEMORY_UPDATE_TAG}>`,
 		].join('\n');
 		return truncateToBudget(block, this.deltaInjectTokens);
-	}
-
-	/**
-	 * 到期提醒块（R6 的 K 职责）：`remindAt` 已到的条目 → `<memory-due>` 块。
-	 * 发出后清空该条目的 remindAt（一次性提醒）；包含候选条目（用户要求的提醒与可见性无关）。
-	 */
-	async buildDueBlock(now: Date = new Date()): Promise<{ block: string; slugs: string[] } | null> {
-		if (!this.enabled) return null;
-		const due = [
-			...(await this.store.listDue('project', now)),
-			...(await this.store.listDue('global', now)),
-		];
-		if (due.length === 0) return null;
-
-		const lines = due.slice(0, 5).map((e) => `- ${renderManifestLine(e)}`);
-		if (due.length > 5) lines.push(`- …(${due.length - 5} more)`);
-		const block = [
-			'<memory-due>',
-			'[Memory reminder due] The user asked to be reminded about the following',
-			'(deferred items / follow-ups). Surface them briefly and ask how to proceed:',
-			...lines,
-			'</memory-due>',
-		].join('\n');
-
-		const slugs = due.map((e) => e.slug);
-		// 一次性提醒：清空 remindAt（失败不影响注入）
-		for (const entry of due) {
-			await this.store.markReminded(entry.scope, entry.slug).catch(() => false);
-		}
-		return { block: truncateToBudget(block, this.deltaInjectTokens), slugs };
 	}
 
 	/** 标记"已出示"（会话内动态出示去重） */
@@ -277,6 +269,16 @@ export function parseListingSlugs(content: string): string[] {
 	return [...slugs];
 }
 
+/**
+ * 「模型看到的那一版」的版本键。
+ *
+ * 含置信度：升/降档（3↔2↔1）也要被变化检测看见 —— 旧实现只比 `updated`，
+ * 而 LRU 升降级**不改**更新时间，于是"这条已经退出可见清单"永远不会通知模型。
+ */
+export function visibilityKey(entry: MemoryEntry): string {
+	return `${entry.updated}|${entry.confidence}`;
+}
+
 /** 对比「已见集合」与「当前条目」→ 新增/更新/移除 */
 export function diffSeen(seen: Map<string, string>, entries: MemoryEntry[]): MemoryDiff {
 	const added: MemoryEntry[] = [];
@@ -286,16 +288,24 @@ export function diffSeen(seen: Map<string, string>, entries: MemoryEntry[]): Mem
 		current.add(e.slug);
 		const prev = seen.get(e.slug);
 		if (prev === undefined) added.push(e);
-		else if (prev !== '' && prev !== e.updated) updated.push(e);
+		else if (prev !== '' && prev !== visibilityKey(e)) updated.push(e);
 	}
 	const removed = [...seen.keys()].filter((slug) => !current.has(slug));
 	return { added, updated, removed };
 }
 
-/** 按 token 预算截断文本（保留开头，尾部加省略标记） */
+/** 按 token 预算截断文本（保留开头，尾部加省略标记）；按字符截断避免切断多字节字符 */
 export function truncateToBudget(text: string, maxTokens: number): string {
 	const maxBytes = maxTokens * 3;
-	const buf = Buffer.from(text, 'utf-8');
-	if (buf.length <= maxBytes) return text;
-	return `${buf.subarray(0, maxBytes).toString('utf-8')}\n…(truncated)`;
+	if (Buffer.byteLength(text, 'utf-8') <= maxBytes) return text;
+	// 逐字符累加，保证不在 UTF-8 码点中间切断（旧实现按字节 subarray，可能产出 U+FFFD）
+	let used = 0;
+	let out = '';
+	for (const ch of text) {
+		const b = Buffer.byteLength(ch, 'utf-8');
+		if (used + b > maxBytes) break;
+		out += ch;
+		used += b;
+	}
+	return `${out}\n…(truncated)`;
 }

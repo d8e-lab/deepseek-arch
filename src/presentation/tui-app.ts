@@ -56,6 +56,9 @@ import { isInteractiveCommand } from '../tools/utils.js';
 import { ConversationViewer } from './views/conversation-viewer.js';
 import { SubagentsViewer } from './views/subagents-viewer.js';
 import type { ViewInputResult } from './views/types.js';
+import { setMemoryAlertSink, setMemoryStore } from '../core/memory-service.js';
+import { readMemorySessionConfig } from '../core/memory-config.js';
+import { withMemoryLock } from '../core/memory-lock.js';
 
 /** 可选模型列表（运行时从配置动态生成，见 TuiApp 构造函数；此为兜底） */
 const FALLBACK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
@@ -169,13 +172,14 @@ export class TuiApp {
 			isStreamActive: () => this.abortController !== null,
 			getSize: () => getTermSize(),
 		});
-		// 记忆：后台归纳写入后给一行提示（不打断流式、不弹层）；到期提醒给一行提示
+		// 记忆：后台归纳写入后给一行提示（不打断流式、不弹层）
 		// 可选调用：测试里的 sessionMgr 替身可能没有这些方法
 		this.sessionMgr.setMemoryNoticeCallback?.((count: number) => {
 			this.writeOutputLine(dim(`[memory] 已更新 ${count} 条（/memory show 查看）`));
 		});
-		this.sessionMgr.setMemoryDueCallback?.((slugs: string[]) => {
-			this.writeOutputLine(dim(`[memory] 到期提醒：${slugs.join(', ')}（/memory show 查看）`));
+		// 记忆边界情况（如条目超过 64K 被截断）：一行 dim 提示，不打断流式
+		setMemoryAlertSink((message) => {
+			this.writeOutputLine(dim(message));
 		});
 
 		this.overlay = new OverlayPane(this.out, {
@@ -949,7 +953,10 @@ export class TuiApp {
 			}
 			case 'show': {
 				const kw = rest.join(' ').trim().toLowerCase();
-				const entries = [...(await store.listEntries('project')), ...(await store.listEntries('global'))];
+				// 关键词可能命中正文：显式要求加载正文（未加关键词时不需要，保持廉价）
+				const entries = kw
+					? [...(await store.listEntries('project', { withBody: true })), ...(await store.listEntries('global', { withBody: true }))]
+					: [...(await store.listEntries('project')), ...(await store.listEntries('global'))];
 				const filtered = kw
 					? entries.filter((e) => `${e.slug} ${e.subject} ${e.name} ${e.description} ${e.body}`.toLowerCase().includes(kw))
 					: entries;
@@ -999,35 +1006,46 @@ export class TuiApp {
 					return true;
 				}
 				const scope = (await store.readEntry('project', slug)) ? 'project' : 'global';
-				const ok = await store.setPinned(scope, slug, pinned);
+				const ok = await withMemoryLock(store.dirOf(scope), () => store.setPinned(scope, slug, pinned));
 				this.cmdOut(ok
 					? green(`[memory] ${pinned ? '已钉住' : '已取消钉住'} ${slug}`) + dim(pinned ? '（免疫 LRU 升降级与归档）' : '')
 					: red(`[memory] 未找到条目 ${slug}`));
 				return true;
 			}
 			case 'candidates': {
-				const candidates = await store.listCandidates('project');
+				// 两层都要列（旧实现只看项目层 → 全局候选永远不显示）
+				const candidates = [
+					...(await store.listCandidates('project')).map((entry) => ({ entry, scope: 'project' as const })),
+					...(await store.listCandidates('global')).map((entry) => ({ entry, scope: 'global' as const })),
+				];
 				if (candidates.length === 0) {
 					this.cmdOut(dim('(无模糊条目)'));
 					return true;
 				}
 				// 候选区 = conf < 阈值：1 = 待观察、0 = 待销毁（同一套 confidence 档位）
-				const usage = { ...((await store.getState('project')).usage ?? {}), ...((await store.getState('global')).usage ?? {}) };
-				const day = Math.max((await store.getState('project')).activeDayCount ?? 0, (await store.getState('global')).activeDayCount ?? 0);
-				const pending = candidates.filter((e) => e.confidence >= 1);
-				const doomed = candidates.filter((e) => e.confidence <= 0);
+				// 使用统计与活动日**按层各取各的**（旧实现把两层混在一起，导致"已 N/180"算错）
+				const stateP = await store.getState('project');
+				const stateG = await store.getState('global');
+				const usageOf = (scope: 'project' | 'global') => (scope === 'project' ? stateP.usage : stateG.usage) ?? {};
+				const dayOf = (scope: 'project' | 'global') => (scope === 'project' ? stateP.activeDayCount : stateG.activeDayCount) ?? 0;
+				const pending = candidates.filter(({ entry }) => entry.confidence >= 1);
+				const doomed = candidates.filter(({ entry }) => entry.confidence <= 0);
 
 				if (pending.length > 0) {
 					this.cmdOut(dim(`待观察（confidence 1，不注入；被再次印证才升进清单） ${pending.length} 条：`));
-					for (const e of pending.slice(0, 20)) this.cmdOut(dim(`  ${e.slug}  uses=${usage[e.slug]?.uses ?? 0}  ${e.pinned ? '📌' : ''} ${e.description}`));
+					for (const { entry, scope } of pending.slice(0, 20)) {
+						const u = usageOf(scope)[entry.slug];
+						this.cmdOut(dim(`  [${scope}] ${entry.slug}  uses=${u?.uses ?? 0}  ${entry.pinned ? '📌' : ''} ${entry.description}`));
+					}
 				}
 				if (doomed.length > 0) {
 					this.cmdOut(yellow(`⏳ 待销毁（confidence 0；闲置到期自动${mem.config.lruDestroyMode === 'delete' ? '删除' : '归档'}，期间被用到会回到观察区） ${doomed.length} 条：`));
-					for (const e of doomed.slice(0, 20)) {
-						const u = usage[e.slug];
+					for (const { entry, scope } of doomed.slice(0, 20)) {
+						const u = usageOf(scope)[entry.slug];
 						const start = Math.max(u?.lastUsedDay ?? 0, u?.lastStepDay ?? 0);
+						const day = dayOf(scope);
 						const elapsed = start > 0 && day > 0 ? Math.max(0, day - start) : 0;
-						this.cmdOut(dim(`  ${e.slug}  已 ${elapsed}/${mem.config.lruDestroyAfterDays} 活动日  ${e.description}`));
+						this.cmdOut(dim(`  [${scope}] ${entry.slug}  已 ${elapsed}/${mem.config.lruDestroyAfterDays} 活动日  ${entry.description}`));
 					}
 				}
 				this.cmdOut(dim('提示：/memory pin <slug> 可永久保留；/memory forget <slug> 立即淘汰'));
@@ -1040,7 +1058,7 @@ export class TuiApp {
 					return true;
 				}
 				const scope = (await store.readEntry('project', slug)) ? 'project' : 'global';
-				const ok = await store.forget(scope, slug, 'user requested via /memory forget');
+				const ok = await withMemoryLock(store.dirOf(scope), () => store.forget(scope, slug, 'user requested via /memory forget'));
 				this.cmdOut(ok ? green(`[memory] 已遗忘 ${slug}`) : red(`[memory] 未找到条目 ${slug}`));
 				return true;
 			}
@@ -1055,25 +1073,16 @@ export class TuiApp {
 				// 立即生效：重新装配（关闭时后续不再注入/归纳；开启时按配置装配）
 				if (!enabled) {
 					this.sessionMgr.configureMemory({ enabled: false });
+				} else if (this.configMgr) {
+					// 与 CLI 启动路径共用同一读取函数 → 不再出现"关掉再打开丢失部分配置"
+					// enabled 强制 true：即便上面的 set() 写回失败，用户意图也是"开启"
+					this.sessionMgr.configureMemory({ ...readMemorySessionConfig(this.configMgr), enabled: true });
 				} else {
-					const cfg = this.configMgr;
-					this.sessionMgr.configureMemory({
-						enabled: true,
-						maxInjectTokens: cfg?.get<number>('memory.max_inject_tokens') ?? undefined,
-						deltaInjectTokens: cfg?.get<number>('memory.delta_inject_tokens') ?? undefined,
-						masterMinConfidence: cfg?.get<number>('memory.master_min_confidence') ?? undefined,
-						recallModel: cfg?.get<string>('memory.recall_model') ?? undefined,
-						agentModel: cfg?.get<string>('memory.agent_model') ?? undefined,
-						agentOnTurnEnd: cfg?.get<boolean>('memory.agent_on_turn_end') ?? undefined,
-						lruEnabled: cfg?.get<boolean>('memory.lru_enabled') ?? undefined,
-						lruDecayActiveDays: cfg?.get<number>('memory.lru_decay_active_days') ?? undefined,
-						lruPromoteUses: cfg?.get<number>('memory.lru_promote_uses') ?? undefined,
-						lruWindowSize: cfg?.get<number>('memory.lru_window_size') ?? undefined,
-						lruTotalLimit: cfg?.get<number>('memory.lru_total_limit') ?? undefined,
-						lruDestroyAfterDays: cfg?.get<number>('memory.lru_destroy_after_days') ?? undefined,
-						lruDestroyMode: (cfg?.get<string>('memory.lru_destroy_mode') === 'delete' ? 'delete' : undefined),
-					});
+					this.sessionMgr.configureMemory({ enabled: true });
 				}
+				// configureMemory 会重建 store 实例：同步刷新工具层使用的全局单例，
+				// 否则 memory_read/write 仍指向旧 store（阈值变更不生效）
+				setMemoryStore(this.sessionMgr.getMemory()?.store ?? null);
 				this.cmdOut(green(`[memory: ${enabled ? 'ON' : 'OFF'}]`) + dim(enabled ? '  下次发言起生效' : '  不再注入/归纳（已存在的记忆保留）'));
 				return true;
 			}

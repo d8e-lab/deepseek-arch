@@ -21,9 +21,13 @@ import { memoryReadTool, readMemoryEntry } from '../tools/memory-read.js';
 import { memoryWriteTool, writeMemoryEntry } from '../tools/memory-write.js';
 import { memoryForgetTool, forgetMemoryEntry } from '../tools/memory-forget.js';
 import { estimateTokens, renderManifestLine, type MemoryEntry, type MemoryStore } from './memory-store.js';
+import { truncateToBudget } from './memory-inject.js';
 
 /** 每轮归纳最多硬淘汰几条（独立于 maxWritesPerRun，防误删；软降级走 memory_write confidence=1） */
 const MAX_FORGETS_PER_RUN = 3;
+
+/** 同一归纳窗口连续 watchdog 失败达到该次数后放弃（推进游标），避免每轮重试同一段 */
+const MAX_WATCHDOG_FAILURES = 2;
 
 export interface MemoryAgentOptions {
 	provider: ModelProvider;
@@ -65,6 +69,8 @@ export interface MemoryAgentInput {
 	masterWrote?: boolean;
 	/** 成功归纳后要推进到的游标（通常是最后一轮的 turnId） */
 	nextCursor?: string;
+	/** 会话 id（审计用；运行时传入 —— 构造时往往还没有会话） */
+	sid?: string;
 }
 
 export type MemoryAgentStatus = 'done' | 'skipped' | 'error';
@@ -79,6 +85,14 @@ export interface MemoryAgentResult {
 	/** agent 的收尾文本（仅供审计） */
 	notes?: string;
 	elapsedMs: number;
+	/**
+	 * 调用方应把归纳游标推进到该值（v3：游标按会话存放，由会话层持久化）。
+	 * 成功 / no_input / master_wrote，以及"同一窗口连续 watchdog 失败达到上限"时给出；
+	 * 首次 watchdog 失败不给 → 保留重试机会。
+	 */
+	advanceCursorTo?: string;
+	/** watchdog 中止的原因（timeout/tool_limit/token_limit） */
+	limitReason?: string;
 }
 
 /**
@@ -180,7 +194,9 @@ export function pickRelated<T extends MemoryEntry>(entries: T[], taskText: strin
 	if (task.size === 0) return [];
 	const scored: { entry: T; score: number }[] = [];
 	for (const entry of entries) {
-		const own = keywordsOf([entry.name, entry.description, entry.subject, entry.tags.join(' '), entry.body].join(' '));
+		// 只用元数据（name/description/subject/tags）：v3 工作集不携带正文，
+		// 逐条读文件会让"初筛"变成全量 IO；描述/subject 已足够做定位提示。
+		const own = keywordsOf([entry.name, entry.description, entry.subject, entry.tags.join(' ')].join(' '));
 		let score = 0;
 		for (const k of own) if (task.has(k)) score++;
 		// 标签/subject 命中加权（比正文泛词更能代表主题）
@@ -198,6 +214,8 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 	private running = false;
 	private lastRunAt = 0;
 	private controller: AbortController | null = null;
+	/** 同一游标连续 watchdog 失败计数（达到上限则放弃该窗口，避免每轮无限重试） */
+	private watchdogFailures: { cursor?: string; count: number } = { count: 0 };
 
 	constructor(opts: MemoryAgentOptions) {
 		this.opts = opts;
@@ -207,27 +225,37 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 		return this.running;
 	}
 
-	/** 中止当前归纳（进程退出 / compact 前收敛用） */
+	/** 中止当前归纳（compact 前收敛用） */
 	abort(): void {
 		this.controller?.abort();
+	}
+
+	/** 中止并等待运行结束（有界等待；compact 前收敛用） */
+	async abortAndWait(timeoutMs = 5000): Promise<void> {
+		if (!this.running) return;
+		this.abort();
+		const deadline = Date.now() + timeoutMs;
+		while (this.running && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
 	}
 
 	async run(input: MemoryAgentInput): Promise<MemoryAgentResult> {
 		const started = Date.now();
 		const { store } = this.opts;
+		// v3：会话 id 在运行时取（构造时往往还没有会话，导致审计 sid 恒为空）
+		const sid = input.sid ?? this.opts.sessionId;
 
 		// ── 守卫 ──────────────────────────────────────
 		if (this.running) return this.skip('busy', started);
 		if (Date.now() - this.lastRunAt < this.opts.minIntervalSec * 1000) return this.skip('interval', started);
 		if (input.masterWrote) {
 			// 主/后台互斥：master 自己写过 → 跳过并推进游标（避免重复归纳同一窗口）
-			await this.advanceCursor(input.nextCursor);
-			return this.skip('master_wrote', started);
+			return { ...this.skip('master_wrote', started), advanceCursorTo: input.nextCursor };
 		}
 		const turns = this.prepareTurns(input);
 		if (turns.length === 0 || !input.currentUser.trim()) {
-			await this.advanceCursor(input.nextCursor);
-			return this.skip('no_input', started);
+			return { ...this.skip('no_input', started), advanceCursorTo: input.nextCursor };
 		}
 
 		this.running = true;
@@ -246,15 +274,24 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 
 		try {
 			const tools = this.buildTools(writes);
-			// 索引前置：正式条目 + 候选池 + 「可能与本轮相关」（关键词初筛），并附本轮对话文本供初筛
-			const taskText = [...turns.map((t) => `${t.user}\n${t.assistant}`), input.currentUser].join('\n');
+			// 索引前置：正式条目 + 候选池 + 「可能与本轮相关」（关键词初筛），并附本轮对话文本供初筛。
+			// v3：输入预算真正生效 —— 旧实现只裁剪"对话轮"，本轮用户消息/索引/任务文本不受控，
+			// 唯一兜底是发送**之后**才触发的 token watchdog（等于没防住超大 prompt）。
+			const budget = this.opts.maxInputTokens;
+			const rawTaskText = [...turns.map((t) => `${t.user}\n${t.assistant}`), input.currentUser].join('\n');
+			const taskText = truncateToBudget(rawTaskText, Math.floor(budget * 0.5));
 			const index = await renderMemoryIndex(store, 30, taskText, {
 				destroyAfterDays: this.opts.destroyAfterDays,
 			}).catch(() => '');
+			const inputText = renderInput(
+				turns,
+				truncateToBudget(input.currentUser, Math.floor(budget * 0.25)),
+				truncateToBudget(index, Math.floor(budget * 0.5)),
+			);
 			const { messages } = await runSubagentLoop(
 				[
 					{ role: 'system', content: MEMORY_AGENT_PROMPT },
-					{ role: 'user', content: renderInput(turns, input.currentUser, index) },
+					{ role: 'user', content: inputText },
 				],
 				this.opts.provider,
 				tools,
@@ -283,7 +320,7 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 			await store.audit({
 				kind: 'agent_run',
 				at: new Date().toISOString(),
-				sid: this.opts.sessionId,
+				sid,
 				model: this.opts.model,
 				elapsedMs: Date.now() - started,
 				totalTokens,
@@ -295,11 +332,21 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 			});
 
 			if (limitReason) {
-				// 被 watchdog 中止：游标**不推进**，下一轮可重试这段窗口
-				return { status: 'error', reason: limitReason, writes, notes, elapsedMs: Date.now() - started };
+				// watchdog 中止：默认不推进游标（下一轮可重试这段窗口）。
+				// 但同一窗口连续失败达到上限 → 推进游标并在审计里标 poison，
+				// 否则"稳定触发超时的那一段"会每轮重试、反复花钱写盘（旧行为）。
+				const giveUp = this.noteWatchdogFailure(input.nextCursor);
+				return {
+					status: 'error', reason: limitReason, writes, notes,
+					elapsedMs: Date.now() - started, limitReason,
+					...(giveUp ? { advanceCursorTo: input.nextCursor } : {}),
+				};
 			}
-			await this.advanceCursor(input.nextCursor);
-			return { status: 'done', writes, notes, elapsedMs: Date.now() - started };
+			this.watchdogFailures = { count: 0 };
+			return {
+				status: 'done', writes, notes, elapsedMs: Date.now() - started,
+				advanceCursorTo: input.nextCursor,
+			};
 		} catch (err) {
 			await store.audit({
 				kind: 'error',
@@ -307,7 +354,7 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 				scope: 'project',
 				where: 'memory_agent',
 				message: (err as Error).message,
-				sid: this.opts.sessionId,
+				sid,
 			});
 			return { status: 'error', reason: 'failed', writes, elapsedMs: Date.now() - started };
 		} finally {
@@ -390,13 +437,15 @@ export class MemoryAgent {	private readonly opts: MemoryAgentOptions;
 		return [readTool, writeTool, forgetTool];
 	}
 
-	private async advanceCursor(nextCursor?: string): Promise<void> {
-		if (!nextCursor) return;
-		try {
-			await this.opts.store.setState('project', { lastExtractedTurnId: nextCursor });
-		} catch {
-			/* 游标写失败不影响主流程 */
-		}
+	/**
+	 * 记录一次 watchdog 失败；同一游标连续达到阈值时返回 true（调用方应推进游标、放弃该窗口）。
+	 * 目的：既保留"首次失败可重试"，又避免稳定超长的窗口被永久重试。
+	 */
+	private noteWatchdogFailure(cursor?: string): boolean {
+		if (!cursor) return false;
+		if (this.watchdogFailures.cursor === cursor) this.watchdogFailures.count += 1;
+		else this.watchdogFailures = { cursor, count: 1 };
+		return this.watchdogFailures.count >= MAX_WATCHDOG_FAILURES;
 	}
 
 	private skip(reason: MemoryAgentResult['reason'], started: number): MemoryAgentResult {

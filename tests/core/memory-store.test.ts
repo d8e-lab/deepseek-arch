@@ -268,36 +268,6 @@ describe('memory-store', () => {
 		expect(candidates).toContain('[候选](c-d.md)');
 	});
 
-	it('listDue / markReminded：到期条目（含候选）返回一次后清空 remindAt', async () => {
-		const now = new Date('2026-09-15T00:00:00Z');
-		await store.write('project', {
-			subject: 'defer.a', name: '到期项', description: 'd', confidence: 3, body: 'b',
-			remindAt: '2026-09-14T00:00:00Z',
-		});
-		// 候选条目（confidence=1）也应被提醒：这是用户明确要求的事
-		await store.write('project', {
-			subject: 'defer.b', name: '候选到期项', description: 'd', confidence: 1, body: 'b',
-			remindAt: '2026-09-14T12:00:00Z',
-		});
-		// 未到期的不返回
-		await store.write('project', {
-			subject: 'defer.c', name: '未到期', description: 'd', confidence: 3, body: 'b',
-			remindAt: '2026-10-01T00:00:00Z',
-		});
-
-		const due = await store.listDue('project', now);
-		expect(due.map((e) => e.slug)).toEqual(['defer-a', 'defer-b']);
-
-		expect(await store.markReminded('project', 'defer-a')).toBe(true);
-		expect(await store.markReminded('project', 'defer-a')).toBe(false); // 幂等：已无 remindAt
-		const after = (await store.readEntry('project', 'defer-a'))!;
-		expect(after.remindAt).toBeUndefined();
-		expect(after.body).toBe('b'); // 条目本身保留
-
-		const dueAgain = await store.listDue('project', now);
-		expect(dueAgain.map((e) => e.slug)).toEqual(['defer-b']);
-	});
-
 	it('scan：无 frontmatter 的手写笔记归入 legacy 且不成为条目', async () => {
 		await store.ensureDir('project');
 		await writeFile(join(projectDir, 'note.md'), '无 frontmatter 的笔记\n', 'utf-8');
@@ -317,15 +287,20 @@ describe('memory-store', () => {
 		expect(await store.forget('project', 'not-exist')).toBe(false);
 	});
 
-	it('state：游标读写（跨进程可恢复）', async () => {
-		expect(await store.getState('project')).toEqual({});
-		await store.setState('project', { lastExtractedTurnId: 'turn-42' });
+	it('state：活动日 / 使用统计读写（v3 起存在 manifest.json，跨进程可恢复）', async () => {
+		await store.setState('project', { activeDayCount: 3, lastActiveDate: '2026-09-14' });
 		const state = await store.getState('project');
-		expect(state.lastExtractedTurnId).toBe('turn-42');
-		expect(state.updatedAt).toBeDefined();
+		expect(state.activeDayCount).toBe(3);
+		expect(state.lastActiveDate).toBe('2026-09-14');
 
-		await store.setState('project', { lastExtractedTurnId: 'turn-43' });
-		expect((await store.getState('project')).lastExtractedTurnId).toBe('turn-43');
+		// 落盘在总表里（state.json 只作为旧数据的一次性导入来源）
+		const manifest = JSON.parse(await readFile(join(projectDir, 'manifest.json'), 'utf-8'));
+		expect(manifest.version).toBe(1);
+		expect(manifest.activeDayCount).toBe(3);
+
+		// 另一个进程（新实例）能从 manifest 读到同样的状态
+		const fresh = new MemoryStore({ projectDir, globalDir, masterMinConfidence: 2 });
+		expect((await fresh.getState('project')).activeDayCount).toBe(3);
 	});
 
 	it('audit / appendLog：追加式落盘且不抛错', async () => {
@@ -350,7 +325,7 @@ describe('memory-store', () => {
 		const entry: MemoryEntry = {
 			slug: 'reply-format', name: '回复: 格式', description: '含冒号与逗号, 需引号', type: 'feedback',
 			subject: 'reply.format', tags: ['reply style', 'format'], scope: 'project', confidence: 3, signal: 'A',
-			paths: ['src/**', 'docs/*.md'], remindAt: '2026-09-15T09:00:00.000Z',
+			paths: ['src/**', 'docs/*.md'],
 			created: '2026-09-12T09:10:00.000Z', updated: '2026-09-13T02:00:00.000Z', status: 'active',
 			body: '正文\n**Why:** 原因', filePath: '/tmp/reply-format.md',
 		};
@@ -377,7 +352,7 @@ describe('memory-store', () => {
 		const line = renderManifestLine({
 			slug: 'a-b', name: 'A', description: 'd', type: 'user', subject: 'a.b', tags: [], scope: 'project',
 			confidence: 2, created: '2026-09-10T00:00:00Z', updated: '2026-09-13T00:00:00Z', status: 'active', body: '', filePath: '',
-		});
+		}, now);
 		expect(line).toBe('- [A](a-b.md) — d (confidence 2, updated today)');
 	});
 
@@ -396,5 +371,43 @@ describe('memory-store', () => {
 		const { entries, legacy } = await store.scan('project');
 		expect(entries).toHaveLength(0);
 		expect(legacy).toContain('broken.md');
+	});
+
+	it('listCandidates：不包含 superseded 墓碑（v3：代理不再"提升"无法复活的条目）', async () => {
+		// 一条 conf 1 的候选 → 遗忘后成为墓碑
+		await store.write('project', { subject: 'x.one', name: 'X', description: 'd', confidence: 1, body: 'v1', by: 'test' });
+		expect((await store.listCandidates('project')).map((e) => e.slug)).toContain('x-one');
+		await store.forget('project', 'x-one', 'test');
+		expect((await store.listCandidates('project')).map((e) => e.slug)).not.toContain('x-one');
+		// 对照：另一条候选不受影响
+		await store.write('project', { subject: 'y.one', name: 'Y', description: 'd', confidence: 1, body: 'v1', by: 'test' });
+		expect((await store.listCandidates('project')).map((e) => e.slug)).toContain('y-one');
+	});
+
+	it('总表（manifest.json）：首次使用即建立，元数据+使用统计在内、正文不在（v3 D3）', async () => {
+		await store.write('project', {
+			subject: 'a.b', name: 'A', description: 'd', confidence: 3, body: '正文', by: 'test',
+		});
+		await store.recordUse('project', 'a-b');
+
+		const manifest = JSON.parse(await readFile(join(projectDir, 'manifest.json'), 'utf-8'));
+		expect(manifest.version).toBe(1);
+		expect(manifest.entries.map((e: { slug: string }) => e.slug)).toContain('a-b');
+		expect(manifest.entries[0].body).toBeUndefined(); // 正文留在主题文件
+		expect(manifest.usage['a-b']?.uses).toBeGreaterThan(0);
+
+		// 另一个实例（模拟第二个进程）直接从总表拿到工作集，不需要扫描条目文件
+		const other = new MemoryStore({ projectDir, globalDir, masterMinConfidence: 2 });
+		expect((await other.listEntries('project')).map((e) => e.slug)).toEqual(['a-b']);
+	});
+
+	it('总表：另一进程写入后，本进程下次读取能看到（mtime 检测重载）', async () => {
+		const other = new MemoryStore({ projectDir, globalDir, masterMinConfidence: 2 });
+		expect(await other.listEntries('project')).toHaveLength(0); // 预热 other 的工作集
+
+		await new Promise((resolve) => setTimeout(resolve, 10)); // 保证 mtime 前进
+		await store.write('project', { subject: 'x.y', name: 'X', description: 'd', confidence: 3, body: 'b', by: 'test' });
+
+		expect((await other.listEntries('project')).map((e) => e.slug)).toContain('x-y');
 	});
 });

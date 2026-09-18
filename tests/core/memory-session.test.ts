@@ -137,11 +137,30 @@ describe('记忆与会话集成', () => {
 		expect(entries.map((e) => e.slug)).toContain('agent-written');
 
 		// 游标推进到第一轮（第二轮开始时窗口里只有第一轮）
-		const state = await store.getState('project');
-		expect(state.lastExtractedTurnId).toBe('1');
+		// v3：游标按会话存放（不再写共享的项目 state.json），因此从会话目录读
+		expect(await storage.getMemoryCursor(meta.id)).toBe('1');
+		// 共享的项目层状态里不应再有跨会话游标
+		expect((await store.getState('project')).lastExtractedTurnId).toBeUndefined();
 
 		// 主会话本身不受影响
 		expect((await storage.getTurns(meta.id)).length).toBe(2);
+	});
+
+	it('归纳游标按会话隔离：新会话不会清零另一个会话的进度（v3）', async () => {
+		const metaA = await mgr.startNewSession('会话A');
+		await mgr.sendMessageStream('A 第一轮', () => {});
+		await mgr.sendMessageStream('A 第二轮', () => {});
+		await sleep(150);
+		expect(await storage.getMemoryCursor(metaA.id)).toBe('1');
+
+		// 新会话开始（旧实现：空窗口会把**共享**游标写成 0 → 会话 A 的进度被抹掉，
+		// 再 resume A 会整段重新归纳）
+		const metaB = await mgr.startNewSession('会话B');
+		await mgr.sendMessageStream('B 第一轮', () => {});
+		await sleep(150);
+
+		expect(await storage.getMemoryCursor(metaA.id)).toBe('1');
+		expect(await storage.getMemoryCursor(metaB.id)).toBe('0');
 	});
 
 	it('refreshMemoryPrompt：重建 system prompt 清单并重写快照；无变化返回 false', async () => {
@@ -159,26 +178,6 @@ describe('记忆与会话集成', () => {
 		expect(snapshot).toContain('你是助手。');
 		// 只有一个 <memory_listing> 块（重建而非追加）
 		expect(snapshot.match(/<memory_listing>/g)).toHaveLength(1);
-	});
-
-	it('到期提醒：条目的提醒块随本轮落盘，且触发 once 回调', async () => {
-		await store.write('project', {
-			subject: 'defer.a', name: '到期项', description: 'd', confidence: 3, body: 'b',
-			remindAt: '2020-01-01T00:00:00Z',
-		});
-		const meta = await mgr.startNewSession('到期提醒测试');
-		const dueSlugs: string[][] = [];
-		mgr.setMemoryDueCallback((slugs) => dueSlugs.push(slugs));
-
-		await mgr.sendMessageStream('你好', () => {});
-
-		const turns = await storage.getTurns(meta.id);
-		const allText = turns.flatMap((t) => t.messages ?? []).map((m) => String(m.content ?? '')).join('\n');
-		expect(allText).toContain('<memory-due>');
-		expect(allText).toContain('到期项');
-		expect(dueSlugs).toEqual([['defer-a']]);
-		// 一次性：条目仍在但 remindAt 已清空
-		expect((await store.readEntry('project', 'defer-a'))!.remindAt).toBeUndefined();
 	});
 
 	it('compact 后重建 system prompt：清单刷新 + 快照同步（R7/R11）', async () => {
@@ -207,6 +206,8 @@ describe('记忆与会话集成', () => {
 		const snapshot = await readFile(join(storage.sessionDir(meta.id), 'system-prompt.txt'), 'utf-8');
 		expect(snapshot).toBe('你是助手。');
 		await plain.sendMessageStream('你好', () => {});
-		expect(await store.getState('project')).toEqual({}); // 没跑 agent、没写游标
+		// 没跑归纳代理：项目层不应出现任何条目（总表里条目为空）
+		expect(await store.listEntries('project')).toHaveLength(0);
+		expect(await store.listCandidates('project')).toHaveLength(0);
 	});
 });

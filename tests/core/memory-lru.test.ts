@@ -172,14 +172,15 @@ describe('memory LRU（统一 confidence 档位）', () => {
 		await store.setState('project', { activeDayCount: 100 + 31, lastActiveDate: new Date().toISOString().slice(0, 10) });
 
 		await store.recordUse('project', slug);                       // master 读全文
-		const r = await store.reconcile('project', { destroyAfterDays: 30 });
-
-		expect(r.destroyed).toEqual([]);
-		expect(r.revived).toEqual([slug]);
+		// v3：会话内局部判定 —— 复活在读取当下就发生（不再等结算）
 		const entry = (await store.readEntry('project', slug))!;
 		expect(entry.confidence).toBe(1);                             // 从 1 开始观察，不是 2
 		expect(entry.status).toBe('candidate');
 		expect(await store.listEntries('project')).toHaveLength(0);
+
+		const r = await store.reconcile('project', { destroyAfterDays: 30 });
+		expect(r.destroyed).toEqual([]);
+		expect(r.revived).toEqual([]);                                // 已复活，结算不再重复报告
 	});
 
 	it('conf 0 被归纳代理「看到」→ 回到 conf 1（话题又出现了），但不增 uses', async () => {
@@ -187,12 +188,13 @@ describe('memory LRU（统一 confidence 档位）', () => {
 		await store.setState('project', { activeDayCount: 100 + 31, lastActiveDate: new Date().toISOString().slice(0, 10) });
 
 		await store.recordTouch('project', slug);
-		const r = await store.reconcile('project', { destroyAfterDays: 30 });
-
-		expect(r.destroyed).toEqual([]);
-		expect(r.revived).toEqual([slug]);
+		// 「看到」也即时复活，但不升级；uses 不增加
 		expect((await store.readEntry('project', slug))!.confidence).toBe(1);
 		expect((await store.getState('project')).usage![slug].uses).toBe(0);
+
+		const r = await store.reconcile('project', { destroyAfterDays: 30 });
+		expect(r.destroyed).toEqual([]);
+		expect(r.revived).toEqual([]);                                // 已在触达当下复活
 	});
 
 	it('memory window：可见条目超容量 → 最久未用者降到 conf 1（观察区，不是判死刑）', async () => {
@@ -346,8 +348,42 @@ describe('memory LRU（统一 confidence 档位）', () => {
 		await setDay(800);
 		await store.write('project', { subject: 'sparse.pref', name: 'sparse.pref', description: 'd', confidence: 1, body: 'body-sparse.pref', slug });
 		await store.recordUse('project', slug);
-		expect((await store.reconcile('project')).promoted).toEqual([{ slug, from: 1, to: 2 }]);
+		// v3：第二次使用达到阈值 → 会话内即时升级（结算不再重复报告）
+		expect((await store.readEntry('project', slug))!.confidence).toBe(2);
 		expect(await store.listEntries('project')).toHaveLength(1);
+		expect((await store.reconcile('project')).promoted).toEqual([]);
+	});
+
+	it('会话内局部判定：读满阈值即升级；写路径不升级（显式降级不会被同一次写入抬回）', async () => {
+		const w = await store.write('project', { subject: 'local.judge', name: 'L', description: 'd', confidence: 2, body: 'b' });
+		// 写入算一次使用，但**不触发即时升级**（uses=1 < 阈值 2）
+		expect((await store.readEntry('project', w.slug))!.confidence).toBe(2);
+
+		// 显式降到 1：写路径 allowPromote=false，不会被这次写入的 use 抬回
+		await store.write('project', { slug: w.slug, subject: 'local.judge', name: 'L', description: 'd', confidence: 1, body: 'b' });
+		expect((await store.readEntry('project', w.slug))!.confidence).toBe(1);
+
+		// master 读全文 → 累计使用达到阈值 → 立即升到 2（不等检查点结算）
+		await store.recordUse('project', w.slug);
+		expect((await store.readEntry('project', w.slug))!.confidence).toBe(2);
+	});
+
+	it('会话内局部判定：lruEnabled=false 时完全不介入（只留检查点结算）', async () => {
+		const plain = new MemoryStore({
+			projectDir: join(root, 'plain-project'), globalDir: join(root, 'plain-global'),
+			masterMinConfidence: 2, lruEnabled: false,
+		});
+		const w = await plain.write('project', { subject: 'no.lru', name: 'N', description: 'd', confidence: 1, body: 'b' });
+		await plain.recordUse('project', w.slug);
+		await plain.recordUse('project', w.slug);
+		expect((await plain.readEntry('project', w.slug))!.confidence).toBe(1);
+	});
+
+	it('会话内局部判定：「看到」不升级（即使 uses 远超阈值）', async () => {
+		const w = await store.write('project', { subject: 'touch.only', name: 'T', description: 'd', confidence: 1, body: 'b' });
+		await store.setState('project', { usage: { [w.slug]: { uses: 99, lastUsedAt: new Date().toISOString() } } });
+		await store.recordTouch('project', w.slug);
+		expect((await store.readEntry('project', w.slug))!.confidence).toBe(1);
 	});
 
 	it('退休条目的使用记录被清理（取代 + 遗忘都不在 state.json 里留垃圾）', async () => {

@@ -40,6 +40,7 @@ import { MemoryRecall } from './memory-recall.js';
 import { MemoryInjector, MEMORY_LISTING_TAG } from './memory-inject.js';
 import { MemoryAgent } from './memory-agent.js';
 import { createMemoryStore } from './memory-service.js';
+import { withMemoryLock } from './memory-lock.js';
 import { activateSkillsForPaths, extractPathsFromToolCall } from './skill.js';
 import {
 	MAX_RESTORE_FILES,
@@ -192,8 +193,6 @@ export class SessionManager {
 	private memory: MemoryRuntime | null = null;
 	/** 「已更新 N 条记忆」提示回调（TUI 注册；headless 走 stderr） */
 	private memoryNoticeCallback: ((count: number, slugs: string[]) => void) | null = null;
-	/** 「到期提醒」提示回调（TUI 注册） */
-	private memoryDueCallback: ((slugs: string[]) => void) | null = null;
 	/** 自动 compact 配置：上下文超阈值时自动压缩（默认开启，70% of 1M tokens） */
 	private autoCompact = {
 		enabled: true,
@@ -229,16 +228,26 @@ export class SessionManager {
 		// 关联会话 ID 到 provider（请求镜像监听用）
 		this.provider.setSessionId?.(meta.id);
 
-		// 记忆清单注入 system prompt（只在会话创建时做一次：system prompt 在会话内冻结 → 零缓存代价，
-		// 代价只是"可能过期"，由会话内的变化提醒补齐）
-		// 前置：先做一次 LRU 维护（低频、确定性），保证下面注入的清单就是结算后的结果
-		if (this.memory && this.memory.config.inject && this.systemPrompt?.content) {
+		// ── 记忆：维护与注入解耦（v3）──
+		// ① LRU 维护：不再受 `inject` 开关约束 —— 关注入曾经让整套老化/清理静默停摆。
+		if (this.memory) {
 			try {
 				await this.maintainMemory();
-				const { block } = await this.memory.injector.buildListingBlock();
-				if (block) {
-					this.systemPrompt = { role: 'system', content: `${this.systemPrompt.content}\n\n${block}` };
+			} catch { /* 维护失败不阻塞建会话 */ }
+		}
+		// ② 清单注入 system prompt（只在会话创建时做一次：会话内冻结 → 零缓存代价，
+		//    代价只是"可能过期"，由会话内的变化提醒补齐）
+		if (this.memory && this.memory.config.inject && this.systemPrompt?.content) {
+			try {
+				const listing = await this.memory.injector.buildListingBlock();
+				if (listing.block) {
+					this.systemPrompt = { role: 'system', content: `${this.systemPrompt.content}\n\n${listing.block}` };
 				}
+				// 召回模式/退化原因落审计（旧实现把它们丢掉，"为何少注入"无法追查）
+				await this.memory.store.audit({
+					kind: 'inject', at: new Date().toISOString(), scope: 'project', sid: meta.id,
+					mode: 'listing', recallMode: listing.mode, reason: listing.recallReason, tokens: listing.tokens,
+				});
 			} catch { /* 清单构建失败不阻塞建会话 */ }
 		}
 
@@ -264,6 +273,13 @@ export class SessionManager {
 		}
 		// 快照里的清单就是模型当前看到的那份 → 播种"已见"集合，之后只提醒差异（避免"全部新增"误报）
 		this.memory?.injector.seedFromSystemPrompt(session.systemPrompt);
+
+		// v3：resume 也跑一次 LRU 维护（旧实现只在新建会话跑 → 只 resume 的用户永不老化）
+		if (this.memory) {
+			try {
+				await this.maintainMemory();
+			} catch { /* 维护失败不阻塞 resume */ }
+		}
 
 		// 恢复子代理会话（方案 B：磁盘记录 → SubagentSession，可继续查看/交互）
 		await this.restoreSubagents(session.meta.id);
@@ -376,7 +392,11 @@ export class SessionManager {
 			this.memory = null;
 			return;
 		}
-		const store = cfg.store ?? createMemoryStore({ masterMinConfidence: config.masterMinConfidence });
+		const store = cfg.store ?? createMemoryStore({
+			masterMinConfidence: config.masterMinConfidence,
+			lruEnabled: config.lruEnabled,
+			promoteUses: config.lruPromoteUses,
+		});
 		const recall = new MemoryRecall({ provider: this.provider, model: config.recallModel });
 		this.memory = {
 			store,
@@ -431,20 +451,23 @@ export class SessionManager {
 		const out: MemoryMaintenanceResult[] = [];
 		for (const scope of ['project', 'global'] as const) {
 			try {
-				out.push(await mem.store.reconcile(scope, lru, opts.dryRun));
+				// dry-run 零副作用，无需取锁；真实结算取 workspace 级写锁（跨进程互斥）
+				out.push(opts.dryRun
+					? await mem.store.reconcile(scope, lru, true)
+					: await withMemoryLock(mem.store.dirOf(scope), () => mem.store.reconcile(scope, lru, false)));
 			} catch { /* 维护失败不阻塞会话创建；store 内部已尽力审计 */ }
 		}
 		return out;
 	}
 
+	/** 中止后台记忆归纳并等待其收尾（进程退出 / compact 前收敛用） */
+	async abortMemoryAgent(timeoutMs = 5000): Promise<void> {
+		await this.memory?.agent.abortAndWait(timeoutMs).catch(() => { /* 收敛失败忽略 */ });
+	}
+
 	/** 「已更新记忆」提示回调（TUI / headless 注册） */
 	setMemoryNoticeCallback(cb: ((count: number, slugs: string[]) => void) | null): void {
 		this.memoryNoticeCallback = cb;
-	}
-
-	/** 「到期提醒」回调（TUI 注册；提醒块本身已注入给模型） */
-	setMemoryDueCallback(cb: ((slugs: string[]) => void) | null): void {
-		this.memoryDueCallback = cb;
 	}
 
 	/**
@@ -456,8 +479,18 @@ export class SessionManager {
 		const mem = this.memory;
 		if (!mem || !this.session || !this.systemPrompt) return false;
 		const base = stripMemoryListing(this.systemPrompt.content);
-		const { block } = await mem.injector.buildListingBlock();
+		// 召回需要"当前任务"文本：这里取最近一轮的用户消息。
+		// （会话创建时还没有用户消息，那时的清单只能按"全部/按更新时间"给，见技术报告「召回」一节）
+		const lastTurn = this.session.turns[this.session.turns.length - 1];
+		const taskText = lastTurn ? turnUserContent(lastTurn).slice(0, 2000) : '';
+		const listing = await mem.injector.buildListingBlock(taskText);
+		const block = listing.block;
 		const content = block ? `${base}\n\n${block}` : base;
+		// 召回模式/退化原因落审计（含"本次重建用了哪个 mode、是否退化"）
+		await mem.store.audit({
+			kind: 'inject', at: new Date().toISOString(), scope: 'project', sid: this.session.meta.id,
+			mode: 'listing_refresh', recallMode: listing.mode, reason: listing.recallReason, tokens: listing.tokens,
+		});
 		if (content === this.systemPrompt.content) return false;
 		this.systemPrompt = { role: 'system', content };
 		try {
@@ -541,10 +574,13 @@ export class SessionManager {
 		if (turns.length === 0) throw new Error('会话为空，无需压缩');
 
 		// Phase 1：等待所有 subagent 结束（compact 前必须收敛后台任务）
+		// 子代理失败不应阻断 compact：drive promise 可能 reject，这里逐个吞掉
 		const pending = [...this.subagents.values()].filter((s) => s.isRunning);
 		if (pending.length > 0) {
-			await Promise.all(pending.map((s) => s.promise));
+			await Promise.all(pending.map((s) => s.promise?.catch(() => undefined) ?? Promise.resolve()));
 		}
+		// Phase 1b：收敛后台记忆归纳 —— 否则它会在 compact 重建清单的同时继续写条目/游标
+		await this.memory?.agent.abortAndWait().catch(() => { /* 收敛失败不阻塞 compact */ });
 
 		const cwd = process.env.DEEPSEEK_ARCH_SESSION_CWD ?? process.cwd();
 
@@ -570,6 +606,9 @@ export class SessionManager {
 
 		// R7/R11：compact 是"前缀本来就要变"的时刻 → 顺便重建 system prompt 里的记忆清单并重写快照
 		// （否则清单会一直停留在会话创建时的状态）
+		// v3：重建前先复位"会话内已出示"集合 —— 被压缩掉的历史里那些出示记录不再可见，
+		// 旧的 surfaced 会让重建后的清单从"已出示的补集"里挑，从而静默漏掉已注入过的记忆。
+		this.memory?.injector.resetSurfaced();
 		await this.refreshMemoryPrompt().catch(() => { /* 失败不阻塞 compact */ });
 
 		return {
@@ -732,8 +771,10 @@ export class SessionManager {
 
 	/**
 	 * 本轮的记忆注入（落盘进 agentMessages）：
-	 *  ① 到期提醒（remindAt 已到）② 模型读过的条目被更新 ③ 清单发生变化
+	 *  ① 模型读过的条目被更新 ② 清单发生变化（新增/更新/移除/升降档）
 	 * 落盘的原因：成为历史的一部分 → 下一轮前缀不断（不落盘会重算上一轮内容）。
+	 *
+	 * v3：删除"到期提醒"（remindAt）后，这里也少了一次全量扫描。
 	 */
 	private async injectMemoryUpdates(agentMessages: Message[]): Promise<void> {
 		const mem = this.memory;
@@ -741,22 +782,13 @@ export class SessionManager {
 		try {
 			const blocks: string[] = [];
 
-			// ① 到期提醒（一次性：发出后清空该条目的 remindAt）
-			const due = await mem.injector.buildDueBlock();
-			if (due) {
-				blocks.push(due.block);
-				try {
-					this.memoryDueCallback?.(due.slugs);
-				} catch { /* UI 回调失败不影响注入 */ }
-			}
-
-			// ② 读过的条目被更新
+			// ① 读过的条目被更新
 			if (mem.config.notifyReadUpdates) {
 				const readBlock = await mem.injector.buildReadUpdateBlock(this.collectReadMemorySlugs());
 				if (readBlock) blocks.push(readBlock);
 			}
 
-			// ③ 清单变化（新增/更新/移除）
+			// ② 清单变化（新增/更新/移除/置信度变化）
 			const updateBlock = await mem.injector.buildUpdateBlock();
 			if (updateBlock) blocks.push(updateBlock);
 
@@ -798,9 +830,12 @@ export class SessionManager {
 	private async maybeRunMemoryAgent(currentUser: string): Promise<void> {
 		const mem = this.memory;
 		if (!mem || !mem.config.agentOnTurnEnd || !this.session) return;
+		const sessionId = this.session.meta.id;
 		try {
-			const state = await mem.store.getState('project');
-			const cursor = Number(state.lastExtractedTurnId ?? '0') || 0;
+			// 游标按会话存放（v3）：旧实现在**共享的**项目 state.json 里，新会话会把旧会话的
+			// 进度清零（再 resume 旧会话就整段重新归纳），多会话同时开还会互相踩。
+			const cursorRaw = await this.storage.getMemoryCursor(sessionId);
+			const cursor = Math.max(0, Number(cursorRaw ?? '0') || 0);
 			const all = this.session.allTurns ?? this.session.turns;
 			const window = all.slice(cursor).map((t, i) => ({
 				user: turnUserContent(t),
@@ -813,9 +848,22 @@ export class SessionManager {
 				currentUser,
 				masterWrote,
 				nextCursor: String(all.length),
+				sid: sessionId,
 			});
+			// 游标由会话层持久化（agent 只返回"该推进到哪"）
+			if (result.advanceCursorTo) {
+				await this.storage.setMemoryCursor(sessionId, result.advanceCursorTo).catch(() => { /* 游标写失败不影响主流程 */ });
+			}
 			if (result.status === 'done' && result.writes.length > 0) {
 				this.memoryNoticeCallback?.(result.writes.length, result.writes.map((w) => w.slug));
+			}
+			if (result.limitReason) {
+				// watchdog 中止：记录是否放弃该窗口（放弃=已推进游标），便于排查"为什么这段没归纳"
+				await mem.store.audit({
+					kind: 'error', at: new Date().toISOString(), scope: 'project',
+					where: 'memory_agent_watchdog', message: result.limitReason, sid: sessionId,
+					gaveUpWindow: Boolean(result.advanceCursorTo),
+				}).catch(() => { /* 审计失败忽略 */ });
 			}
 		} catch { /* agent 内部已记审计；此处只保证不打扰主流程 */ }
 	}

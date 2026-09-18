@@ -13,14 +13,26 @@
  */
 
 import type { Tool, ToolResult } from './types.js';
-import { getMemoryStore } from '../core/memory-service.js';
-import { MEMORY_TYPES, type MemoryType } from '../core/memory-store.js';
+import { getMemoryStore, emitMemoryAlert } from '../core/memory-service.js';
+import { withMemoryLock } from '../core/memory-lock.js';
+import { MAX_MEMORY_ENTRY_BYTES, MEMORY_TYPES, type MemoryType } from '../core/memory-store.js';
 
 function asStringArray(v: unknown): string[] | undefined {
 	if (v === undefined || v === null) return undefined;
 	if (Array.isArray(v)) return v.map((x) => String(x));
 	const s = String(v).trim();
 	return s ? s.split(',').map((x) => x.trim()).filter(Boolean) : undefined;
+}
+
+/**
+ * 置信度容错：模型经常把数字写成字符串（`"1"`），旧实现用 `typeof === 'number'` 判断，
+ * 于是字符串被**静默丢弃** —— "软化删除（confidence 1）"看起来成功、实际没生效。
+ * 现在统一转数字；不可解析才视为未提供。范围由 store 侧 clamp 到 1–3。
+ */
+function asConfidence(v: unknown): number | undefined {
+	if (v === undefined || v === null || v === '') return undefined;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : undefined;
 }
 
 /** 写入记忆（可显式传入 store —— memory agent 用它自己的实例，避免全局单例串用） */
@@ -39,7 +51,8 @@ export async function writeMemoryEntry(
 		: 'reference';
 
 	try {
-		const result = await store.write(scope, {
+		// workspace 级写锁：与另一个进程（TUI / cron heartbeat）的记忆写入互斥
+		const result = await withMemoryLock(store.dirOf(scope), () => store.write(scope, {
 			slug: typeof params.slug === 'string' && params.slug.trim() ? params.slug.trim() : undefined,
 			subject,
 			body,
@@ -48,12 +61,19 @@ export async function writeMemoryEntry(
 			type,
 			tags: asStringArray(params.tags),
 			paths: asStringArray(params.paths),
-			confidence: typeof params.confidence === 'number' ? params.confidence : undefined,
-			remindAt: typeof params.remindAt === 'string' ? params.remindAt : undefined,
+			confidence: asConfidence(params.confidence),
 			supersedes: asStringArray(params.supersedes),
 			by: typeof params.by === 'string' ? params.by : 'master',
-		});
+		}));
 		// 索引（MEMORY.md / candidates.md）由 store 内部随写随新，调用方不需要 rebuildIndex
+
+		// 超限告警：记忆应当是"一行偏好 + 简短说明"；写入侧就提醒，别等到读取被截断才发现
+		const writtenBytes = Buffer.byteLength(body, 'utf-8');
+		if (writtenBytes > MAX_MEMORY_ENTRY_BYTES) {
+			emitMemoryAlert(
+				`[memory] "${result.slug}" 正文 ${Math.round(writtenBytes / 1024)}K 超过上限 ${Math.round(MAX_MEMORY_ENTRY_BYTES / 1024)}K，读取时会被截断（建议拆分或改放普通文件）`,
+			);
+		}
 
 		const verb =
 			result.action === 'add' ? 'added'
@@ -109,7 +129,6 @@ export const memoryWriteTool: Tool = {
 				description:
 					'Comma-separated slugs this entry replaces (optional). Omit to let the store decide by subject.',
 			},
-			remindAt: { type: 'string', description: 'ISO 8601 time to remind about this entry (optional).' },
 		},
 		required: ['subject', 'body'],
 	},

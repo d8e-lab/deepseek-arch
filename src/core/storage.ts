@@ -40,6 +40,9 @@ const SUBAGENT_META_FILE = 'meta.json';
 /** 子代理逐轮运行文件名（与 master 的分代文件同构；子代理无 compact，恒为 turn_0） */
 const SUBAGENT_RUNS_FILE = 'turn_0.json';
 
+/** 记忆归纳游标文件名（按会话存储，避免跨会话互相覆盖） */
+const MEMORY_CURSOR_FILE = 'memory-cursor.json';
+
 // ─── Storage 类 ──────────────────────────────────────
 
 export class Storage {
@@ -541,5 +544,32 @@ export class Storage {
 		} catch {
 			return [];
 		}
+	}
+
+	// ─── 记忆归纳游标（按会话存储）─────────────────────
+	//
+	// v3 修复：游标原先存在**共享的**项目层 state.json（lastExtractedTurnId），
+	// 于是新会话把旧会话的进度清零 → 再 resume 旧会话会整段重新归纳；多会话互相踩。
+	// 现在按会话存放在会话目录内，与 turns 同生命周期。
+
+	/** 记忆归纳游标文件路径（会话目录内） */
+	private memoryCursorPath(sessionId: string): string {
+		return join(this.sessionDir(sessionId), MEMORY_CURSOR_FILE);
+	}
+
+	/** 读取该会话的记忆归纳游标（已归纳到的轮次数，字符串；无则 null） */
+	async getMemoryCursor(sessionId: string): Promise<string | null> {
+		const data = await this.readJSON<{ cursor?: string }>(this.memoryCursorPath(sessionId));
+		return typeof data?.cursor === 'string' ? data.cursor : null;
+	}
+
+	/** 写入该会话的记忆归纳游标 */
+	async setMemoryCursor(sessionId: string, cursor: string): Promise<void> {
+		try {
+			await access(this.sessionDir(sessionId));
+		} catch {
+			return; // 会话目录不存在（已删除）→ 静默跳过
+		}
+		await this.writeJSON(this.memoryCursorPath(sessionId), { cursor, updated_at: new Date().toISOString() });
 	}
 }

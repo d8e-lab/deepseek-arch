@@ -140,9 +140,13 @@ describe('memory 工具', () => {
 		const index = await memoryReadTool.execute({ path: 'MEMORY.md' });
 		expect(index.content).toContain('Memory index');
 
-		// ④ 读到条目会记一次「使用」（LRU 信号；注入不算）
-		const usage = JSON.parse(await readFile(join(projectDir, 'state.json'), 'utf-8')).usage ?? {};
-		expect(usage['cand-one']?.uses).toBeGreaterThan(0);
+		// ④ 读到条目会记一次「使用」（LRU 信号；注入不算）—— 使用统计存在总表 manifest.json。
+		// 注意：候选条已被写入过一次（uses=1），这次读取使其达到升级阈值 → v3 会话内即时升到 2，
+		// 计数随之清零；因此这里用审计记录来断言"确实记了一次使用"。
+		const audit = await readFile(join(projectDir, 'audit.jsonl'), 'utf-8');
+		expect(audit).toContain('"kind":"use"');
+		expect(audit).toContain('"slug":"cand-one"');
+		expect((await memoryReadTool.execute({ path: 'cand-one.md' })).content).toContain('confidence 2');
 	});
 
 	it('工具注册：主代理有 memory_read/memory_write，子代理没有', () => {
@@ -153,5 +157,44 @@ describe('memory 工具', () => {
 		const sub = getAllTools().map((t) => t.name);
 		expect(sub).not.toContain('memory_read');
 		expect(sub).not.toContain('memory_write');
+	});
+
+	it('memory_read：拒绝 memory 目录之外的路径（v3 D9）', async () => {
+		await memoryWriteTool.execute({ subject: 'a.b', name: 'A', description: 'd', body: '正文' });
+
+		// 目录穿越
+		const escape = await memoryReadTool.execute({ path: '../../../etc/hostname' });
+		expect(escape.error).toBe('not_found');
+		expect(escape.content).toContain('outside the memory directories');
+
+		// 绝对路径指向仓库外
+		const abs = await memoryReadTool.execute({ path: '/etc/hostname' });
+		expect(abs.error).toBe('not_found');
+
+		// memory 目录内的绝对路径仍可读
+		const inside = await memoryReadTool.execute({ path: join(projectDir, 'a-b.md') });
+		expect(inside.error).toBeUndefined();
+		expect(inside.content).toContain('正文');
+	});
+
+	it('memory_write：字符串置信度被正确解析（v3 D11）', async () => {
+		await memoryWriteTool.execute({ subject: 's.one', name: 'S', description: 'd', body: 'b', confidence: 2 });
+		// 模型常把数字写成字符串：必须真的降到 1（软淘汰），而不是静默忽略并保持可见
+		const r = await memoryWriteTool.execute({
+			slug: 's-one', subject: 's.one', name: 'S', description: 'd', body: 'b', confidence: '1',
+		});
+		expect(r.error).toBeUndefined();
+		const entry = await readFile(join(projectDir, 's-one.md'), 'utf-8');
+		expect(entry).toContain('confidence: 1');
+	});
+
+	it('memory_read：条目超过 64K 时截断返回并带标记（v3 D10）', async () => {
+		const big = 'x'.repeat(70 * 1024);
+		await memoryWriteTool.execute({ subject: 'big.one', name: 'B', description: 'd', body: big });
+
+		const r = await memoryReadTool.execute({ path: 'big-one.md' });
+		expect(r.error).toBeUndefined();
+		expect(r.content).toContain('⚠ (truncated at');
+		expect(Buffer.byteLength(r.content, 'utf-8')).toBeLessThan(70 * 1024);
 	});
 });

@@ -14,6 +14,7 @@
 import type { Tool, ToolResult } from './types.js';
 import type { MemoryStore } from '../core/memory-store.js';
 import { getMemoryStore } from '../core/memory-service.js';
+import { withMemoryLock } from '../core/memory-lock.js';
 
 /** 硬淘汰实现（可显式注入 store —— memory agent 用它自己的实例） */
 export async function forgetMemoryEntry(
@@ -35,7 +36,7 @@ export async function forgetMemoryEntry(
 				error: 'forbidden',
 			};
 		}
-		const ok = await store.forget(scope, slug, reason ?? 'memory_agent');
+		const ok = await withMemoryLock(store.dirOf(scope), () => store.forget(scope, slug, reason ?? 'memory_agent'));
 		return ok
 			? { content: `memory_forget ok: "${slug}" retired (${scope}). The file is kept for history.` }
 			: { content: `memory_forget failed: "${slug}" not found.`, error: 'not_found' };

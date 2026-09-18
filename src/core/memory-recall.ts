@@ -93,8 +93,14 @@ export class MemoryRecall {
 
 		// 超预算 → 让模型挑
 		try {
-			const indices = await this.askModel(req.taskText, pool, req.maxItems);
-			if (indices === null) return this.fallback(pool, req, started, 'llm_invalid');
+			const asked = await this.askModel(req.taskText, pool, req.maxItems);
+			if (asked === null) return this.fallback(pool, req, started, 'llm_invalid');
+			// 模型给了下标但**全部非法**（越界/重复/非整数）→ 视为召回失败，退化为按 updated 倒序。
+			// 旧实现把它当成"模型说都不相关"，于是清单整块消失，违背"绝不因召回失败而少注入"。
+			if (asked.requested.length > 0 && asked.valid.length === 0) {
+				return this.fallback(pool, req, started, 'llm_invalid');
+			}
+			const indices = asked.valid;
 			const picked: MemoryEntry[] = [];
 			let used = 0;
 			for (const idx of indices) {
@@ -139,8 +145,15 @@ export class MemoryRecall {
 		return { entries, mode: 'fallback', reason, tokens: used, elapsedMs: Date.now() - started };
 	}
 
-	/** 调用召回模型，返回被选中的下标（越界/非法值被过滤）；无法解析返回 null（走退化） */
-	private async askModel(taskText: string, pool: MemoryEntry[], maxItems: number): Promise<number[] | null> {
+	/**
+	 * 调用召回模型：返回「模型要求的下标」与「其中合法的下标」（去重/越界过滤后）。
+	 * 完全无法解析时返回 null（调用方走退化）。
+	 */
+	private async askModel(
+		taskText: string,
+		pool: MemoryEntry[],
+		maxItems: number,
+	): Promise<{ requested: number[]; valid: number[] } | null> {
 		const list = pool
 			.map((e, i) => `${i + 1}. [${e.type}] ${e.slug} (priority subject: ${e.subject}) — ${e.description}`)
 			.join('\n');
@@ -177,14 +190,16 @@ export class MemoryRecall {
 		if (parsed === null) return null;
 		// 1-based → 0-based，去重、滤波、保序
 		const seen = new Set<number>();
-		const out: number[] = [];
+		const valid: number[] = [];
 		for (const n of parsed) {
 			const idx = n - 1;
 			if (!Number.isInteger(idx) || idx < 0 || idx >= pool.length || seen.has(idx)) continue;
 			seen.add(idx);
-			out.push(idx);
+			valid.push(idx);
 		}
-		return out;
+		// 同时返回"模型原始要求的下标数"与"合法下标"：调用方据此区分
+		// 「模型说都不相关（空数组）」和「模型给的下标全非法（召回失败，应退化）」
+		return { requested: parsed, valid };
 	}
 }
 

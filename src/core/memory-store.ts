@@ -23,11 +23,18 @@
  */
 
 import { readFile, writeFile, mkdir, readdir, rename, stat, appendFile, unlink } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 /** 记忆类型（受控词表，对齐 Claude Code） */
 export const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const;
+
+/**
+ * 单条记忆的大小上限（字节，含 frontmatter）。
+ * 超过后读取会被截断（并在 TUI 给出提示），写入侧也会告警 —— 记忆应当是"一行偏好 + 简短说明"，
+ * 超限通常意味着把正文/资料写进了记忆，应该改放普通文件。
+ */
+export const MAX_MEMORY_ENTRY_BYTES = 64 * 1024;
 export type MemoryType = (typeof MEMORY_TYPES)[number];
 
 /** 记忆层级：项目层 / 全局层 */
@@ -58,8 +65,6 @@ export interface MemoryEntry {
 	signal?: string;
 	/** 适用路径 glob（可选） */
 	paths?: string[];
-	/** 提醒时间（ISO 8601；到期后注入提醒） */
-	remindAt?: string;
 	/** 用户钉住：免疫 LRU 升降级与归档（`/memory pin`） */
 	pinned?: boolean;
 	/** 创建/更新时间（ISO 8601） */
@@ -87,7 +92,6 @@ export interface MemoryWriteInput {
 	confidence?: number;
 	signal?: string;
 	paths?: string[];
-	remindAt?: string;
 	/** 正文（必填） */
 	body: string;
 	/** 被取代的条目 slug（supersede 语义；省略时按 subject 自动判断） */
@@ -230,8 +234,8 @@ export interface MemoryMaintenanceResult {
 /** 审计记录（audit.jsonl，追加式；kind 区分类型） */
 export interface MemoryAuditRecord {
 	kind:
-		| 'write' | 'merge' | 'supersede' | 'forget' | 'fold' | 'inject'
-		| 'error' | 'agent_run' | 'remind_due' | 'lru' | 'pin' | 'use';
+		| 'write' | 'merge' | 'supersede' | 'forget' | 'inject'
+		| 'error' | 'agent_run' | 'lru' | 'pin' | 'use';
 	at: string;
 	[extra: string]: unknown;
 }
@@ -243,6 +247,10 @@ export interface MemoryStoreOptions {
 	globalDir: string;
 	/** master 可见的最低置信度（默认 2） */
 	masterMinConfidence?: number;
+	/** LRU 局部判定总开关（默认 true）——关闭后只有检查点结算会升降级 */
+	lruEnabled?: boolean;
+	/** 会话内即时升级阈值：累计使用达到该次数就升一级（默认 2，与 [memory] 配置一致） */
+	promoteUses?: number;
 }
 
 /** 索引/候选文件名（不参与条目扫描） */
@@ -251,13 +259,63 @@ const CANDIDATES_FILE = 'candidates.md';
 const STATE_FILE = 'state.json';
 const AUDIT_FILE = 'audit.jsonl';
 
+/** 机器可读总表（harness 工作集；由 store 自维护，不参与条目扫描） */
+const MANIFEST_FILE = 'manifest.json';
+
+/** 总表里单条记忆的元数据（**不含正文** —— 正文留在 `<slug>.md`） */
+export type MemoryEntryMeta = Omit<MemoryEntry, 'body' | 'filePath'>;
+
+/** 总表文件结构（每层一份） */
+export interface LayerManifestFile {
+	version: 1;
+	updatedAt: string;
+	activeDayCount?: number;
+	lastActiveDate?: string;
+	entries: MemoryEntryMeta[];
+	usage: Record<string, MemoryUsage>;
+}
+
+/** 进程内工作集：由 manifest.json 载入，写入时就地更新 */
+interface LayerCache {
+	entries: Map<string, MemoryEntry>;
+	usage: Record<string, MemoryUsage>;
+	activeDayCount: number;
+	lastActiveDate?: string;
+	/** 载入时 manifest.json 的 mtime（用于检测其它进程的写入） */
+	loadedAtMs: number;
+	/** 有未落盘的本地变更：此时禁止从磁盘重载（否则会丢掉本进程刚写的条目） */
+	dirty?: boolean;
+}
+
+/** 条目排序：updated 倒序，同时间按 slug（确定性） */
+function byUpdatedDesc(a: MemoryEntry, b: MemoryEntry): number {
+	return a.updated < b.updated ? 1 : a.updated > b.updated ? -1 : a.slug.localeCompare(b.slug);
+}
+
+/** 条目 → 总表元数据（去掉正文与派生路径） */
+function toMeta(entry: MemoryEntry): MemoryEntryMeta {
+	const { body: _body, filePath: _filePath, ...meta } = entry;
+	return meta;
+}
+
+/** 总表元数据 → 条目（正文留空，按需从主题文件读） */
+function fromMeta(meta: MemoryEntryMeta, dir: string, scope: MemoryScope): MemoryEntry {
+	return { ...meta, scope: meta.scope ?? scope, body: '', filePath: join(dir, `${meta.slug}.md`) };
+}
+
 export class MemoryStore {
 	private readonly dirs: Record<MemoryScope, string>;
 	private readonly masterMinConfidence: number;
+	private readonly lruEnabled: boolean;
+	private readonly promoteUses: number;
+	/** 每层的 harness 工作集（元数据 + 使用统计 + 活动日）；见 layer() */
+	private readonly layers = new Map<MemoryScope, LayerCache>();
 
 	constructor(opts: MemoryStoreOptions) {
 		this.dirs = { project: opts.projectDir, global: opts.globalDir };
 		this.masterMinConfidence = opts.masterMinConfidence ?? 2;
+		this.lruEnabled = opts.lruEnabled ?? true;
+		this.promoteUses = opts.promoteUses ?? 2;
 	}
 
 	/** 某层目录（不存在时按需创建） */
@@ -274,8 +332,165 @@ export class MemoryStore {
 
 	// ─── 读取 ──────────────────────────────────────────
 
+	/**
+	 * 正式条目（active 且 confidence ≥ 阈值）。
+	 * 默认只返回元数据（工作集里没有正文）；`withBody` 时逐条读取主题文件 ——
+	 * 只有"要按正文做关键词过滤/展示"的调用方（如 `/memory show <kw>`）才该用它。
+	 */
+	async listEntries(scope: MemoryScope, opts: { withBody?: boolean } = {}): Promise<MemoryEntry[]> {
+		const layer = await this.layer(scope);
+		const entries = [...layer.entries.values()]
+			.filter((e) => e.status === 'active' && e.confidence >= this.masterMinConfidence)
+			.sort(byUpdatedDesc);
+		if (!opts.withBody) return entries;
+		return Promise.all(entries.map(async (e) => ({
+			...e,
+			body: await this.entryBody(scope, e),
+		})));
+	}
+
+	/** 模糊条目（candidate 或 confidence < 阈值）——master 不可见，仅 memory agent 管理 */
+	async listCandidates(scope: MemoryScope): Promise<MemoryEntry[]> {
+		const layer = await this.layer(scope);
+		// superseded 是墓碑（被取代/被遗忘）：不参与候选池，否则归纳代理会去"提升"一条
+		// 永远无法复活的条目，而 deriveStatus 会静默保持 superseded —— 工具报成功、实际无效。
+		return [...layer.entries.values()]
+			.filter(
+				(e) => e.status !== 'superseded'
+					&& (e.status === 'candidate' || e.confidence < this.masterMinConfidence),
+			)
+			.sort(byUpdatedDesc);
+	}
+
+	/**
+	 * 按 slug 读取单条（不存在返回 null）。
+	 * 总表只有元数据，**正文按需从主题文件读**（读全文才付出一次文件读）。
+	 */
+	async readEntry(scope: MemoryScope, slug: string): Promise<MemoryEntry | null> {
+		const layer = await this.layer(scope);
+		const entry = layer.entries.get(slug);
+		if (!entry) return null;
+		const raw = await this.readText(entry.filePath);
+		return { ...entry, body: raw === null ? '' : (parseEntry(raw, entry.filePath, scope)?.body ?? '') };
+	}
+
+	/** 按 subject 精确匹配（合并/supersede 判定用；正文按需另读） */
+	async findBySubject(scope: MemoryScope, subject: string): Promise<MemoryEntry[]> {
+		const layer = await this.layer(scope);
+		return [...layer.entries.values()].filter((e) => e.subject === subject && e.status !== 'superseded');
+	}
+
+	// ─── 工作集（manifest.json）──────────────────────────
+	//
+	// 背景（v3 D3）：条目元数据 + 使用统计 + 活动日统一放在每层的 manifest.json，
+	// 进程内作为工作集；读操作不再逐个文件扫描，写操作就地更新并原子落盘。
+	// 正文仍留在 <slug>.md（人可读、可 diff），MEMORY.md / candidates.md 仍是渲染视图。
+	//
+	// 跨进程：manifest.json 的 mtime 比我们载入时新 → 重新载入（TUI + cron 并发时保证看到对方写入）。
+
+	/**
+	 * 取得某层的工作集（必要时载入 / 重建）。
+	 * 缺失或损坏时回退为全量扫描并**自愈**写回 manifest.json。
+	 */
+	private async layer(scope: MemoryScope): Promise<LayerCache> {
+		const dir = this.dirs[scope];
+		const manifestPath = join(dir, MANIFEST_FILE);
+		let mtimeMs = 0;
+		try {
+			mtimeMs = (await stat(manifestPath)).mtimeMs;
+		} catch { /* 无 manifest：需要重建 */ }
+
+		const cached = this.layers.get(scope);
+		if (cached && (cached.dirty || mtimeMs === 0 || mtimeMs <= cached.loadedAtMs)) return cached;
+
+		if (mtimeMs > 0) {
+			try {
+				const raw = JSON.parse(await readFile(manifestPath, 'utf-8')) as LayerManifestFile;
+				if (raw?.version === 1 && Array.isArray(raw.entries)) {
+					const layer: LayerCache = {
+						entries: new Map(raw.entries.map((m) => [m.slug, fromMeta(m, dir, scope)])),
+						usage: raw.usage ?? {},
+						activeDayCount: raw.activeDayCount ?? 0,
+						lastActiveDate: raw.lastActiveDate,
+						loadedAtMs: mtimeMs,
+					};
+					this.layers.set(scope, layer);
+					return layer;
+				}
+			} catch { /* 损坏 → 走重建 */ }
+		}
+
+		// 重建：扫描主题文件（首次运行 / manifest 丢失 / 损坏），并导入旧的 state.json（游标时代遗留）
+		const { entries } = await this.scanRaw(scope);
+		let usage: Record<string, MemoryUsage> = {};
+		let activeDayCount = 0;
+		let lastActiveDate: string | undefined;
+		try {
+			const old = JSON.parse((await this.readText(join(dir, STATE_FILE))) ?? 'null') as MemoryState | null;
+			if (old && typeof old === 'object') {
+				usage = old.usage ?? {};
+				activeDayCount = old.activeDayCount ?? 0;
+				lastActiveDate = old.lastActiveDate;
+			}
+		} catch { /* 旧状态损坏 → 从零开始 */ }
+
+		const layer: LayerCache = {
+			entries: new Map(entries.map((e) => [e.slug, e])),
+			usage,
+			activeDayCount,
+			lastActiveDate,
+			loadedAtMs: 0,
+		};
+		this.layers.set(scope, layer);
+		await this.persistManifest(scope, layer);
+		return layer;
+	}
+
+	/** 把工作集原子写回 manifest.json，并记录新的 mtime（避免自我失效） */
+	private async persistManifest(scope: MemoryScope, layer: LayerCache): Promise<void> {
+		const dir = await this.ensureDir(scope);
+		const path = join(dir, MANIFEST_FILE);
+		const payload: LayerManifestFile = {
+			version: 1,
+			updatedAt: new Date().toISOString(),
+			activeDayCount: layer.activeDayCount,
+			lastActiveDate: layer.lastActiveDate,
+			entries: [...layer.entries.values()].map(toMeta),
+			usage: layer.usage,
+		};
+		await atomicWrite(path, JSON.stringify(payload, null, 2) + '\n');
+		layer.dirty = false;
+		try {
+			layer.loadedAtMs = (await stat(path)).mtimeMs;
+		} catch {
+			layer.loadedAtMs = Date.now();
+		}
+	}
+
+	/** 把工作集落盘（putEntry 之后由公开变更方法调用一次） */
+	private async flush(scope: MemoryScope): Promise<void> {
+		await this.persistManifest(scope, await this.layer(scope));
+	}
+
+	/** 丢弃某层的工作集（测试 / 强制重载用） */
+	dropCache(scope?: MemoryScope): void {
+		if (scope) this.layers.delete(scope);
+		else this.layers.clear();
+	}
+
+	// ─── 读取（原始扫描，仅供重建 / legacy 检测）──────────
+
 	/** 扫描某层全部条目（含 candidate / superseded；解析失败的返回 null 并计入 legacy） */
 	async scan(scope: MemoryScope): Promise<{ entries: MemoryEntry[]; legacy: string[] }> {
+		const { entries, legacy } = await this.scanRaw(scope);
+		// 扫描是"从磁盘重建"，同步刷新工作集，避免调用方拿到与后续读不一致的快照
+		const layer = await this.layer(scope);
+		layer.entries = new Map(entries.map((e) => [e.slug, e]));
+		return { entries, legacy };
+	}
+
+	/** 纯文件扫描（不触碰工作集） */
+	private async scanRaw(scope: MemoryScope): Promise<{ entries: MemoryEntry[]; legacy: string[] }> {
 		const dir = this.dirs[scope];
 		let names: string[];
 		try {
@@ -300,64 +515,9 @@ export class MemoryStore {
 			}
 			entries.push(entry);
 		}
-		entries.sort((a, b) => (a.updated < b.updated ? 1 : a.updated > b.updated ? -1 : a.slug.localeCompare(b.slug)));
+		entries.sort(byUpdatedDesc);
 		legacy.sort();
 		return { entries, legacy };
-	}
-
-	/** 正式条目（active 且 confidence ≥ 阈值） */
-	async listEntries(scope: MemoryScope): Promise<MemoryEntry[]> {
-		const { entries } = await this.scan(scope);
-		return entries.filter((e) => e.status === 'active' && e.confidence >= this.masterMinConfidence);
-	}
-
-	/** 模糊条目（candidate 或 confidence < 阈值）——master 不可见，仅 memory agent 管理 */
-	async listCandidates(scope: MemoryScope): Promise<MemoryEntry[]> {
-		const { entries } = await this.scan(scope);
-		return entries.filter((e) => e.status === 'candidate' || e.confidence < this.masterMinConfidence);
-	}
-
-	/** 按 slug 读取单条（不存在返回 null） */
-	async readEntry(scope: MemoryScope, slug: string): Promise<MemoryEntry | null> {
-		const { entries } = await this.scan(scope);
-		return entries.find((e) => e.slug === slug) ?? null;
-	}
-
-	/** 按 subject 精确匹配（合并/supersede 判定用） */
-	async findBySubject(scope: MemoryScope, subject: string): Promise<MemoryEntry[]> {
-		const { entries } = await this.scan(scope);
-		return entries.filter((e) => e.subject === subject && e.status !== 'superseded');
-	}
-
-	/**
-	 * 到期待提醒的条目（`remindAt` ≤ now，且未被取代）。
-	 * **包含 confidence=1 的候选条目**：用户明确要求"到时候提醒我"，与"master 可见性"是两码事。
-	 */
-	async listDue(scope: MemoryScope, now: Date = new Date()): Promise<MemoryEntry[]> {
-		const { entries } = await this.scan(scope);
-		const ts = now.getTime();
-		return entries
-			.filter((e) => e.status !== 'superseded' && e.remindAt !== undefined)
-			.filter((e) => {
-				const t = Date.parse(e.remindAt!);
-				return !Number.isNaN(t) && t <= ts;
-			})
-			.sort((a, b) => (a.remindAt! < b.remindAt! ? -1 : 1));
-	}
-
-	/**
-	 * 提醒已发出：清空该条目的 `remindAt`（一次性提醒，避免每轮重复打扰）。
-	 * 条目本身保留（正文与置信度不变），只是不再带提醒时间。
-	 */
-	async markReminded(scope: MemoryScope, slug: string): Promise<boolean> {
-		const dir = await this.ensureDir(scope);
-		const entry = await this.readEntry(scope, slug);
-		if (!entry || entry.remindAt === undefined) return false;
-		const now = new Date().toISOString();
-		const next: MemoryEntry = { ...entry, remindAt: undefined, updated: now };
-		await this.writeEntry(dir, next);
-		await this.audit({ kind: 'remind_due', at: now, scope, slug, remindAt: entry.remindAt });
-		return true;
 	}
 
 	/**
@@ -435,6 +595,8 @@ export class MemoryStore {
 	 */
 	async write(scope: MemoryScope, input: MemoryWriteInput): Promise<MemoryWriteResult> {
 		const result = await this.applyWrite(scope, input);
+		// 条目变更先落盘：之后的 recordUse/layer() 即使因其它进程写入而重载，也不会丢掉刚写的条目
+		await this.flush(scope);
 		let inherited = 0;
 		if (result.superseded?.length) {
 			// 同主题的「复现计数」跨取代延续：同 subject 的改写说明这个话题又出现了，
@@ -442,7 +604,9 @@ export class MemoryStore {
 			// 唯一可能的使用信号就是"再次被提到/重申"）。
 			inherited = await this.inheritUsage(scope, result.superseded, result.slug).catch(() => 0);
 		}
-		await this.recordUse(scope, result.slug, undefined, inherited).catch(() => { /* 使用统计失败不影响写入 */ });
+		// 显式写入不做即时升级（否则"显式降到 1"会被同一次写入的 use 立刻抬回 2）；
+		// 复活（conf 0 → 1）仍允许：再次写到它说明这个话题又出现了。
+		await this.recordUse(scope, result.slug, undefined, inherited, { allowPromote: false }).catch(() => { /* 使用统计失败不影响写入 */ });
 		await this.syncIndex(scope);
 		return result;
 	}
@@ -459,19 +623,20 @@ export class MemoryStore {
 			const updated = mergeEntryFields(target, input, now);
 			// 显式传低置信 → 真正降级（软淘汰）；未传则 confidence 原样保留（状态因此不变）
 			updated.status = deriveStatus(target.status, updated.confidence, this.masterMinConfidence);
-			await this.writeEntry(dir, updated);
+			await this.putEntry(scope, updated);
 			await this.audit({ kind: 'write', at: now, action: 'update', slug: updated.slug, ...auditBase });
 			return { action: 'update', slug: updated.slug };
 		}
 
 		// 2. 同 subject
 		for (const existing of sameSubject) {
-			if (normalizeText(existing.body) === normalizeText(input.body)) {
+			const existingBody = await this.entryBody(scope, existing);
+			if (normalizeText(existingBody) === normalizeText(input.body)) {
 				const merged = mergeEntryFields(existing, input, now);
 				// merge **不降级**：同义重复（哪怕是低置信推断）不得把正式条目踢出清单 → 取 max
 				merged.confidence = Math.max(existing.confidence, input.confidence ?? existing.confidence);
 				merged.status = deriveStatus(existing.status, merged.confidence, this.masterMinConfidence);
-				await this.writeEntry(dir, merged);
+				await this.putEntry(scope, merged);
 				await this.audit({ kind: 'merge', at: now, slug: merged.slug, ...auditBase });
 				return { action: 'merge', slug: merged.slug };
 			}
@@ -480,8 +645,8 @@ export class MemoryStore {
 		// 2b. supercede（显式指定优先 —— 可跨 subject 指名取代；否则用同 subject 的条目）
 		let supersedeTargets: MemoryEntry[] = [];
 		if (input.supersedes && input.supersedes.length > 0) {
-			const { entries } = await this.scan(scope);
-			supersedeTargets = entries.filter(
+			const layer = await this.layer(scope);
+			supersedeTargets = [...layer.entries.values()].filter(
 				(e) => input.supersedes!.includes(e.slug) && e.status !== 'superseded',
 			);
 		} else {
@@ -494,10 +659,10 @@ export class MemoryStore {
 				...pickFields(input, now),
 			};
 			created.status = deriveStatus('active', created.confidence, this.masterMinConfidence);
-			await this.writeEntry(dir, created);
+			await this.putEntry(scope, created);
 			for (const old of supersedeTargets) {
 				const tomb = { ...old, status: 'superseded' as MemoryStatus, supersededBy: slug, updated: now };
-				await this.writeEntry(dir, tomb);
+				await this.putEntry(scope, tomb);
 			}
 			await this.audit({
 				kind: 'supersede', at: now, slug, superseded: supersedeTargets.map((e) => e.slug), ...auditBase,
@@ -509,7 +674,7 @@ export class MemoryStore {
 		const slug = await this.uniqueSlug(scope, slugify(input.subject || input.name || 'memory'));
 		const entry: MemoryEntry = { ...blankEntry(scope, slug, now, dir), ...pickFields(input, now) };
 		entry.status = deriveStatus('active', entry.confidence, this.masterMinConfidence);
-		await this.writeEntry(dir, entry);
+		await this.putEntry(scope, entry);
 		await this.audit({ kind: 'write', at: now, action: 'add', slug, ...auditBase });
 		return { action: 'add', slug };
 	}
@@ -520,8 +685,9 @@ export class MemoryStore {
 		const entry = await this.readEntry(scope, slug);
 		if (!entry) return false;
 		const now = new Date().toISOString();
-		await this.writeEntry(dir, { ...entry, status: 'superseded', updated: now });
+		await this.putEntry(scope, { ...entry, status: 'superseded', updated: now });
 		await this.audit({ kind: 'forget', at: now, scope, slug, reason });
+		await this.flush(scope); // 墓碑先落盘，再动使用统计
 		await this.dropUsage(scope, [slug]).catch(() => { /* 清理失败不影响遗忘 */ });
 		await this.syncIndex(scope);
 		return true;
@@ -557,7 +723,9 @@ export class MemoryStore {
 	 */
 	async rebuildIndex(scope: MemoryScope): Promise<void> {
 		const dir = await this.ensureDir(scope);
-		const { entries, legacy } = await this.scan(scope);
+		// 条目来自工作集（manifest 元数据），legacy 仍需扫目录（手写笔记不进工作集）
+		const { legacy } = await this.scanLegacy(scope);
+		const entries = [...(await this.layer(scope)).entries.values()];
 
 		const active = entries.filter((e) => e.status === 'active' && e.confidence >= this.masterMinConfidence);
 		const candidates = entries.filter((e) => e.status === 'candidate' || (e.status === 'active' && e.confidence < this.masterMinConfidence));
@@ -580,23 +748,29 @@ export class MemoryStore {
 		await atomicWrite(join(dir, CANDIDATES_FILE), candBody + '\n');
 	}
 
-	// ─── 状态（游标） ──────────────────────────────────
+	// ─── 状态（活动日 / 使用统计；v3 起并入总表） ─────────
 
+	/**
+	 * 读取某层状态（活动日 + 使用统计）。
+	 * v3：数据存在内存工作集里，持久化在 manifest.json；
+	 * 首次重建时会从旧 `state.json` 导入一次（向后兼容）。
+	 */
 	async getState(scope: MemoryScope): Promise<MemoryState> {
-		const raw = await this.readText(join(this.dirs[scope], STATE_FILE));
-		if (!raw) return {};
-		try {
-			return JSON.parse(raw) as MemoryState;
-		} catch {
-			return {};
-		}
+		const layer = await this.layer(scope);
+		return {
+			activeDayCount: layer.activeDayCount,
+			lastActiveDate: layer.lastActiveDate,
+			usage: layer.usage,
+			updatedAt: new Date(layer.loadedAtMs || Date.now()).toISOString(),
+		};
 	}
 
 	async setState(scope: MemoryScope, patch: Partial<MemoryState>): Promise<void> {
-		const dir = await this.ensureDir(scope);
-		const current = await this.getState(scope);
-		const next: MemoryState = { ...current, ...patch, updatedAt: new Date().toISOString() };
-		await atomicWrite(join(dir, STATE_FILE), JSON.stringify(next, null, 2) + '\n');
+		const layer = await this.layer(scope);
+		if (patch.activeDayCount !== undefined) layer.activeDayCount = patch.activeDayCount;
+		if (patch.lastActiveDate !== undefined) layer.lastActiveDate = patch.lastActiveDate;
+		if (patch.usage !== undefined) layer.usage = { ...patch.usage };
+		await this.persistManifest(scope, layer);
 	}
 
 	// ─── 使用统计与 LRU 维护 ─────────────────────────────
@@ -610,19 +784,73 @@ export class MemoryStore {
 		slug: string,
 		now: string = new Date().toISOString(),
 		inheritedUses = 0,
+		opts: { allowPromote?: boolean } = {},
 	): Promise<void> {
-		const state = await this.getState(scope);
-		const usage = { ...(state.usage ?? {}) };
+		const layer = await this.layer(scope);
+		const usage = layer.usage;
 		const cur = usage[slug] ?? { uses: 0, lastUsedAt: now };
 		usage[slug] = {
 			...cur,
 			uses: cur.uses + inheritedUses + 1,
 			lastUsedAt: now,
 			// 记下"第几个活动日用的"——老化以活动日为钟（缺席不老化）
-			lastUsedDay: state.activeDayCount ?? 0,
+			lastUsedDay: layer.activeDayCount,
 		};
-		await this.setState(scope, { usage });
+		await this.persistManifest(scope, layer);
 		await this.audit({ kind: 'use', at: now, scope, slug, uses: usage[slug].uses, activeDay: usage[slug].lastUsedDay });
+		// v3：会话内局部判定 —— 不等检查点结算，被使用的这条立即升级 / 从"待销毁"复活
+		await this.applyLocalJudgement(scope, slug, now, { allowPromote: opts.allowPromote ?? true }).catch(() => { /* 判定失败不影响读取/写入 */ });
+	}
+
+	/**
+	 * 会话内**局部判定**（只作用于刚被触达的这一条，O(1)）：
+	 *   - 待销毁（conf 0）被任何触达 → 回到 conf 1 重新观察（不越级）；
+	 *   - 累计使用达到阈值且仍在活跃窗口内 → 升一级（封顶 3），uses 清零。
+	 *
+	 * 明确不做（留给检查点结算）：闲置降级、窗口换出、容量淘汰、销毁 —— 那些需要看全体。
+	 * 显式降级（写入 confidence 1 / 遗忘 / 取代）本来就在写入路径即时生效，不经过这里。
+	 */
+	private async applyLocalJudgement(
+		scope: MemoryScope,
+		slug: string,
+		now: string,
+		opts: { allowPromote: boolean },
+	): Promise<void> {
+		if (!this.lruEnabled) return;
+		const layer = await this.layer(scope);
+		const entry = layer.entries.get(slug);
+		if (!entry || entry.pinned || entry.status === 'superseded') return;
+		const usage = layer.usage[slug];
+
+		if (entry.confidence <= 0) {
+			await this.putEntry(scope, {
+				...entry, confidence: 1,
+				status: deriveStatus(entry.status, 1, this.masterMinConfidence),
+			});
+			layer.usage[slug] = {
+				...(usage ?? { uses: 0, lastUsedAt: now }),
+				uses: 0,
+				lastUsedDay: layer.activeDayCount,
+				lastStepDay: layer.activeDayCount,
+			};
+			await this.persistManifest(scope, layer);
+			await this.audit({ kind: 'lru', at: now, scope, local: true, revived: [slug], activeDay: layer.activeDayCount });
+			return;
+		}
+
+		if (!opts.allowPromote || entry.confidence >= 3) return;
+		if (!usage || usage.uses < this.promoteUses) return;
+		const to = Math.min(3, entry.confidence + 1);
+		await this.putEntry(scope, {
+			...entry, confidence: to,
+			status: deriveStatus(entry.status, to, this.masterMinConfidence),
+		});
+		layer.usage[slug] = { ...usage, uses: 0 };
+		await this.persistManifest(scope, layer);
+		await this.audit({
+			kind: 'lru', at: now, scope, local: true,
+			promoted: [{ slug, from: entry.confidence, to }], activeDay: layer.activeDayCount,
+		});
 	}
 
 	/**
@@ -633,8 +861,8 @@ export class MemoryStore {
 	 * 清零会让"一年才提一次"的偏好永远攒不够证据。
 	 */
 	private async inheritUsage(scope: MemoryScope, fromSlugs: string[], toSlug: string): Promise<number> {
-		const state = await this.getState(scope);
-		const usage = { ...(state.usage ?? {}) };
+		const layer = await this.layer(scope);
+		const usage = layer.usage;
 		let inherited = 0;
 		let lastUsedAt: string | undefined;
 		let lastUsedDay: number | undefined;
@@ -654,15 +882,15 @@ export class MemoryStore {
 				...(lastUsedDay !== undefined ? { lastUsedDay: Math.max(cur.lastUsedDay ?? 0, lastUsedDay) } : {}),
 			};
 		}
-		await this.setState(scope, { usage });
+		await this.persistManifest(scope, layer);
 		return inherited;
 	}
 
 	/** 丢弃若干条目的使用记录（条目被取代/遗忘后不再需要；避免 state.json 无限累积） */
 	private async dropUsage(scope: MemoryScope, slugs: string[]): Promise<void> {
 		if (slugs.length === 0) return;
-		const state = await this.getState(scope);
-		const usage = { ...(state.usage ?? {}) };
+		const layer = await this.layer(scope);
+		const usage = layer.usage;
 		let changed = false;
 		for (const slug of slugs) {
 			if (usage[slug] !== undefined) {
@@ -670,7 +898,7 @@ export class MemoryStore {
 				changed = true;
 			}
 		}
-		if (changed) await this.setState(scope, { usage });
+		if (changed) await this.persistManifest(scope, layer);
 	}
 
 	/**
@@ -682,12 +910,14 @@ export class MemoryStore {
 	 * 也不影响 LRU 排序（窗口换出仍按真实使用时间）。
 	 */
 	async recordTouch(scope: MemoryScope, slug: string, now: string = new Date().toISOString()): Promise<void> {
-		const state = await this.getState(scope);
-		const usage = { ...(state.usage ?? {}) };
+		const layer = await this.layer(scope);
+		const usage = layer.usage;
 		const cur = usage[slug] ?? { uses: 0, lastUsedAt: now };
-		usage[slug] = { ...cur, lastUsedDay: state.activeDayCount ?? 0 };
-		await this.setState(scope, { usage });
+		usage[slug] = { ...cur, lastUsedDay: layer.activeDayCount };
+		await this.persistManifest(scope, layer);
 		await this.audit({ kind: 'use', at: now, scope, slug, touch: true, activeDay: usage[slug].lastUsedDay });
+		// 「看到」也足以把"待销毁"拉回观察区，但**不足以升级**
+		await this.applyLocalJudgement(scope, slug, now, { allowPromote: false }).catch(() => { /* 同上 */ });
 	}
 
 	/**
@@ -703,12 +933,13 @@ export class MemoryStore {
 		if (!entry) return false;
 		const now = new Date().toISOString();
 		const confidence = pinned ? Math.max(entry.confidence, this.masterMinConfidence) : entry.confidence;
-		await this.writeEntry(this.dirs[scope], {
+		await this.putEntry(scope, {
 			...entry,
 			pinned: pinned || undefined,
 			confidence,
 			status: deriveStatus(entry.status, confidence, this.masterMinConfidence),
 		});
+		await this.flush(scope);
 		await this.audit({ kind: 'pin', at: now, scope, slug, pinned, confidence });
 		await this.syncIndex(scope);
 		return true;
@@ -770,9 +1001,24 @@ export class MemoryStore {
 		const activeDay = (state.activeDayCount ?? 0) + (advanced ? 1 : 0);
 		result.activeDay = activeDay;
 
-		const { entries } = await this.scan(scope);
+		const entries = [...(await this.layer(scope)).entries.values()];
 		const live = entries.filter((e) => e.status !== 'superseded');
-		const usage = { ...(state.usage ?? {}) };
+		const usage = { ...state.usage };
+
+		// 健壮性：state.json 是未校验 JSON。缺失/非法的 lastUsedAt 会让 Date.parse → NaN；
+		// NaN 参与排序比较器会让顺序不稳定，老化判定也可能被静默冻结。统一回退到 entry.updated。
+		const updatedBySlug = new Map(live.map((e) => [e.slug, e.updated]));
+		for (const [slug, u] of Object.entries(usage)) {
+			if (!Number.isFinite(Date.parse(u.lastUsedAt ?? ''))) {
+				usage[slug] = { ...u, lastUsedAt: updatedBySlug.get(slug) ?? new Date(0).toISOString() };
+			}
+		}
+
+		/** 最近使用时间（毫秒，永不为 NaN；缺失回退条目的 updated） */
+		const lastUsedMs = (u: MemoryUsage, entry: MemoryEntry): number => {
+			const t = Date.parse(u.lastUsedAt || entry.updated);
+			return Number.isFinite(t) ? t : 0;
+		};
 
 		/** 老化起点 = max(最近触达, 最近结算)——结算本身也算"走过一步"，防同一活动日连降 */
 		const idleOf = (entry: MemoryEntry, u: MemoryUsage): number => {
@@ -794,8 +1040,8 @@ export class MemoryStore {
 			.sort((a, b) => {
 				const ua = usage[a.slug] ?? { uses: 0, lastUsedAt: a.updated };
 				const ub = usage[b.slug] ?? { uses: 0, lastUsedAt: b.updated };
-				const ta = Date.parse(ua.lastUsedAt || a.updated);
-				const tb = Date.parse(ub.lastUsedAt || b.updated);
+				const ta = lastUsedMs(ua, a);
+				const tb = lastUsedMs(ub, b);
 				if (ta !== tb) return ta - tb;                       // 最久未用在前
 				if (ua.uses !== ub.uses) return ua.uses - ub.uses;    // 用得少者优先换出
 				return a.slug.localeCompare(b.slug);                  // 确定性
@@ -811,8 +1057,8 @@ export class MemoryStore {
 			.sort((a, b) => {
 				const ua = usage[a.slug] ?? { uses: 0, lastUsedAt: a.updated };
 				const ub = usage[b.slug] ?? { uses: 0, lastUsedAt: b.updated };
-				const ta = Date.parse(ua.lastUsedAt || a.updated);
-				const tb = Date.parse(ub.lastUsedAt || b.updated);
+				const ta = lastUsedMs(ua, a);
+				const tb = lastUsedMs(ub, b);
 				if (ta !== tb) return ta - tb;
 				if (ua.uses !== ub.uses) return ua.uses - ub.uses;
 				return a.slug.localeCompare(b.slug);
@@ -881,17 +1127,22 @@ export class MemoryStore {
 		const archiveDir = join(dir, 'legacy', 'archive');
 		for (const p of plan) {
 			if (p.destroy) {
-				if (destroyMode === 'delete') {
-					await unlink(join(dir, `${p.slug}.md`)).catch(() => { /* 已不存在则忽略 */ });
-				} else {
-					await mkdir(archiveDir, { recursive: true, mode: 0o700 });
-					await rename(join(dir, `${p.slug}.md`), join(archiveDir, `${p.slug}.md`));
-				}
+				// 归档/删除失败不应中断整批结算（旧实现在 archive 分支裸 rename，一个失败全批中止）
+				try {
+					if (destroyMode === 'delete') {
+						await unlink(join(dir, `${p.slug}.md`));
+					} else {
+						await mkdir(archiveDir, { recursive: true, mode: 0o700 });
+						await rename(join(dir, `${p.slug}.md`), join(archiveDir, `${p.slug}.md`));
+					}
+				} catch { /* 文件已不存在 / 无法移动：仍从工作集移除 */ }
+				const layer = await this.layer(scope);
+				layer.entries.delete(p.slug);
 				delete usage[p.slug];
 				continue;
 			}
 			const entry = entries.find((e) => e.slug === p.slug)!;
-			await this.writeEntry(dir, {
+			await this.putEntry(scope, {
 				...entry, confidence: p.confidence,
 				status: deriveStatus(entry.status, p.confidence, minConf), updated: entry.updated,
 			});
@@ -926,13 +1177,50 @@ export class MemoryStore {
 
 	// ─── 内部 ──────────────────────────────────────────
 
-	private async writeEntry(dir: string, entry: MemoryEntry): Promise<void> {
-		await atomicWrite(join(dir, `${entry.slug}.md`), serializeEntry(entry));
+	/**
+	 * 写入一条条目：主题文件（人可读，正文在这里）+ 工作集（内存）。
+	 * 不落 manifest —— 调用方在一次操作末尾 `persistManifest` 一次，避免批内多次写。
+	 */
+	private async putEntry(scope: MemoryScope, entry: MemoryEntry): Promise<void> {
+		const dir = this.dirs[scope];
+		const filePath = join(dir, `${entry.slug}.md`);
+		await atomicWrite(filePath, serializeEntry(entry));
+		const layer = await this.layer(scope);
+		layer.entries.set(entry.slug, { ...entry, filePath });
+		layer.dirty = true;
+	}
+
+	/** 读某条条目的正文（工作集只存元数据） */
+	private async entryBody(scope: MemoryScope, entry: MemoryEntry): Promise<string> {
+		if (entry.body) return entry.body;
+		const raw = await this.readText(entry.filePath);
+		return raw === null ? '' : (parseEntry(raw, entry.filePath, scope)?.body ?? '');
+	}
+
+	/** 扫描目录里的"非条目"文件（无 frontmatter / 缺 subject 的手写笔记） */
+	private async scanLegacy(scope: MemoryScope): Promise<{ legacy: string[] }> {
+		const dir = this.dirs[scope];
+		let names: string[];
+		try {
+			names = await readdir(dir);
+		} catch {
+			return { legacy: [] };
+		}
+		const legacy: string[] = [];
+		for (const name of names) {
+			if (!name.endsWith('.md')) continue;
+			if (name === INDEX_FILE || name === CANDIDATES_FILE) continue;
+			const raw = await this.readText(join(dir, name));
+			if (raw === null) continue;
+			if (!parseEntry(raw, join(dir, name), scope)) legacy.push(name);
+		}
+		legacy.sort();
+		return { legacy };
 	}
 
 	private async uniqueSlug(scope: MemoryScope, base: string): Promise<string> {
-		const { entries } = await this.scan(scope);
-		const taken = new Set(entries.map((e) => e.slug));
+		const layer = await this.layer(scope);
+		const taken = new Set(layer.entries.keys());
 		if (!taken.has(base)) return base;
 		for (let i = 2; i < 100; i++) {
 			const candidate = `${base}-${i}`;
@@ -954,7 +1242,7 @@ export class MemoryStore {
 
 const FRONTMATTER_FIELDS = [
 	'name', 'description', 'type', 'subject', 'tags', 'scope',
-	'confidence', 'signal', 'paths', 'remindAt', 'pinned', 'created', 'updated', 'status', 'supersededBy',
+	'confidence', 'signal', 'paths', 'pinned', 'created', 'updated', 'status', 'supersededBy',
 ] as const;
 
 /** 解析条目文件；缺 frontmatter / 缺 subject 时返回 null（视为用户手写笔记） */
@@ -976,7 +1264,6 @@ export function parseEntry(raw: string, filePath: string, scope: MemoryScope): M
 		confidence,
 		signal: fm.signal === undefined ? undefined : String(fm.signal),
 		paths: fm.paths === undefined ? undefined : toStringArray(fm.paths),
-		remindAt: fm.remindAt === undefined ? undefined : String(fm.remindAt),
 		pinned: fm.pinned === true || fm.pinned === 'true' || undefined,
 		created: String(fm.created ?? new Date(0).toISOString()),
 		updated: String(fm.updated ?? fm.created ?? new Date(0).toISOString()),
@@ -1031,7 +1318,6 @@ export function serializeEntry(entry: MemoryEntry): string {
 	}
 	if (entry.signal) fm.signal = entry.signal;
 	if (entry.paths && entry.paths.length > 0) fm.paths = entry.paths;
-	if (entry.remindAt) fm.remindAt = entry.remindAt;
 	if (entry.pinned) fm.pinned = true;
 	fm.created = entry.created;
 	fm.updated = entry.updated;
@@ -1059,9 +1345,9 @@ function serializeScalar(value: unknown): string {
 
 // ─── 工具函数 ─────────────────────────────────────────
 
-/** 索引/清单行（注入与 MEMORY.md 共用同一渲染，保证字节一致） */
-export function renderManifestLine(entry: MemoryEntry): string {
-	return `- [${entry.name}](${entry.slug}.md) — ${entry.description} (confidence ${entry.confidence}, updated ${ageText(entry.updated)})`;
+/** 索引/清单行（注入与 MEMORY.md 共用同一渲染，保证字节一致）；`now` 可注入以便确定性测试 */
+export function renderManifestLine(entry: MemoryEntry, now: Date = new Date()): string {
+	return `- [${entry.name}](${entry.slug}.md) — ${entry.description} (confidence ${entry.confidence}, updated ${ageText(entry.updated, now)})`;
 }
 
 /** 人话时间（模型对「3 days ago」比 ISO 时间戳更敏感；对齐 Claude Code 的 memoryAge） */
@@ -1130,7 +1416,6 @@ function pickFields(input: MemoryWriteInput, now: string): Partial<MemoryEntry> 
 	if (input.tags !== undefined) out.tags = input.tags;
 	if (input.signal !== undefined) out.signal = input.signal;
 	if (input.paths !== undefined) out.paths = input.paths;
-	if (input.remindAt !== undefined) out.remindAt = input.remindAt;
 	if (input.confidence !== undefined) {
 		out.confidence = clampConfidence(input.confidence);
 	}
@@ -1164,15 +1449,6 @@ function deriveStatus(previous: MemoryStatus, confidence: number, minConfidence:
 	return confidence >= minConfidence ? 'active' : 'candidate';
 }
 
-/** 取两个 ISO 时间里较晚的那个（忽略 undefined / 非法值）；都没有时返回 fallback */
-function latestIso(a: string, b?: string): string {
-	const ta = Date.parse(a);
-	if (!b) return a;
-	const tb = Date.parse(b);
-	if (Number.isNaN(tb)) return a;
-	return Number.isNaN(ta) || tb > ta ? b : a;
-}
-
 function clampConfidence(v?: number): number {
 	if (v === undefined || Number.isNaN(v)) return 2;
 	return Math.min(3, Math.max(1, Math.round(v)));
@@ -1180,17 +1456,10 @@ function clampConfidence(v?: number): number {
 
 /** 原子写：临时文件 + rename */
 async function atomicWrite(path: string, content: string): Promise<void> {
-	const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+	// 临时名必须唯一：同进程同毫秒并发写同一目标（master 写入 + 后台归纳各自重建索引）
+	// 曾用 `pid-Date.now()` 会撞名，导致第二个 rename 拿到 ENOENT、写入静默失败。
+	const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
 	await writeFile(tmp, content, { encoding: 'utf-8', mode: 0o600 });
 	await rename(tmp, path);
 }
 
-/** 文件是否存在（供上层判断空目录等） */
-export async function pathExists(path: string): Promise<boolean> {
-	try {
-		await stat(path);
-		return true;
-	} catch {
-		return false;
-	}
-}

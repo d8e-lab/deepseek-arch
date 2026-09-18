@@ -130,26 +130,6 @@ describe('memory-inject', () => {
 		expect(await injector.buildReadUpdateBlock(['not-exist'])).toBeNull();
 	});
 
-	it('buildDueBlock：到期条目渲染提醒块并清空 remindAt（一次性）', async () => {
-		await store.write('project', {
-			subject: 'defer.a', name: '到期项', description: 'd', confidence: 3, body: 'b',
-			remindAt: '2020-01-01T00:00:00Z',
-		});
-		const r = await injector.buildDueBlock();
-		expect(r).not.toBeNull();
-		expect(r!.block).toContain('<memory-due>');
-		expect(r!.block).toContain('到期项');
-		expect(r!.slugs).toEqual(['defer-a']);
-
-		// 一次性：再次调用不再有内容，且条目本身仍在
-		expect(await injector.buildDueBlock()).toBeNull();
-		expect((await store.readEntry('project', 'defer-a'))!.body).toBe('b');
-
-		// 未到期 / 无 remindAt → 无内容
-		await store.write('project', { subject: 'future.x', name: '未来', description: 'd', confidence: 3, body: 'b', remindAt: '2999-01-01T00:00:00Z' });
-		expect(await injector.buildDueBlock()).toBeNull();
-	});
-
 	it('markSurfaced / resetSurfaced：去重集合可重置（compact 后）', async () => {
 		await store.write('project', { subject: 'a.b', name: 'A', description: 'd', confidence: 3, body: 'x' });
 		injector.markSurfaced(['a-b']);
@@ -172,5 +152,47 @@ describe('memory-inject', () => {
 		const long = 'x'.repeat(3000);
 		expect(truncateToBudget(long, 10)).toContain('(truncated)');
 		expect(truncateToBudget('short', 100)).toBe('short');
+	});
+
+	it('可见性变化通知：升级（updated 未变、confidence 变了）也会被检测到（v3 D7）', async () => {
+		const w = await store.write('project', { subject: 'a.b', name: 'A', description: 'd', confidence: 2, body: 'x' });
+		await injector.buildListingBlock('任务');            // 基线：seen = updated|2
+
+		await store.recordUse('project', w.slug);            // uses 达阈值 → 会话内即时升到 3（updated 不变）
+		expect((await store.readEntry('project', w.slug))!.confidence).toBe(3);
+
+		const block = await injector.buildUpdateBlock();
+		expect(block).toContain('updated');
+		expect(block).toContain('confidence 3');
+	});
+
+	it('可见性变化通知：降为 1（离开可见清单）被报成 removed/retired（v3 D7）', async () => {
+		const w = await store.write('project', { subject: 'c.d', name: 'C', description: 'd', confidence: 3, body: 'x' });
+		await injector.buildListingBlock('任务');
+
+		await store.write('project', { slug: w.slug, subject: 'c.d', name: 'C', description: 'd', confidence: 1, body: 'x' });
+		expect(await store.listEntries('project')).toHaveLength(0);   // 已离开可见清单
+
+		const block = await injector.buildUpdateBlock();
+		expect(block).toContain('removed/retired');
+		expect(block).toContain('c-d');
+	});
+
+	it('变更提醒：被截断的变更不标记为已见 → 下一轮继续上报，最终收敛（v3）', async () => {
+		await injector.buildListingBlock('任务'); // 空基线（seen 为空）
+		for (let i = 1; i <= 8; i++) {
+			await store.write('project', { subject: `t.${i}`, name: `T${i}`, description: 'd', confidence: 3, body: 'x' });
+		}
+
+		const first = await injector.buildUpdateBlock();
+		expect(first).toContain('added');
+		expect(first).toContain('will be reported on a later turn');
+
+		// 未展示的 2 条继续上报（旧实现先把全部标为已见 → 永久静默）
+		const second = await injector.buildUpdateBlock();
+		expect(second).toContain('added');
+
+		// 全部展示后收敛为"无变化"
+		expect(await injector.buildUpdateBlock()).toBeNull();
 	});
 });

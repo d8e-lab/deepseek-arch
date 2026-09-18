@@ -164,4 +164,25 @@ describe('MemoryRecall', () => {
 		expect(extractSelectedIndices('no numbers here')).toBeNull();
 		expect(extractSelectedIndices('')).toBeNull();
 	});
+
+	it('下标全部越界：视为召回失败 → 退化为按 updated 倒序，绝不因此一条都不注入（v3）', async () => {
+		const { provider } = makeProvider('{"selected":[99,100]}');
+		const recall = new MemoryRecall({ provider, model: 'flash' });
+		const candidates = [entry(1), entry(2), entry(3)];
+
+		const r = await recall.select({ taskText: 't', candidates, maxItems: 2, maxTokens: 10_000 });
+		expect(r.mode).toBe('fallback');
+		expect(r.reason).toBe('llm_invalid');
+		expect(r.entries.length).toBeGreaterThan(0);
+	});
+
+	it('模型明确返回空数组：尊重"都不相关"，不注入（与"全部越界"区分开）', async () => {
+		const { provider } = makeProvider('{"selected":[]}');
+		const recall = new MemoryRecall({ provider, model: 'flash' });
+		const candidates = [entry(1), entry(2), entry(3)];
+
+		const r = await recall.select({ taskText: 't', candidates, maxItems: 2, maxTokens: 10_000 });
+		expect(r.mode).toBe('llm');
+		expect(r.entries).toHaveLength(0);
+	});
 });
