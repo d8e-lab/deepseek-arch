@@ -10,7 +10,7 @@
 import type { TurnRecord, TokenUsage } from '../types/index.js';
 import { strDisplayWidth, cyan, dim, green, red, renderDiffLine, stripAnsi, formatToolCallSummary } from './ansi.js';
 import { MarkdownTableRenderer } from './markdown.js';
-import { turnUserContent, turnAssistantContent, turnAssistantReasoning } from '../utils/turn-utils.js';
+import { turnUserContent, turnUserImages, turnAssistantContent, turnAssistantReasoning } from '../utils/turn-utils.js';
 import { DISPLAY_PRESETS, isFileModTool } from './display-mode.js';
 import type { DisplayMode } from './display-mode.js';
 
@@ -180,6 +180,15 @@ export class ConversationView {
 					lines.push(userLabel + green(userWrapped[i]));
 				} else {
 					lines.push(' '.repeat(userLabelWidth) + green(userWrapped[i]));
+				}
+			}
+
+			// 图片附件（视觉输入）：折叠为一行摘要，避免会话视图被文件名撑开
+			const userImages = turnUserImages(turn);
+			if (userImages.length > 0) {
+				const names = userImages.map((a) => a.name).join(', ');
+				for (const line of wrapText(`[image: ${names}]`, termWidth - userLabelWidth)) {
+					lines.push(' '.repeat(userLabelWidth) + dim(line));
 				}
 			}
 

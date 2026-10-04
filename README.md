@@ -92,6 +92,7 @@ deepseek-arch chat --cdp http://127.0.0.1:9222
 - **Shell 工具**：模型可直接执行 shell 命令（禁止 sudo，10min 超时），用户 y/N 确认后执行
 - **文件编辑**：edit_file/write_file + diff 预览 + 原子写入 + staleness 检查
 - **浏览器工具**：模型可自主打开网页、浏览内容、点击链接、填写表单、滚动页面、按键盘键，基于 Playwright（纯文本模态，无需视觉能力）
+- **图片输入（视觉）**：`/image <路径>`、消息内联 `@路径`、终端拖拽/粘贴路径三种方式把本地图片交给模型（base64 内联，按官方限额校验）；图片按内容寻址存进会话目录，`turns.json` 只留引用，本功能需视觉模型（默认 `deepseek-flash`）
 - **宿主机 Edge 集成**：通过 CDP 连接到 Windows 宿主机 Edge，复用登录态
 - **Session 持久化**：浏览器最后访问的 URL 跨 session 持久化，resume 时自动恢复
 - **流式输出**：SSE 实时增量渲染，Ctrl+C 中断模型输出；模型调用工具前正文实时显示，对话节奏自然
@@ -150,6 +151,7 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 /model [name]       切换模型（无参时交互选择，候选从配置动态生成）
 /provider [name]    切换供应商（写回 defaults.provider）
 /system [name]      列出/切换 system prompt 模板（写回 defaults.system_prompt）
+/image <path>       附加本地图片（JPEG/PNG/GIF/WebP）到下一条消息；无参查看列表，clear/remove 管理
 /async              切换子代理异步模式（写回 defaults.async）
 /yolo               切换 YOLO 模式（写回 defaults.yolo）
 /subagent [name]    查看子代理详情
@@ -220,8 +222,9 @@ Ctrl+O          全屏对话浏览视图（完整 think/content）
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `provider` | `deepseek` | 默认供应商 |
-| `model` | `deepseek-v4-pro` | 默认模型 |
+| `model` | `deepseek-flash` | 默认模型（deepseek-flash 支持图片输入） |
 | `system_prompt` | `default` | system prompt 模板名 |
+| `vision_models` | `["deepseek-flash", "deepseek-v4-flash-vision-exp"]` | 视觉模型名单（带图发送时提示用，不阻断发送） |
 | `temperature` / `max_tokens` | 未设置 | 生成参数（deepseek-v4 思考模式下 temperature 不生效） |
 | `reasoning_effort` | `high` | 推理强度 low/high/max |
 | `thinking` | `enabled` | 思考模式开关 |
@@ -597,6 +600,7 @@ npm publish --access public
 | [docs/types.md](./docs/types.md) | 类型体系设计 |
 | [docs/file-edit-tools.md](./docs/file-edit-tools.md) | 文件修改工具设计（write/edit + diff + 确认流程） |
 | [docs/browser-tools.md](./docs/browser-tools.md) | 浏览器工具设计（工具定义 + 环境变量 + 生命周期） |
+| [docs/vision-images.md](./docs/vision-images.md) | 图片输入（视觉 / base64 内联、限额、入口与存储） |
 | [docs/subagent-design.md](./docs/subagent-design.md) | 子代理系统设计 |
 | [docs/render-sdk.md](./docs/render-sdk.md) | Render SDK 说明 |
 | [docs/system-prompt.md](./docs/system-prompt.md) | System Prompt 组装与调试 |
@@ -617,6 +621,16 @@ npm publish --access public
 ---
 
 ## 更新日志
+
+### v2.1.0 — 图片输入（视觉）
+
+**🖼️ 让模型看图**
+- 新增三种图片输入方式：`/image <路径>` 命令、消息内联 `@路径`、终端拖拽/粘贴路径自动识别
+- 走官方文档的 base64 内联方式（`data:image/png;base64,…`），无需图床或 Files API
+- 完整的限额校验：仅 JPEG/PNG/GIF/WebP（按文件内容判定）、单图 ≤32 MiB、请求体 ≤48 MiB、单请求 ≤600 张 / ≤64 MiB、单边 ≤8192 px（≥15 张时 4096）
+- 图片按内容寻址复制到 `sessions/<id>/images/<sha256>.<ext>`，`turns.json` 只存引用与元数据；原文件删除/移动不影响历史轮次，也不会撑爆会话文件
+- 默认模型改为 `deepseek-flash`（视觉模型）；用非视觉模型带图发送时给出提示
+- 详见 [docs/vision-images.md](docs/vision-images.md)
 
 ### v2.0.2 — shell 稳定性与移除规划能力
 

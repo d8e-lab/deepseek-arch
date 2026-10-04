@@ -9,7 +9,7 @@
  *   - MockProvider（src/core/mock-provider.ts）— 本地伪装返回
  */
 
-import type { Message, ChatCompletionResponse, StreamChunk, ToolDefinition } from '../types/index.js';
+import type { ApiMessage, ChatCompletionResponse, StreamChunk, ToolDefinition } from '../types/index.js';
 
 /** 非流式调用选项 */
 export interface ChatOptions {
@@ -36,9 +36,9 @@ export interface StreamChatOptions extends ChatOptions {
 /** 模型提供商统一接口 */
 export interface ModelProvider {
 	/** 非流式对话 */
-	chat(messages: Message[], options?: ChatOptions): Promise<ChatCompletionResponse>;
+	chat(messages: ApiMessage[], options?: ChatOptions): Promise<ChatCompletionResponse>;
 	/** 流式对话（SSE） */
-	chatStream(messages: Message[], options?: StreamChatOptions): AsyncGenerator<StreamChunk>;
+	chatStream(messages: ApiMessage[], options?: StreamChatOptions): AsyncGenerator<StreamChunk>;
 	/** 切换默认模型（可选） */
 	setModel?(model: string): void;
 	/** 设置当前会话 ID（可选，用于请求镜像监听的会话关联） */

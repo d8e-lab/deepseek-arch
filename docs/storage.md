@@ -16,6 +16,7 @@
     ├── system-prompt.txt  # 会话创建时的 system prompt 快照（resume 复用，命中 KV cache）
     ├── memory-cursor.json # 记忆归纳游标（按会话；{ cursor: "N" }）
     ├── cache.log          # 缓存命中率日志（追加式）
+    ├── images/            # 图片附件资产（视觉输入；内容寻址 <sha256>.<ext>，0600）
     └── subagents/<name>/  # 子代理运行记录
         ├── meta.json      # 状态/时间/轮数/system prompt
         └── turn_0.json    # 逐轮运行（每轮自己的 messages delta + entries + status）
@@ -91,6 +92,16 @@
   }
 }
 ```
+
+### 图片附件（images/）
+
+带图用户消息在 `turns.json` 中只保存**引用与元数据**（`Message.images`），
+字节存放在 `<sessionDir>/images/<sha256>.<ext>`：
+
+- 内容寻址：同一张图重复附加只占一份（文件权限 0600）；
+- 发送时由 `materializeMessages()` 读出并编码为 base64 content block，因此历史轮次可精确重放；
+- 资产文件被删除时，该轮降级为 `[image unavailable: <name>]` 文本块，不阻断请求；
+- 详见 [vision-images.md](vision-images.md)。
 
 ### turns.json
 

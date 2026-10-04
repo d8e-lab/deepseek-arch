@@ -66,6 +66,8 @@ export interface ConfigDefaults {
 	auto_compact_threshold?: number;
 	/** 上下文窗口大小（tokens）：数字或带单位写法（如 "1M"/"256K"，十进制），默认 1M */
 	context_window?: number | string;
+	/** 视觉模型名单（带图发送时的提示依据；缺省用内置名单） */
+	vision_models?: string[];
 }
 
 /** 单档展示参数覆盖（display.overrides.<mode>，snake_case 与 TOML 键一致） */

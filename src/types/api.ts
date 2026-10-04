@@ -2,7 +2,8 @@
  * API 请求/响应相关类型
  */
 
-import type { Message } from './chat.js';
+import type { Message, MessageRole } from './chat.js';
+import type { ImageDetail } from './image.js';
 
 /** 工具定义（发送给 API） */
 export interface ToolDefinition {
@@ -14,10 +15,36 @@ export interface ToolDefinition {
 	};
 }
 
+/**
+ * OpenAI 兼容内容块（仅 user 消息可含图片块）
+ *
+ * 文档方式 1（Base64 内联）：url 为 `data:<mime>;base64,<data>`。
+ * 外部 URL / Files API 为后续扩展预留。
+ */
+export type ApiContentBlock =
+	| { type: 'text'; text: string }
+	| { type: 'image_url'; image_url: { url: string; detail?: ImageDetail } };
+
+/**
+ * 上线消息（API 适配层契约）
+ *
+ * 与领域层 `Message` 的唯一区别：`content` 允许为内容块数组。
+ * 由 `materializeMessages()` 在调用 provider 之前从 `Message`（含 images 引用）生成，
+ * 领域层 / 持久化层不感知块结构。
+ */
+export interface ApiMessage {
+	role: MessageRole;
+	content: string | ApiContentBlock[];
+	reasoning_content?: string;
+	tool_call_id?: string;
+	name?: string;
+	tool_calls?: ToolCall[];
+}
+
 /** DeepSeek Chat Completion 请求体 */
 export interface ChatCompletionRequest {
 	model: string;
-	messages: Message[];
+	messages: ApiMessage[];
 	stream?: boolean;
 	temperature?: number;
 	max_tokens?: number;

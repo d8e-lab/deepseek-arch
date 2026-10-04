@@ -14,8 +14,9 @@
  *   其他 → "你说了: ..." 的默认回复
  */
 
-import type { Message, ChatCompletionResponse, StreamChunk, TokenUsage } from '../types/index.js';
+import type { ApiMessage, ChatCompletionResponse, StreamChunk, TokenUsage } from '../types/index.js';
 import { ApiError } from '../types/index.js';
+import { messageText } from '../utils/message-text.js';
 import type { ModelProvider, ChatOptions, StreamChatOptions } from './model-provider.js';
 
 /** 稳定可预测的假回复 */
@@ -89,10 +90,15 @@ export class MockProvider implements ModelProvider {
 		this.modelName = model;
 	}
 
-	/** 提取最后一条 user 消息内容 */
-	private getLastUserContent(messages: Message[]): string {
+	/**
+	 * 提取最后一条 user 消息的纯文本。
+	 *
+	 * 用户消息可能携带图片内容块（视觉输入）：MockProvider 只消费文本部分，
+	 * 便于在无网络环境下跑通带图流程的测试。
+	 */
+	private getLastUserContent(messages: ApiMessage[]): string {
 		for (let i = messages.length - 1; i >= 0; i--) {
-			if (messages[i].role === 'user') return messages[i].content;
+			if (messages[i].role === 'user') return messageText(messages[i]);
 		}
 		return '';
 	}
@@ -104,7 +110,7 @@ export class MockProvider implements ModelProvider {
 	 * #error-401 和 #error-500 用于测试错误处理路径。
 	 */
 	async chat(
-		messages: Message[],
+		messages: ApiMessage[],
 		options?: ChatOptions,
 	): Promise<ChatCompletionResponse> {
 		const content = this.getLastUserContent(messages);
@@ -181,7 +187,7 @@ export class MockProvider implements ModelProvider {
 	 * 支持 reasoning_content 模拟 DeepSeek 的思考过程。
 	 */
 	async *chatStream(
-		messages: Message[],
+		messages: ApiMessage[],
 		options?: StreamChatOptions,
 	): AsyncGenerator<StreamChunk> {
 		const content = this.getLastUserContent(messages);

@@ -14,7 +14,7 @@
  */
 
 import { request as httpRequest } from 'node:http';
-import type { Message, ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from '../types/index.js';
+import type { ApiMessage, ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from '../types/index.js';
 import { ApiError } from '../types/index.js';
 import type { ModelProvider, ChatOptions, StreamChatOptions } from './model-provider.js';
 
@@ -115,14 +115,16 @@ export class ApiClient implements ModelProvider {
 	 * 发送 Chat Completion 请求（非流式）
 	 *
 	 * @param messages  消息列表（system / user / assistant）
-	 *                  注意：assistant 消息可附带 reasoning_content 以命中 kv-cache
+	 *                  注意：assistant 消息可附带 reasoning_content 以命中 kv-cache；
+	 *                  user 消息的 content 可为内容块数组（含 base64 图片），由
+	 *                  SessionManager 的 materializeMessages() 生成。
 	 * @param options   可选的模型/温度/max_tokens 覆盖
 	 * @returns         API 响应体
 	 * @throws          ApiError  — HTTP 非 2xx（含 401/429/5xx）
 	 * @throws          Error     — 网络错误（fetch 自身抛出）
 	 */
 	async chat(
-		messages: Message[],
+		messages: ApiMessage[],
 		options?: ChatOptions,
 	): Promise<ChatCompletionResponse> {
 		const body: ChatCompletionRequest = {
@@ -197,7 +199,7 @@ export class ApiClient implements ModelProvider {
 	 * @throws         Error     — 超时、网络错误（重试耗尽后）
 	 */
 	async *chatStream(
-		messages: Message[],
+		messages: ApiMessage[],
 		options?: StreamChatOptions,
 	): AsyncGenerator<StreamChunk> {
 		const timeoutMs = options?.timeoutMs ?? this.timeoutMs;

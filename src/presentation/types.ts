@@ -14,5 +14,7 @@ export interface TuiConfig {
 	version: string;
 	/** 当前 system prompt 模板名 */
 	systemPrompt?: string;
+	/** 视觉模型名单（defaults.vision_models）：带图发送时用于提示，不阻断发送 */
+	visionModels?: readonly string[];
 	/** YOLO 模式下审查模型名（默认同主模型） */
 }

@@ -21,8 +21,24 @@ interface Message {
   reasoning_content?: string;  // 模型思维链，持久化命中 kv-cache
   tool_call_id?: string;       // 工具调用 ID（为 agent tool call 预留）
   name?: string;               // 工具名称（为 agent tool call 预留）
+  images?: ImageAttachment[];  // 图片附件（仅 user；只存引用，发送时物化为 base64 块）
+}
+
+/** 图片附件：字节在 <sessionDir>/images/，JSON 只存引用与元数据 */
+interface ImageAttachment {
+  path: string;        // 相对会话目录：images/<sha256>.<ext>
+  mime: ImageMime;     // image/jpeg | image/png | image/gif | image/webp（按内容判定）
+  bytes: number;       // 原始字节数
+  sha256: string;      // 内容寻址（去重键）
+  name: string;        // 展示用文件名
+  width?: number;
+  height?: number;
+  detail?: ImageDetail; // low | high | original | auto（预留）
 }
 ```
+
+领域层 `content` 恒为字符串（标题推导、摘要、记忆、渲染都按文本消费）；
+图片以「附件」旁路存在，在调用 provider 之前由 `materializeMessages()` 展开为上线契约 `ApiMessage`。
 
 ### Token 用量与费用
 
@@ -142,9 +158,23 @@ interface ResolvedConfig {
 ### API
 
 ```typescript
+type ApiContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: ImageDetail } };
+
+/** 上线消息：与 Message 的唯一区别是 content 允许为内容块数组（含图片） */
+interface ApiMessage {
+  role: MessageRole;
+  content: string | ApiContentBlock[];
+  reasoning_content?: string;
+  tool_call_id?: string;
+  name?: string;
+  tool_calls?: ToolCall[];
+}
+
 interface ChatCompletionRequest {
   model: string;
-  messages: Message[];
+  messages: ApiMessage[];
   stream?: boolean;
   temperature?: number;
   max_tokens?: number;
@@ -231,3 +261,4 @@ class ApiError extends Error {
 | v0.1.0 | 初始定义：Message, MessageRecord, TokenUsage, TokenUsageRecord, Session, SessionMeta, 配置接口, API 接口 |
 | v0.2.1 | 移除 MessageRecord/TokenUsageRecord（SQLite 专用），新增 TurnRecord；Session 改用 turns[]；SessionMeta 新增 turnCount/totalCost；ConfigPaths.db → sessions |
 | v0.4.0 | 新增 StreamChunk, StreamOptions, StreamEvent 流式类型；TurnRecord.interrupted？中断支持；SessionMeta.lastUsage？延迟加载优化；Message.role 新增 'tool' 预留；Message.tool_call_id/name 预留字段；新增 ApiError/ApiErrorBody 错误类型；TurnRecord.usage 变更为可选（仅末轮保留） |
+| v2.1.0 | 新增 `ImageAttachment` / `ImageMime` / `ImageDetail`；`Message.images`（仅 user，持久化引用）；新增上线契约 `ApiMessage` / `ApiContentBlock`（`content` 可为含图片的内容块数组），`ModelProvider` 接口改为收发 `ApiMessage` |

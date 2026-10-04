@@ -36,9 +36,13 @@ sessions = "./sessions"
 
 [defaults]
 provider = "deepseek"
-model = "deepseek-v4-pro"
+model = "deepseek-flash"          # 视觉模型：支持图片输入
 system_prompt = "default"
+vision_models = ["deepseek-flash", "deepseek-v4-flash-vision-exp"]  # 带图发送时的提示名单
 ```
+
+`vision_models` 只用于「当前模型是否支持图片」的提示（模型名含 `vision` 也认作视觉模型），
+不阻断发送；缺省用代码内置名单。图片输入的完整说明见 [vision-images.md](vision-images.md)。
 
 ### 文件跳转引用
 

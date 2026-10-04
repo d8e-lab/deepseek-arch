@@ -49,7 +49,8 @@ sessions = "./sessions"             # 会话数据目录
 # 默认供应商（providers.toml 中定义的键名；/provider 切换写回）
 provider = "deepseek"
 # 默认模型（pricing.toml 中定义的模型名；/model 切换写回）
-model = "deepseek-v4-pro"
+# deepseek-flash 支持图片输入（视觉），可作为默认模型直接收图。
+model = "deepseek-flash"
 # system prompt 模板名（system-prompt.toml 中的模板键；/system 切换写回）
 system_prompt = "default"
 
@@ -58,6 +59,10 @@ system_prompt = "default"
 # 取消注释即可自定义：
 # temperature = 0.7     # 采样温度（0~2，值越大越随机）
 # max_tokens = 8192     # 单次回复最大输出 tokens
+# 视觉模型名单：带图发送时用于提示当前模型是否支持图片（不阻断发送；
+# 判定还接受模型名含 "vision" 的写法）。
+vision_models = ["deepseek-flash", "deepseek-v4-flash-vision-exp"]
+
 # 推理强度：low / high / max（影响思考深度与耗时）
 reasoning_effort = "high"
 # 思考模式：enabled / disabled（disabled 关闭思考，直接输出）

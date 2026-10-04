@@ -59,6 +59,7 @@ deepseek-arch chat --prompt "总结一下昨天的改动" --workspace /path/to/r
 | 退出码 | `0` 成功；`1` 缺 `--workspace` / 会话不存在 / `--workspace` 目录不可用 / 本轮失败 |
 | 工具确认 | 不注册确认回调 → 需要确认的工具**直接执行**（即 yolo） |
 | 落盘 | 与 TUI 一致：会话、turn 正常写入 `~/.deepseek-arch/sessions/` |
+| 图片 | `--prompt` 文本中的 `@路径` / 拖拽绝对路径会被识别为图片附件（`[image] N attached` 打到 stderr）|
 | 空会话 | 本轮失败且未产生轮次时丢弃刚创建的空会话 |
 
 #### 工作区（`--workspace`）

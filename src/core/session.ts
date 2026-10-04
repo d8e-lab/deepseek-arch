@@ -17,6 +17,8 @@ import { yieldEventLoop } from '../utils/event-loop.js';
 import { turnUserContent, turnAssistantContent } from '../utils/turn-utils.js';
 import { appendCacheLog } from './cache-log.js';
 import type {
+	ApiMessage,
+	ImageAttachment,
 	Message,
 	Session,
 	SessionMeta,
@@ -42,6 +44,8 @@ import { MemoryAgent } from './memory-agent.js';
 import { createMemoryStore } from './memory-service.js';
 import { withMemoryLock } from './memory-lock.js';
 import { activateSkillsForPaths, extractPathsFromToolCall } from './skill.js';
+import { ImageError, ImageStore, isVisionModel, materializeMessages } from './image.js';
+import { extractImageRefs, resolveUserPath } from './image-refs.js';
 import {
 	MAX_RESTORE_FILES,
 	buildCompactMessages,
@@ -941,15 +945,94 @@ export class SessionManager {
 	 * 自动构建消息队列（system prompt → 历史 turns → 当前消息），
 	 * 调用 API 后持久化 turn JSON 到文件系统。
 	 */
+	// ─── 图片附件（视觉输入，base64 内联）──────────
+
+	/**
+	 * 当前会话的图片资产仓库。
+	 *
+	 * @throws ImageError 未创建会话
+	 */
+	getImageStore(): ImageStore {
+		if (!this.session) {
+			throw new ImageError('no_session', 'No active session — create or resume a session before attaching images');
+		}
+		return new ImageStore(this.storage.sessionDir(this.session.meta.id));
+	}
+
+	/** 会话工作目录（相对路径基准，与文件工具保持一致） */
+	private sessionCwd(): string {
+		return process.env.DEEPSEEK_ARCH_SESSION_CWD ?? process.cwd();
+	}
+
+	/**
+	 * 附加单个图片文件（`/image` 命令）。
+	 *
+	 * 支持相对路径（基准 = 会话工作目录）、绝对路径、`~/`、`file://`。
+	 *
+	 * @throws ImageError 格式不支持 / 单图超限 / 尺寸超限 / 无会话
+	 * @throws Error      文件不存在或不可读（ENOENT/EACCES）
+	 */
+	async attachImage(filePath: string): Promise<ImageAttachment> {
+		const store = this.getImageStore();
+		const absolute = resolveUserPath(filePath, this.sessionCwd());
+		return store.attach(absolute);
+	}
+
+	/**
+	 * 扫描消息文本中的内联图片引用（`@路径` / 拖拽绝对路径）并落入会话资产。
+	 *
+	 * 容错策略：文件不存在 / 不是图片 → 静默跳过（该片段仍作为普通文本）；
+	 * 但格式虽支持却超限（>32 MiB、单边 >8192 px）会记录原因，供 UI 提示。
+	 */
+	async resolveInlineImages(text: string): Promise<{
+		images: ImageAttachment[];
+		skipped: { path: string; reason: string }[];
+	}> {
+		if (!this.session) return { images: [], skipped: [] };
+
+		const images: ImageAttachment[] = [];
+		const skipped: { path: string; reason: string }[] = [];
+
+		for (const hit of extractImageRefs(text, this.sessionCwd())) {
+			try {
+				images.push(await this.attachImage(hit.path));
+			} catch (err) {
+				if (err instanceof ImageError) {
+					skipped.push({ path: hit.path, reason: err.message });
+				}
+				// 其余错误（ENOENT/EISDIR/权限）= 不是可读图片文件 → 静默忽略
+			}
+		}
+
+		return { images, skipped };
+	}
+
+	/** 是否支持图片输入（按视觉模型名单提示，不阻断发送） */
+	isVisionModel(model?: string): boolean {
+		return isVisionModel(model);
+	}
+
+	// ─── 发送消息 ──────────────────────────────────
+
+	/**
+	 * 发送用户消息并等待完整响应（非流式）
+	 *
+	 * @param userContent 用户文本
+	 * @param images      图片附件（可选；仅 user 消息允许）
+	 */
 	async sendMessage(
 		userContent: string,
+		images?: ImageAttachment[],
 	): Promise<{ turn: TurnRecord; response: ChatCompletionResponse }> {
 		if (!this.session) {
 			throw new Error('未创建会话——请先调用 startNewSession() 或 resumeSession()');
 		}
 
-		// 构建完整消息队列
-		const messages = this.buildMessages(userContent);
+		// 构建完整消息队列（图片引用在此展开为 base64 内容块）
+		const messages = await materializeMessages(
+			this.buildMessages(userContent, images),
+			this.storage.sessionDir(this.session.meta.id),
+		);
 
 		// 调用 API（带上 tools）
 		const options = this.tools.length > 0 ? { tools: this.toolsToDefinitions() } : undefined;
@@ -971,11 +1054,15 @@ export class SessionManager {
 		// 费用暂为 0（Phase 7 TokenCalculator 实现后补全）
 		const costRmb = 0;
 
-		// 持久化 turn JSON
+		// 持久化 turn JSON（图片只存引用元数据，不写 base64）
 		const browserUrl = await this._browserLastUrl();
 		const turn = await this.storage.saveTurn(
 			this.session.meta.id,
-			{ role: 'user', content: userContent },
+			{
+				role: 'user',
+				content: userContent,
+				...(images && images.length > 0 ? { images } : {}),
+			},
 			{
 				id: response.id,
 				role: 'assistant',
@@ -1008,6 +1095,7 @@ export class SessionManager {
 	 * 通过 onEvent 回调推送增量内容，支持外部 AbortSignal 中断。
 	 * 流式完成后自动持久化 turn；中断时保存不完整轮次（interrupted=true）。
 	 *
+	 * @param images 图片附件（可选；仅 user 消息允许，落盘只存引用）
 	 * @returns 完整的 TurnRecord（正常完成），或 null（中断/错误）
 	 */
 	async sendMessageStream(
@@ -1015,6 +1103,7 @@ export class SessionManager {
 		onEvent: (event: StreamEvent) => void,
 		signal?: AbortSignal,
 		onConfirm?: (toolName: string, params: Record<string, unknown>) => Promise<boolean>,
+		images?: ImageAttachment[],
 	): Promise<TurnRecord | null> {
 		if (!this.session) {
 			throw new Error('未创建会话——请先调用 startNewSession() 或 resumeSession()');
@@ -1028,7 +1117,10 @@ export class SessionManager {
 			}
 		}
 
-		const baseMessages = this.buildMessages(userContent);
+		const sessionDir = this.storage.sessionDir(this.session.meta.id);
+		const baseMessages = this.buildMessages(userContent, images);
+		// 上线消息：把历史与本轮的 images 引用展开为 base64 内容块（整包限额在此校验）
+		let apiBaseMessages = await materializeMessages(baseMessages, sessionDir);
 		const toolDefs = this.tools.length > 0 ? this.toolsToDefinitions() : undefined;
 
 		let responseId = '';
@@ -1043,7 +1135,11 @@ export class SessionManager {
 		const roundUsages: RoundUsage[] = [];
 		/** 是否已创建进行中的 turn（用于增量落盘） */
 		let turnSaved = false;
-		const userMsg: Message = { role: 'user', content: userContent };
+		const userMsg: Message = {
+			role: 'user',
+			content: userContent,
+			...(images && images.length > 0 ? { images } : {}),
+		};
 
 		// ── 子代理状态追踪（实例级，跨轮次/跨中断存活）──
 		/** 是否异步模式（默认非异步） */
@@ -1353,8 +1449,8 @@ export class SessionManager {
 				// M-2：异步模式状态块拼到 roundMessages 末尾（不写 agentMessages——kv-cache 前缀稳定）
 				const statusBlock = buildStatusBlock();
 				const roundMessages = statusBlock
-					? [...baseMessages, ...agentMessages, statusBlock]
-					: [...baseMessages, ...agentMessages];
+					? [...apiBaseMessages, ...agentMessages, statusBlock]
+					: [...apiBaseMessages, ...agentMessages];
 
 				let roundContent = '';
 				let roundReasoning = '';
@@ -1424,7 +1520,9 @@ export class SessionManager {
 							// compact 后重建 baseMessages：buildMessages 从最后一个摘要轮开始，
 							// agentMessages（当前轮工具交互）保留，消息序列 = 摘要 + userMsg + agentMessages
 							baseMessages.length = 0;
-							baseMessages.push(...this.buildMessages(userContent));
+							baseMessages.push(...this.buildMessages(userContent, images));
+							// 前缀已变化：重新物化（图片引用 → base64 内容块）
+							apiBaseMessages = await materializeMessages(baseMessages, sessionDir);
 							onEvent({
 								type: 'auto_compact',
 								text: `上下文 ${promptTokens} tokens 超过阈值 ${limit}，已自动压缩`,
@@ -1894,8 +1992,13 @@ export class SessionManager {
 		}
 	}
 
-	/** 构建请求消息队列（中断轮次保留用户消息 + 已完成工具结果，以维持上下文连续性） */
-	private buildMessages(currentContent: string): Message[] {
+	/**
+	 * 构建请求消息队列（中断轮次保留用户消息 + 已完成工具结果，以维持上下文连续性）
+	 *
+	 * @param currentContent 本轮用户文本
+	 * @param images         本轮图片附件（可选；展开为 base64 块由 materializeMessages 完成）
+	 */
+	private buildMessages(currentContent: string, images?: ImageAttachment[]): Message[] {
 		const messages: Message[] = [];
 
 		// 1. System prompt
@@ -1970,8 +2073,12 @@ export class SessionManager {
 			});
 		}
 
-		// 3. 当前用户消息
-		messages.push({ role: 'user', content: currentContent });
+		// 3. 当前用户消息（图片以引用形式挂在消息上，发送前物化为内容块）
+		messages.push({
+			role: 'user',
+			content: currentContent,
+			...(images && images.length > 0 ? { images } : {}),
+		});
 
 		return messages;
 	}

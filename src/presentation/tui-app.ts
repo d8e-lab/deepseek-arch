@@ -10,6 +10,8 @@ import type { Session } from '../types/index.js';
 import { ScreenBuffer } from './screen-buffer.js';
 import { SessionManager } from '../core/session.js';
 import type { StreamEvent } from '../types/index.js';
+import type { ImageAttachment } from '../types/index.js';
+import { ImageError, describeAttachment, formatBytes, isVisionModel } from '../core/image.js';
 import type { Tool } from '../tools/types.js';
 import { ConfigManager } from '../core/config.js';
 import { ConversationView, truncateThink } from '../render/conversation.js';
@@ -61,10 +63,10 @@ import { readMemorySessionConfig } from '../core/memory-config.js';
 import { withMemoryLock } from '../core/memory-lock.js';
 
 /** 可选模型列表（运行时从配置动态生成，见 TuiApp 构造函数；此为兜底） */
-const FALLBACK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
+const FALLBACK_MODELS = ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro'];
 
 /** 可用命令列表 */
-const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/memory', '/compact', '/exit'];
+const AVAILABLE_COMMANDS = ['/model', '/provider', '/system', '/image', '/help', '/context', '/yolo', '/async', '/subagent', '/subagent_cancel', '/memory', '/compact', '/exit'];
 
 /** 从光标处清除到屏幕底 */
 const CLEAR_TO_END = '\x1b[0J';
@@ -82,6 +84,10 @@ export class TuiApp {
 	private yolo: boolean;
 	/** 可选模型列表（从配置 pricing/providers 动态生成） */
 	private availableModels: string[] = FALLBACK_MODELS;
+	/** 视觉模型名单（defaults.vision_models；用于带图发送前的提示） */
+	private visionModels: readonly string[] = [];
+	/** 待发图片附件（/image 附加；发送成功后清空） */
+	private pendingImages: ImageAttachment[] = [];
 	/** 子代理异步模式 */
 	private asyncMode = false;
 	private conversation: ConversationView;
@@ -222,6 +228,7 @@ export class TuiApp {
 			const merged = [...new Set([...configured, config.model, ...FALLBACK_MODELS])];
 			this.availableModels = merged.length > 0 ? merged : FALLBACK_MODELS;
 		}
+		this.visionModels = config.visionModels ?? [];
 	}
 
 	/** 设置自我交互模式（在 start() 之前调用） */
@@ -485,11 +492,12 @@ export class TuiApp {
 		if (this.nextMessage) {
 			const next = this.nextMessage;
 			this.nextMessage = null;
+			const nextImages = await this.prepareImages(next);
 			this.bottom.clearCommandResult(false); // 输入区已重建，不重绘避免错位
 			this.bottom.collapse();                // 收起重建的输入区（closeViewer 已重置位置）
-			this.out.write(green('[You] ') + next + '\r\n\r\n');
+			this.out.write(green('[You] ') + this.formatUserEcho(next, nextImages) + '\r\n\r\n');
 			this.outputEndsWithSeparator = false; // 用户消息行：后续输出非分隔线
-			await this.sendMessageStream(next);
+			await this.sendMessageStream(next, nextImages);
 			// 视图可能在发送期间打开：跳过 UI 收尾（主循环等待视图关闭后重新进入）
 			if (this.overlay.active) return;
 			this.printSeparator();
@@ -523,10 +531,11 @@ export class TuiApp {
 			if (!handled) {
 				// F-9：// 前缀转义——去掉一个 / 后按普通消息发送（如 "//usr/bin 在哪" → "/usr/bin 在哪"）
 				const sendContent = content.startsWith('//') ? content.slice(1) : content;
+				const sendImages = await this.prepareImages(sendContent);
 				this.bottom.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
-				this.out.write(green('[You] ') + sendContent + '\r\n\r\n');
+				this.out.write(green('[You] ') + this.formatUserEcho(sendContent, sendImages) + '\r\n\r\n');
 				this.outputEndsWithSeparator = false;
-				await this.sendMessageStream(sendContent);
+				await this.sendMessageStream(sendContent, sendImages);
 			}
 			// 视图可能在命令处理/输出期间打开：跳过 UI 收尾（视图接管）
 			if (this.overlay.active) return;
@@ -537,9 +546,12 @@ export class TuiApp {
 			return;
 		}
 
+		// 图片附件：待发列表 + 文本内联引用（@路径 / 拖拽路径）
+		const images = await this.prepareImages(content);
+
 		// 打印用户消息（绿色）
 		this.bottom.clearCommandResult(false); // 发送普通消息：清空命令结果区（输入区已清除，不重绘）
-		this.out.write(green('[You] ') + content + '\r\n\r\n');
+		this.out.write(green('[You] ') + this.formatUserEcho(content, images) + '\r\n\r\n');
 		this.outputEndsWithSeparator = false;
 
 		// 拼接待发送的 shell 上下文（仅模型可见）
@@ -549,7 +561,7 @@ export class TuiApp {
 		}
 
 		// 发送并流式输出
-		await this.sendMessageStream(content);
+		await this.sendMessageStream(content, images);
 
 		// 视图可能在输出期间打开：跳过 UI 收尾（主循环等待视图关闭后重新进入）
 		if (this.overlay.active) return;
@@ -658,6 +670,10 @@ export class TuiApp {
 
 		if (content.startsWith('/memory')) {
 			return await this.handleMemoryCommand(content.slice('/memory'.length).trim());
+		}
+
+		if (content.startsWith('/image')) {
+			return await this.handleImageCommand(content.slice('/image'.length).trim());
 		}
 
 		if (content.startsWith('/subagent_cancel')) {
@@ -781,6 +797,122 @@ export class TuiApp {
 	}
 
 
+	// ─── 图片附件（视觉输入）──────────────────────
+
+	/**
+	 * /image [path...|clear|list] — 管理待发图片附件
+	 *
+	 *   /image a.png b.jpg   附加（支持相对/绝对/~/file://；一张图可多次附加，按内容去重）
+	 *   /image               查看待发列表
+	 *   /image clear         清空待发列表
+	 */
+	private async handleImageCommand(arg: string): Promise<boolean> {
+		const parts = arg.split(/\s+/).filter(Boolean);
+
+		if (parts.length === 0 || parts[0] === 'list') {
+			this.printPendingImages();
+			return true;
+		}
+
+		if (parts[0] === 'clear') {
+			const count = this.pendingImages.length;
+			this.pendingImages = [];
+			this.cmdOut(count > 0 ? green(`[images cleared: ${count}]`) : dim('No pending images.'));
+			return true;
+		}
+
+		if (parts[0] === 'remove') {
+			const index = Number.parseInt(parts[1] ?? '', 10);
+			if (!Number.isInteger(index) || index < 1 || index > this.pendingImages.length) {
+				this.cmdOut(red(`Usage: /image remove <1-${this.pendingImages.length || 0}>`));
+				return true;
+			}
+			const [removed] = this.pendingImages.splice(index - 1, 1);
+			this.cmdOut(green(`[image removed: ${removed.name}]`));
+			return true;
+		}
+
+		let attached = 0;
+		for (const path of parts) {
+			try {
+				const att = await this.sessionMgr.attachImage(path);
+				if (this.pendingImages.some((p) => p.sha256 === att.sha256)) {
+					this.cmdOut(dim(`[image already attached: ${att.name}]`));
+					continue;
+				}
+				this.pendingImages.push(att);
+				attached++;
+				this.cmdOut(green(`[image attached] ${describeAttachment(att)}`));
+			} catch (err) {
+				if (err instanceof ImageError) {
+					this.cmdOut(red(`Image error: ${err.message}`));
+				} else {
+					const msg = err instanceof Error ? err.message : String(err);
+					this.cmdOut(red(`Failed to attach "${path}": ${msg}`));
+				}
+			}
+		}
+
+		if (attached > 0) {
+			this.warnIfNotVisionModel();
+			this.cmdOut(dim(`Pending: ${this.pendingImages.length} image(s) — they will be sent with your next message.`));
+		}
+		return true;
+	}
+
+	/** 打印待发图片列表 */
+	private printPendingImages(): void {
+		if (this.pendingImages.length === 0) {
+			this.cmdOut(dim('No pending images. Usage: /image <path> (or inline @/path/to/image.png)'));
+			return;
+		}
+		this.cmdOut(yellow(`Pending images (${this.pendingImages.length})`));
+		this.pendingImages.forEach((att, i) => {
+			this.cmdOut(`  ${String(i + 1).padStart(2)}. ${describeAttachment(att)} ${dim(att.mime)}`);
+		});
+		this.cmdOut(dim('  Sent with the next message; /image clear to reset; /image remove <n> to drop one.'));
+	}
+
+	/** 当前模型不支持视觉时给出提示（不阻断发送） */
+	private warnIfNotVisionModel(): void {
+		if (isVisionModel(this.config.model, this.visionModels)) return;
+		this.cmdOut(yellow(
+			`Warning: model "${this.config.model}" may not accept image input — use /model to switch to a vision model (e.g. deepseek-flash).`,
+		));
+	}
+
+	/**
+	 * 汇总本轮图片附件：待发列表 + 文本内联引用（@路径 / 拖拽绝对路径）。
+	 *
+	 * 内联解析失败（不存在/非图片）静默忽略；超限等可解释原因给出提示。
+	 * 同一张图（sha256 相同）只发送一次。
+	 */
+	private async prepareImages(content: string): Promise<ImageAttachment[]> {
+		const images: ImageAttachment[] = [...this.pendingImages];
+		const known = new Set(images.map((a) => a.sha256));
+
+		const { images: inline, skipped } = await this.sessionMgr.resolveInlineImages(content);
+		for (const att of inline) {
+			if (known.has(att.sha256)) continue;
+			known.add(att.sha256);
+			images.push(att);
+		}
+
+		for (const miss of skipped) {
+			this.writeOutputLine(yellow(`[image skipped] ${miss.reason}`));
+		}
+		if (images.length > 0) this.warnIfNotVisionModel();
+
+		return images;
+	}
+
+	/** 用户消息回显行：正文（绿）+ 图片附件摘要（灰） */
+	private formatUserEcho(content: string, images: ImageAttachment[]): string {
+		if (images.length === 0) return green(content);
+		const names = images.map((a) => a.name).join(', ');
+		return `${green(content)} ${dim(`[image: ${names}]`)}`;
+	}
+
 	/** /help — 显示可用命令列表 */
 	private showHelp(): true {
 		const cols = getTermSize().cols;
@@ -795,6 +927,7 @@ export class TuiApp {
 			['/async',         'Toggle subagent async mode (ON=non-blocking spawn, OFF=blocking)'],
 			['/memory',        'Long-term memory: /memory [show|candidates|gc|pin|unpin|forget <slug>|on|off|refresh]'],
 			['/yolo',          'Toggle YOLO mode (auto-approve tool execution)'],
+			['/image <path>',  'Attach local image(s) to the next message (JPEG/PNG/GIF/WebP; /image clear to reset)'],
 			['/subagent [name]','Show subagent details (Ctrl+T for list)'],
 			['/subagent_cancel','Cancel subagent(s) via interactive list'],
 			['/compact',       'Compact session context (summarize + restore read files)'],
@@ -1826,7 +1959,7 @@ export class TuiApp {
 		});
 	}
 
-	private async sendMessageStream(content: string): Promise<void> {
+	private async sendMessageStream(content: string, images: ImageAttachment[] = []): Promise<void> {
 		this.setState(AppState.SENDING);
 		this.abortController = new AbortController();
 		// Bug 1+2：输出开始前收起输入区；清空输入框（发送后显示空的可编辑输入框，而非上一轮内容）
@@ -2111,7 +2244,12 @@ export class TuiApp {
 				this.tools.length > 0 && !this.yolo
 					? (toolName, params) => this.requestToolConfirm(toolName, params)
 					: undefined,
+				images,
 			);
+			// 发送成功：已随本轮落盘的附件出队（流式期间新附加的保留给下一条消息）
+			if (images.length > 0) {
+				this.pendingImages = this.pendingImages.filter((p) => !images.includes(p));
+			}
 		} catch (err: any) {
 			// F-5：catch 时进入 ERROR 状态（finally 恢复 IDLE）
 			this.setState(AppState.ERROR);
@@ -2133,11 +2271,12 @@ export class TuiApp {
 				const next = this.nextMessage;
 				this.nextMessage = null;
 				if (next) {
+					const nextImages = await this.prepareImages(next);
 					this.bottom.clearCommandResult(false); // 输入区已收起，不重绘
 					this.printSeparator();
-					this.out.write(green('[You] ') + next + '\r\n\r\n');
+					this.out.write(green('[You] ') + this.formatUserEcho(next, nextImages) + '\r\n\r\n');
 					this.outputEndsWithSeparator = false;
-					await this.sendMessageStream(next);
+					await this.sendMessageStream(next, nextImages);
 				}
 			}
 			// overlay.active：跳过 UI/输入恢复（避免覆盖视图 handler、污染 alternate screen），

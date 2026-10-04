@@ -31,6 +31,9 @@ const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 function makeApp(sessionMgr?: Partial<SessionManager>): TuiApp {
 	const mgr = {
 		getSubagentAsync: () => false,
+		// 图片附件：测试默认无内联引用（视觉输入行为见 tests/core/image*.test.ts）
+		resolveInlineImages: async () => ({ images: [], skipped: [] }),
+		attachImage: async () => { throw new Error('no image in test'); },
 		getSession: () => ({
 			meta: { id: 'm', title: '', created_at: '', updated_at: '', turnCount: 0, totalCost: 0 },
 			turns: [],

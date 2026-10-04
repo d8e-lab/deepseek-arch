@@ -29,6 +29,9 @@ function makeApp(
 ): TuiApp {
 	const mgr = {
 		getSubagentAsync: () => false,
+		// 图片附件：测试默认无内联引用（视觉输入行为见 tests/core/image*.test.ts）
+		resolveInlineImages: async () => ({ images: [], skipped: [] }),
+		attachImage: async () => { throw new Error('no image in test'); },
 		...sessionMgr,
 	} as unknown as SessionManager;
 	const config: TuiConfig = {

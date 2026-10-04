@@ -28,6 +28,7 @@ import { loadSkills, buildSkillListing } from '../core/skill.js';
 import { configureBrowser } from '../tools/browser-state.js';
 import { startApiMonitor } from '../core/api-monitor.js';
 import { getApiRequestsDir } from '../core/workspace-paths.js';
+import { DEFAULT_VISION_MODELS, isVisionModel } from '../core/image.js';
 import { setMemoryStore, setMemoryAlertSink } from '../core/memory-service.js';
 import { readMemorySessionConfig } from '../core/memory-config.js';
 import { existsSync, statSync } from 'node:fs';
@@ -43,12 +44,12 @@ function loadMasterTools(debug = false, selfInteraction = false) {
 	return tools;
 }
 
-const PACKAGE_VERSION = "2.0.2";
+const PACKAGE_VERSION = "2.1.0";
 
 async function createTuiConfig(): Promise<TuiConfig> {
 	const cfg = await ConfigManager.getInstance().load();
 	const providerName = cfg.get<string>('defaults.provider') ?? 'deepseek';
-	const model = cfg.get<string>('defaults.model') ?? 'deepseek-v4-pro';
+	const model = cfg.get<string>('defaults.model') ?? 'deepseek-flash';
 	const baseUrl = cfg.get<string>(`providers.${providerName}.base_url`) ?? 'https://api.deepseek.com';
 	// api_key：配置优先，回退到 DEEPSEEK_API_KEY 环境变量
 	const apiKey = cfg.get<string>(`providers.${providerName}.api_key`)
@@ -62,6 +63,7 @@ async function createTuiConfig(): Promise<TuiConfig> {
 		apiKey,
 		version: PACKAGE_VERSION,
 		systemPrompt: cfg.get<string>('defaults.system_prompt') ?? 'default',
+		visionModels: cfg.get<string[]>('defaults.vision_models') ?? DEFAULT_VISION_MODELS,
 	};
 }
 
@@ -194,13 +196,27 @@ async function runPromptOnce(
 		await sessionMgr.startNewSession(deriveSessionTitle(prompt));
 	}
 
+	// 图片附件：扫描 prompt 中的 `@路径` / 拖拽绝对路径（与 TUI 同一套识别规则）
+	const { images, skipped } = await sessionMgr.resolveInlineImages(prompt);
+	for (const miss of skipped) {
+		process.stderr.write(`[image skipped] ${miss.reason}\n`);
+	}
+	if (images.length > 0) {
+		process.stderr.write(`[image] ${images.length} attached: ${images.map((a) => a.name).join(', ')}\n`);
+		const visionModels = ConfigManager.getInstance().get<string[]>('defaults.vision_models') ?? DEFAULT_VISION_MODELS;
+		const model = ConfigManager.getInstance().get<string>('defaults.model') ?? 'deepseek-flash';
+		if (!isVisionModel(model, visionModels)) {
+			process.stderr.write(`[warn] model "${model}" may not accept image input — switch to a vision model (e.g. deepseek-flash)\n`);
+		}
+	}
+
 	const turn = await sessionMgr.sendMessageStream(prompt, (event) => {
 		if (event.type === 'tool_call_start' && event.toolName) {
 			process.stderr.write(`[tool] ${event.toolName}\n`);
 		} else if (event.type === 'error' && event.error) {
 			process.stderr.write(`[error] ${event.error}\n`);
 		}
-	});
+	}, undefined, undefined, images);
 
 	if (!turn) {
 		if (!resumeId) await sessionMgr.discardEmptySession();

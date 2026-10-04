@@ -39,7 +39,7 @@ describe('ConfigManager', () => {
       const config = mgr.getResolved();
       expect(config).not.toBeNull();
       expect(config!.defaults.provider).toBe('deepseek');
-      expect(config!.defaults.model).toBe('deepseek-v4-pro');
+      expect(config!.defaults.model).toBe('deepseek-flash');
       expect(config!.providers.deepseek).toBeDefined();
       expect(config!.providers.deepseek.base_url).toBe('https://api.deepseek.com');
     });
@@ -78,7 +78,7 @@ describe('ConfigManager', () => {
 
       expect(mgr.get('providers.deepseek.api_key')).toBe('sk-keep-456');
       // config.toml 已重建
-      expect(mgr.get('defaults.model')).toBe('deepseek-v4-pro');
+      expect(mgr.get('defaults.model')).toBe('deepseek-flash');
       expect(report.createdFiles.filter((f) => f.includes('providers')).length).toBe(0);
     });
 
@@ -147,8 +147,9 @@ describe('ConfigManager', () => {
       await mgr.load();
       expect(mgr.get('defaults')).toEqual({
         provider: 'deepseek',
-        model: 'deepseek-v4-pro',
+        model: 'deepseek-flash',
         system_prompt: 'default',
+        vision_models: ['deepseek-flash', 'deepseek-v4-flash-vision-exp'],
         reasoning_effort: 'high',
         thinking: 'enabled',
         yolo: true,
@@ -165,7 +166,7 @@ describe('ConfigManager', () => {
     it('取嵌套值', async () => {
       const mgr = ConfigManager.getInstance(testDir);
       await mgr.load();
-      expect(mgr.get('defaults.model')).toBe('deepseek-v4-pro');
+      expect(mgr.get('defaults.model')).toBe('deepseek-flash');
       expect(mgr.get('providers.deepseek.base_url')).toBe('https://api.deepseek.com');
     });
 

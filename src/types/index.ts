@@ -15,6 +15,13 @@ export type {
 	RoundUsage,
 } from './chat.js';
 
+// ─── image ───────────────────────────────────────────
+export type {
+	ImageMime,
+	ImageDetail,
+	ImageAttachment,
+} from './image.js';
+
 // ─── session ─────────────────────────────────────────
 export type {
 	SessionMeta,
@@ -41,6 +48,8 @@ export type {
 // ─── api ─────────────────────────────────────────────
 export type {
 	ChatCompletionRequest,
+	ApiContentBlock,
+	ApiMessage,
 	ToolDefinition,
 	ToolCallDelta,
 	ToolCall,

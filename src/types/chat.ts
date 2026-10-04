@@ -3,6 +3,7 @@
  */
 
 import type { TokenUsage } from './token.js';
+import type { ImageAttachment } from './image.js';
 import type { ToolCallRecord } from '../tools/types.js';
 
 /** 消息角色 */
@@ -14,6 +15,13 @@ export interface Message {
 	role: MessageRole;
 	/** 消息正文（assistant 触发 tool_calls 时可为空） */
 	content: string;
+	/**
+	 * 图片附件（仅 user 消息允许；字节存于会话资产目录，此处只存引用）
+	 *
+	 * 发送时由 materializeMessages() 展开为 base64 内容块；
+	 * system / assistant 消息携带图片会被 API 拒绝（400）。
+	 */
+	images?: ImageAttachment[];
 	/**
 	 * 模型思维链内容（reasoning_content）
 	 * 持久化以命中供应商的 prompt kv-cache
