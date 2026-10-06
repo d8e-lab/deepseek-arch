@@ -12,11 +12,19 @@
 
 ```bash
 # GitHub Release 预编译包：含编译产物与依赖，免构建，装完即用
-npm install -g https://github.com/d8e-lab/deepseek-arch/releases/latest/download/deepseek-arch-2.0.1.tgz
+# npm ≥12 默认禁止直接安装远程 tarball URL（allow-remote=none），需显式放开：
+npm install -g --allow-remote=all https://github.com/d8e-lab/deepseek-arch/releases/download/v2.1.0/deepseek-arch-2.1.0.tgz
+```
+
+```bash
+# 或不放开该限制：先下载，再用本地路径安装（任何 npm 版本都适用）
+curl -LO https://github.com/d8e-lab/deepseek-arch/releases/download/v2.1.0/deepseek-arch-2.1.0.tgz
+npm install -g ./deepseek-arch-2.1.0.tgz
 ```
 
 > 本项目**未发布到 npm registry**（不要用 `npm install -g deepseek-arch`）；
-> 下方 AUR 包可能落后于最新 release（2.0.0 / 2.0.1 未同步，AUR 仍为 1.5.3）。
+> 上面的 URL 与文件名都带版本号，升级时把 `2.1.0` 换成目标版本即可。
+> 下方 AUR 包落后于最新 release（仍为 1.5.3，2.0.x / 2.1.0 未同步）。
 
 ### Arch Linux（AUR / 本地构建）
 

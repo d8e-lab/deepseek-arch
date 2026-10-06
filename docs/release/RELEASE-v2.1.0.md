@@ -63,7 +63,14 @@
 **GitHub Release（推荐，无需 AUR）**
 
 ```bash
-npm install -g https://github.com/d8e-lab/deepseek-arch/releases/download/v2.1.0/deepseek-arch-2.1.0.tgz
+# npm ≥12 默认禁止安装远程 tarball URL，需显式放开 allow-remote：
+npm install -g --allow-remote=all https://github.com/d8e-lab/deepseek-arch/releases/download/v2.1.0/deepseek-arch-2.1.0.tgz
+```
+
+```bash
+# 不想放开该限制：先下载再本地安装（任何 npm 版本都适用）
+curl -LO https://github.com/d8e-lab/deepseek-arch/releases/download/v2.1.0/deepseek-arch-2.1.0.tgz
+npm install -g ./deepseek-arch-2.1.0.tgz
 ```
 
 **源码安装**
